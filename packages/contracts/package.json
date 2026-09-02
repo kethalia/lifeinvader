@@ -1,0 +1,11 @@
+{
+  "name": "@lifeinvader/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "forge build",
+    "check": "forge fmt --check",
+    "node": "anvil --host 127.0.0.1 --chain-id 31337",
+    "test": "forge test -vv"
+  }
+}

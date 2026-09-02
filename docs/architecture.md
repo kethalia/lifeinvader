@@ -1,0 +1,43 @@
+# Architecture baseline
+
+This document records the boundaries that future Lifeinvader changes must preserve. Individual protocol decisions will receive focused design documents before their implementation.
+
+## System boundary
+
+Lifeinvader consists of three independently replaceable layers:
+
+1. An ownerless EVM event protocol.
+2. A browser indexer that derives views from canonical logs.
+3. A static client that can be addressed and served by an IPFS CID.
+
+The public chain is the source of truth. Browser storage is a disposable acceleration layer, and media storage is an optional service referenced by content identifiers.
+
+## Core protocol
+
+The core protocol will be deployed without an owner, proxy, fee recipient, pause switch, or privileged mutation path. Social actions append events. Later actions may supersede earlier actions in the client-derived view, but cannot erase history.
+
+The event schema must support efficient filters for the global feed, authors, referenced posts, conversations, and groups. Payload limits and canonical identifiers will be specified before contract implementation.
+
+The same creation bytecode and salt will be used with one canonical CREATE2 factory. A chain is supported only when the expected factory code is available and the predetermined protocol address is empty or already contains the expected runtime code.
+
+## Static client
+
+The web application uses React with Vite because it does not require a server runtime. Production assets use relative paths so a build remains usable beneath CID and gateway path prefixes. Client routes must not rely on an HTTP server fallback.
+
+Wallet transports submit writes. Independently configurable RPC transports serve reads. The application must not ship a mandatory vendor API key.
+
+## Browser indexing
+
+The browser indexer will request logs in bounded block ranges, persist finalized checkpoints locally, or discard and rebuild them, and roll back data affected by reorgs. Screens should request only the event families and indexed topics they need. A new device can always reconstruct its view from RPC without trusting a Lifeinvader service.
+
+The initial interface is allowed to contain fixture content while protocol and indexer work proceeds, but fixtures must be visibly identified and isolated from chain-derived models.
+
+## Media
+
+Posts may reference an IPFS root CID and an optional verifiable storage receipt. The core contract will not collect a media fee that it cannot turn into storage. Supported storage adapters should route user funds directly to storage providers or proof-linked payment contracts.
+
+Media upload is not atomic with an EVM event: bytes must reach an IPFS or storage-provider node before a useful CID can be published. The interface must distinguish content addressing from proven persistence.
+
+## Local validation
+
+Contract tests use Foundry and Anvil. Browser wallet flows will be exercised against an isolated Anvil chain, including a fork when an integration depends on deployed chain contracts. No development milestone should require an IPFS deployment before the release phase.

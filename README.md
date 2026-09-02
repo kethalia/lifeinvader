@@ -1,5 +1,44 @@
 # Lifeinvader
 
-Lifeinvader is a permissionless, deliberately public social network whose client can be hosted on IPFS and whose social interactions are recorded directly on EVM chains.
+Lifeinvader is a deliberately public, permissionless social network. Its static client is designed to run from IPFS, while posts and social interactions are reconstructed directly from EVM event logs.
 
-The architecture and implementation are currently being planned.
+The project is an unofficial parody inspired by the fictional social network in Grand Theft Auto V. It is not affiliated with or endorsed by Rockstar Games or Take-Two Interactive, and it does not use their artwork or game assets.
+
+## Product principles
+
+- No Lifeinvader application server or hosted database.
+- No protocol owner, administrator, upgrade key, or deletion authority.
+- Posts, comments, reposts, reactions, follows, public direct messages, and group messages are on-chain actions.
+- "Direct messages" are intentionally public. The interface must never imply otherwise.
+- Media is content-addressed; paid persistence will be handled through optional storage-market integrations without turning the core protocol into a treasury.
+- RPC history is fetched in bounded ranges and cached only on the user's device.
+
+## Workspace
+
+This repository is a pnpm and Turborepo monorepo.
+
+```text
+apps/web/           Static React and Vite client
+packages/contracts/ Foundry contracts and tests
+docs/               Protocol and architecture decisions
+```
+
+### Prerequisites
+
+- Node.js 24 or newer
+- pnpm 11.21.0 (Corepack can install the pinned version)
+- Foundry 1.7 or newer
+
+### Commands
+
+```bash
+corepack enable
+pnpm install
+pnpm check
+pnpm test
+pnpm build
+```
+
+Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`.
+
+The project is under active construction. Nothing has been deployed to an EVM network or IPFS.
