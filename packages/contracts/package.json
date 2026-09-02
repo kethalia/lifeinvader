@@ -5,7 +5,7 @@
   "scripts": {
     "build": "forge build",
     "check": "forge fmt --check",
-    "node": "anvil --host 0.0.0.0 --chain-id 31337",
+    "node": "anvil --host 127.0.0.1 --chain-id 31337",
     "test": "forge test -vv"
   }
 }
