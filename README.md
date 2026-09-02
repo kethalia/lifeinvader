@@ -19,7 +19,7 @@ This repository is a pnpm and Turborepo monorepo.
 
 ```text
 apps/web/           Static React and Vite client
-packages/contracts/ Foundry contracts and tests
+packages/contracts/ Ownerless event protocol and Foundry tests
 docs/               Protocol and architecture decisions
 ```
 

@@ -1,8 +1,8 @@
 # Lifeinvader contracts
 
-This workspace contains the ownerless Lifeinvader event protocol, deterministic deployment scripts, and Foundry tests.
+This workspace contains the ownerless Lifeinvader event protocol and its Foundry tests. Deterministic deployment scripts will land in a focused milestone.
 
-The protocol contract will be introduced in a focused change after its event schema and identifiers are specified. The current smoke test proves that the pinned compiler and Foundry configuration run through the root Turborepo tasks.
+`src/Lifeinvader.sol` emits bounded, query-friendly events for publications, relationships, profiles, deliberately public direct messages, and public group chats. The contract has no privileged roles or payment receiver. See [`docs/protocol-v1.md`](../../docs/protocol-v1.md) for the derivation rules and topic layout.
 
 ## Commands
 
