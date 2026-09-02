@@ -41,4 +41,8 @@ pnpm build
 
 Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`.
 
+## Protocol address
+
+On supported EVM chains, Lifeinvader v1 deterministically deploys to `0x779DEb5AD0B27BF40BDBFF3A81caB2d9049d7ad1`. Deployment is permissionless and grants the sender no role. The frozen CREATE2 inputs and local deployment workflow are documented in [`docs/deployment.md`](./docs/deployment.md).
+
 The project is under active construction. Nothing has been deployed to an EVM network or IPFS.

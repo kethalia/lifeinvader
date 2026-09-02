@@ -18,7 +18,7 @@ The core protocol is implemented without an owner, proxy, fee recipient, pause s
 
 The event schema supports efficient filters for the global feed, authors, referenced posts, conversations, and groups. Its payload limits, identifiers, and topic positions are specified in [`protocol-v1.md`](./protocol-v1.md).
 
-The same creation bytecode and salt will be used with one canonical CREATE2 factory. A chain is supported only when the expected factory code is available and the predetermined protocol address is empty or already contains the expected runtime code.
+The frozen creation bytecode and v1 salt use the canonical EIP-7997 CREATE2 factory. A chain is supported only when the expected factory code is available and the predetermined protocol address is empty or already contains the expected runtime code. Exact inputs and hashes are recorded in [`deployment.md`](./deployment.md).
 
 ## Static client
 
