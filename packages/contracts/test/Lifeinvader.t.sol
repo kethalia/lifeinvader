@@ -200,6 +200,11 @@ contract LifeinvaderTest {
         lifeinvader.setFollow(address(0), true);
     }
 
+    function test_setFollowRejectsTheCaller() public {
+        vm.expectRevert(Lifeinvader.SelfFollow.selector);
+        lifeinvader.setFollow(address(this), true);
+    }
+
     function test_setProfileEmitsCompleteSnapshot() public {
         bytes memory avatarCid = hex"01701220aabbccdd";
 

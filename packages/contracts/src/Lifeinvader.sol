@@ -33,6 +33,7 @@ contract Lifeinvader {
     error UnknownComment(uint256 commentId);
     error UnknownGroup(uint256 groupId);
     error ZeroAddress();
+    error SelfFollow();
 
     event PostPublished(
         uint256 indexed postId, address indexed author, string body, bytes mediaCid
@@ -129,6 +130,7 @@ contract Lifeinvader {
     /// @notice Appends the caller's latest follow state for another account.
     function setFollow(address followed, bool following) external {
         if (followed == address(0)) revert ZeroAddress();
+        if (followed == msg.sender) revert SelfFollow();
         emit FollowSet(msg.sender, followed, following);
     }
 
