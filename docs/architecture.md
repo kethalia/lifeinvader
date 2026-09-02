@@ -14,9 +14,9 @@ The public chain is the source of truth. Browser storage is a disposable acceler
 
 ## Core protocol
 
-The core protocol will be deployed without an owner, proxy, fee recipient, pause switch, or privileged mutation path. Social actions append events. Later actions may supersede earlier actions in the client-derived view, but cannot erase history.
+The core protocol is implemented without an owner, proxy, fee recipient, pause switch, or privileged mutation path. Social actions append events. Later actions may supersede earlier actions in the client-derived view, but cannot erase history.
 
-The event schema must support efficient filters for the global feed, authors, referenced posts, conversations, and groups. Payload limits and canonical identifiers will be specified before contract implementation.
+The event schema supports efficient filters for the global feed, authors, referenced posts, conversations, and groups. Its payload limits, identifiers, and topic positions are specified in [`protocol-v1.md`](./protocol-v1.md).
 
 The same creation bytecode and salt will be used with one canonical CREATE2 factory. A chain is supported only when the expected factory code is available and the predetermined protocol address is empty or already contains the expected runtime code.
 
