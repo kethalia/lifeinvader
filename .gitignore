@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.pnpm-store/
+.turbo/
+node_modules/
+*.tsbuildinfo
+
+apps/web/coverage/
+apps/web/dist/
+
+packages/contracts/broadcast/
+packages/contracts/cache/
+packages/contracts/out/

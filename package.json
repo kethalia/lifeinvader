@@ -1,0 +1,20 @@
+{
+  "name": "lifeinvader",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "check": "turbo run check && prettier --check .",
+    "dev": "turbo run dev --parallel",
+    "format": "prettier --write .",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "prettier": "3.9.6",
+    "turbo": "2.10.12"
+  }
+}
