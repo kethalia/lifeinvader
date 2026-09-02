@@ -45,7 +45,13 @@ The core contract validates referenced post and comment identifiers against its 
 
 ## Public messaging
 
-`DirectMessageSent` is direct only in the sense that it names a recipient. Its body, media CID, sender, recipient, and conversation are public. The conversation identifier is the hash of the two participant addresses sorted numerically, so either participant computes the same value.
+`DirectMessageSent` is direct only in the sense that it names a recipient. Its body, media CID, sender, recipient, and conversation are public. To derive the conversation identifier:
+
+1. Sort the two addresses by their unsigned 160-bit numeric values.
+2. Concatenate the lower address's 20 raw bytes with the higher address's 20 raw bytes, without padding or length prefixes.
+3. Take the Keccak-256 hash of that 40-byte sequence.
+
+This is equivalent to `keccak256(abi.encodePacked(lower, higher))` in Solidity. Clients may instead call the contract's pure `conversationId(address,address)` function. Either participant therefore computes the same indexed topic.
 
 Groups are immutable public channels:
 
