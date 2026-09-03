@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 
-import { describeRpcError, parseChainId } from './ethereum'
+import {
+  beforeDeadline,
+  describeRpcError,
+  parseChainId,
+  WALLET_READ_TIMEOUT_MS,
+} from './ethereum'
 import {
   deployProtocol,
   getPostBodyByteLength,
@@ -108,24 +113,29 @@ export function WalletPanel() {
 
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
+    const provider = session.provider
     let selectedLocalChain = session.chainId === LOCAL_CHAIN_ID
     let verifiedLocalChain = false
     setInspection(undefined)
     setInspectionError(undefined)
-    if (!session.provider || session.status !== 'connected') {
+    if (!provider || session.status !== 'connected') {
       setLocalChainState('not-selected')
       return
     }
 
     try {
       const selectedChainId = parseChainId(
-        await session.provider.request({ method: 'eth_chainId' }),
+        await beforeDeadline(
+          () => provider.request({ method: 'eth_chainId' }),
+          Date.now() + WALLET_READ_TIMEOUT_MS,
+          () => new Error('Wallet chain inspection timed out.'),
+        ),
       )
       selectedLocalChain = selectedChainId === LOCAL_CHAIN_ID
       if (selectedChainId === LOCAL_CHAIN_ID) {
         if (requestId === inspectionSequence.current)
           setLocalChainState('checking')
-        await verifyLocalChain(session.provider)
+        await verifyLocalChain(provider)
         verifiedLocalChain = true
         if (requestId === inspectionSequence.current)
           setLocalChainState('verified')
@@ -133,7 +143,7 @@ export function WalletPanel() {
         setLocalChainState('not-selected')
       }
 
-      const nextInspection = await inspectProtocol(session.provider)
+      const nextInspection = await inspectProtocol(provider)
       if (requestId === inspectionSequence.current)
         setInspection(nextInspection)
     } catch (error) {

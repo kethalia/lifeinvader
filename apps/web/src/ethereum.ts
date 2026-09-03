@@ -11,6 +11,28 @@ export interface Eip1193Provider {
   removeListener?(event: string, listener: (...args: unknown[]) => void): void
 }
 
+export const WALLET_READ_TIMEOUT_MS = 15_000
+
+export async function beforeDeadline<T>(
+  operation: () => Promise<T>,
+  deadline: number,
+  timeoutError: () => Error,
+): Promise<T> {
+  const remainingMs = deadline - Date.now()
+  if (remainingMs <= 0) throw timeoutError()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(timeoutError()), remainingMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export function isEip1193Provider(value: unknown): value is Eip1193Provider {
   return (
     typeof value === 'object' &&

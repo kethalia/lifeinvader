@@ -30,13 +30,11 @@ const BLOCK_HASH =
 const OTHER_BLOCK_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
-
 function providerFrom(
   request: (args: ProviderRequest) => Promise<unknown>,
 ): Eip1193Provider {
   return { request }
 }
-
 function fingerprintProvider(
   blockHash = BLOCK_HASH,
   chainId = '0x7a69',
@@ -51,19 +49,16 @@ function fingerprintProvider(
     throw new Error(`Unexpected method: ${method}`)
   })
 }
-
 describe('protocol configuration', () => {
   it('keeps the browser deployment inputs frozen to the published v1 address', () => {
     expect(() => assertProtocolConfiguration()).not.toThrow()
     expect(FACTORY_CODE_HASH).toMatch(/^0x[0-9a-f]{64}$/)
   })
-
   it('rejects chain quantities wider than an EVM word', () => {
     expect(() => parseChainId(`0x${'1'.repeat(65)}`)).toThrow(
       /invalid chain identifier/i,
     )
   })
-
   it('recognizes a chain where the canonical factory can deploy v1', async () => {
     const provider = providerFrom(async ({ method, params }) => {
       expect(method).toBe('eth_getCode')
@@ -76,7 +71,6 @@ describe('protocol configuration', () => {
       kind: 'deployable',
     })
   })
-
   it.each([
     ['missing-factory', '0x'],
     ['unsafe-factory', '0x00'],
@@ -90,7 +84,6 @@ describe('protocol configuration', () => {
       await expect(inspectProtocol(provider)).resolves.toEqual({ kind })
     },
   )
-
   it('rejects unexpected code at the predetermined protocol address', async () => {
     const request = vi.fn(async () => '0x00')
     await expect(inspectProtocol(providerFrom(request))).resolves.toEqual({
@@ -98,7 +91,6 @@ describe('protocol configuration', () => {
     })
     expect(request).toHaveBeenCalledTimes(1)
   })
-
   it('bounds stalled contract-code reads', async () => {
     const request = vi.fn(() => new Promise<unknown>(() => undefined))
     await expect(inspectProtocol(providerFrom(request), 5)).rejects.toThrow(
@@ -107,13 +99,11 @@ describe('protocol configuration', () => {
     expect(request).toHaveBeenCalledTimes(1)
   })
 })
-
 describe('post transactions', () => {
   it('measures the same UTF-8 bytes the contract limits', () => {
     expect(getPostBodyByteLength('invade')).toBe(6)
     expect(getPostBodyByteLength('👁️')).toBe(7)
   })
-
   it('parses a successful transaction receipt', async () => {
     const provider = providerFrom(async () => ({
       blockNumber: '0x2a',
@@ -124,7 +114,6 @@ describe('post transactions', () => {
       waitForTransactionReceipt(provider, TRANSACTION_HASH),
     ).resolves.toEqual({ blockNumber: 42n, hash: TRANSACTION_HASH })
   })
-
   it('rejects an oversized UTF-8 body before opening the wallet', async () => {
     const request = vi.fn()
     await expect(
@@ -137,7 +126,6 @@ describe('post transactions', () => {
     ).rejects.toThrow(/4096 UTF-8 bytes/i)
     expect(request).not.toHaveBeenCalled()
   })
-
   it('surfaces an on-chain revert from the receipt', async () => {
     const provider = providerFrom(async () => ({
       blockNumber: '0x2a',
@@ -152,7 +140,6 @@ describe('post transactions', () => {
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toMatch(/reverted on-chain/i)
   })
-
   it('stops polling when the receipt provider rejects', async () => {
     const request = vi.fn(async () => {
       throw new Error('Wallet disconnected.')
@@ -162,7 +149,6 @@ describe('post transactions', () => {
     ).rejects.toThrow(/wallet disconnected/i)
     expect(request).toHaveBeenCalledTimes(1)
   })
-
   it('rejects a receipt for a different transaction', async () => {
     const provider = providerFrom(async () => ({
       blockNumber: '0x2a',
@@ -173,7 +159,6 @@ describe('post transactions', () => {
       waitForTransactionReceipt(provider, TRANSACTION_HASH),
     ).rejects.toThrow(/different transaction/i)
   })
-
   it('bounds repeated null receipts without discarding the hash', async () => {
     const request = vi.fn(async () => null)
     await expect(
@@ -184,7 +169,6 @@ describe('post transactions', () => {
     ).rejects.toThrow(TRANSACTION_HASH)
     expect(request).toHaveBeenCalledTimes(1)
   })
-
   it('times out a receipt request that never settles', async () => {
     const request = vi.fn(() => new Promise<unknown>(() => undefined))
     await expect(
@@ -194,7 +178,6 @@ describe('post transactions', () => {
     ).rejects.toThrow(TRANSACTION_HASH)
     expect(request).toHaveBeenCalledTimes(1)
   })
-
   it('rechecks the selected chain after reading a receipt', async () => {
     let changed = false
     const assertCurrentChain = vi.fn(async () => {
@@ -216,7 +199,6 @@ describe('post transactions', () => {
     expect(assertCurrentChain).toHaveBeenCalledTimes(2)
   })
 })
-
 describe('transaction chain binding', () => {
   it('rejects a chain different from the click-time selection', async () => {
     const request = vi.fn(async ({ method }: ProviderRequest) => {
@@ -231,7 +213,6 @@ describe('transaction chain binding', () => {
       expect.objectContaining({ method: 'eth_getCode' }),
     )
   })
-
   it('does not open the transaction request after the inspected chain changes', async () => {
     let handleChainChanged: ((...args: unknown[]) => void) | undefined
     const request = vi.fn(async ({ method, params }: ProviderRequest) => {
@@ -269,7 +250,6 @@ describe('transaction chain binding', () => {
       ),
     ).toBe(false)
   })
-
   it('reports the hash when the wallet changes chain during submission', async () => {
     let handleChainChanged: ((...args: unknown[]) => void) | undefined
     const onSubmitted = vi.fn()
@@ -310,7 +290,6 @@ describe('transaction chain binding', () => {
       ),
     ).toBe(false)
   })
-
   it('does not submit after the selected account changes', async () => {
     let handleAccountsChanged: ((...args: unknown[]) => void) | undefined
     const request = vi.fn(async ({ method, params }: ProviderRequest) => {
@@ -347,7 +326,6 @@ describe('transaction chain binding', () => {
     ).toBe(false)
   })
 })
-
 describe('local wallet network', () => {
   it('verifies the wallet against a block fingerprint from loopback Anvil', async () => {
     await expect(
@@ -368,7 +346,6 @@ describe('local wallet network', () => {
       verifyLocalChain(fingerprintProvider(), stalled, 5),
     ).rejects.toThrow(/does not match Anvil/i)
   })
-
   it('rejects oversized block quantities before conversion', async () => {
     const localProvider = providerFrom(async ({ method }) => {
       if (method === 'eth_chainId') return '0x7a69'
@@ -379,7 +356,6 @@ describe('local wallet network', () => {
       verifyLocalChain(fingerprintProvider(), localProvider),
     ).rejects.toThrow(/invalid local block number/i)
   })
-
   it('adds an unknown Anvil chain and selects it when still required', async () => {
     let firstSwitch = true
     let selected = false
@@ -411,7 +387,6 @@ describe('local wallet network', () => {
       }),
     ])
   })
-
   it('does not repeat the switch when adding the chain selected it', async () => {
     let firstSwitch = true
     const request = vi.fn(async ({ method }: ProviderRequest) => {

@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Address } from 'viem'
 
 import {
+  beforeDeadline,
   describeRpcError,
   parseAccounts,
   parseChainId,
+  WALLET_READ_TIMEOUT_MS,
   type Eip1193Provider,
 } from './ethereum'
 import type { DiscoveredWallet } from './wallet-providers'
@@ -22,18 +24,31 @@ const INITIAL_SESSION: WalletSession = { status: 'disconnected' }
 
 async function readConnection(provider: Eip1193Provider) {
   let revision = 0
+  let disconnected = false
   const trackChange = () => {
     revision += 1
   }
+  const trackDisconnect = () => {
+    disconnected = true
+  }
   provider.on?.('accountsChanged', trackChange)
   provider.on?.('chainChanged', trackChange)
+  provider.on?.('disconnect', trackDisconnect)
   try {
+    const deadline = Date.now() + WALLET_READ_TIMEOUT_MS
+    const read = (method: string) =>
+      beforeDeadline(
+        () => provider.request({ method }),
+        deadline,
+        () => new Error('Wallet state read timed out.'),
+      )
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const snapshotRevision = revision
       const [accountsValue, chainIdValue] = await Promise.all([
-        provider.request({ method: 'eth_accounts' }),
-        provider.request({ method: 'eth_chainId' }),
+        read('eth_accounts'),
+        read('eth_chainId'),
       ])
+      if (disconnected) throw new Error('The wallet disconnected.')
       if (snapshotRevision === revision) {
         return {
           account: parseAccounts(accountsValue)[0],
@@ -45,6 +60,7 @@ async function readConnection(provider: Eip1193Provider) {
   } finally {
     provider.removeListener?.('accountsChanged', trackChange)
     provider.removeListener?.('chainChanged', trackChange)
+    provider.removeListener?.('disconnect', trackDisconnect)
   }
 }
 

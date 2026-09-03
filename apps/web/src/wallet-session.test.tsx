@@ -13,6 +13,7 @@ describe('useWalletSession', () => {
     const newAccount = '0x000000000000000000000000000000000000b0b0'
     let selectedAccount = oldAccount
     let chainReads = 0
+    let disconnectOnRead = false
     const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
     const emit = (event: string, value: unknown) =>
       listeners.get(event)?.forEach((listener) => listener(value))
@@ -26,6 +27,7 @@ describe('useWalletSession', () => {
             selectedAccount = newAccount
             emit('accountsChanged', [newAccount])
           }
+          if (disconnectOnRead) emit('disconnect', undefined)
           return '0x1'
         }
         throw new Error(`Unexpected method: ${method}`)
@@ -64,6 +66,14 @@ describe('useWalletSession', () => {
       account: newAccount,
       chainId: 1n,
       status: 'connected',
+    })
+
+    disconnectOnRead = true
+    await act(async () => result.current.refresh())
+    expect(result.current.session).toMatchObject({
+      account: undefined,
+      chainId: undefined,
+      status: 'disconnected',
     })
   })
 })

@@ -65,9 +65,7 @@ describe('App', () => {
     const provider = {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
-          if (method === 'eth_requestAccounts') {
-            return [ACCOUNT]
-          }
+          if (method === 'eth_requestAccounts') return [ACCOUNT]
           if (method === 'eth_accounts') return [ACCOUNT]
           if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_getCode') {
@@ -81,18 +79,13 @@ describe('App', () => {
         },
       ),
     }
-    const stopAnnouncing = announceWallet(
-      'Test Wallet',
-      'test-wallet',
-      provider,
-    )
+    const stop = announceWallet('Test Wallet', 'test-wallet', provider)
 
     render(<App />)
 
-    const walletButton = await screen.findByRole('button', {
-      name: /connect test wallet/i,
-    })
-    fireEvent.click(walletButton)
+    fireEvent.click(
+      await screen.findByRole('button', { name: /connect test wallet/i }),
+    )
 
     expect(await screen.findByText('1')).toBeTruthy()
     fireEvent.click(
@@ -102,7 +95,7 @@ describe('App', () => {
       await screen.findByText(/verified Lifeinvader v1 code is ready/i),
     ).toBeTruthy()
 
-    stopAnnouncing()
+    stop()
   })
 
   it('does not trust a reused local chain ID with a different fingerprint', async () => {
@@ -124,9 +117,7 @@ describe('App', () => {
 
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
-        if (method === 'eth_requestAccounts') {
-          return [ACCOUNT]
-        }
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
         if (method === 'eth_accounts') return [ACCOUNT]
         if (method === 'eth_chainId') return '0x7a69'
         if (method === 'eth_getBlockByNumber') {
@@ -135,11 +126,7 @@ describe('App', () => {
         throw new Error(`Unexpected method: ${method}`)
       }),
     }
-    const stopAnnouncing = announceWallet(
-      'Other Local Wallet',
-      'other-local-wallet',
-      provider,
-    )
+    const stop = announceWallet('Other Local Wallet', 'other', provider)
 
     render(<App />)
     fireEvent.click(
@@ -154,7 +141,7 @@ describe('App', () => {
     ).toBeNull()
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
 
-    stopAnnouncing()
+    stop()
   })
 
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
@@ -173,9 +160,7 @@ describe('App', () => {
     const provider = {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
-          if (method === 'eth_requestAccounts') {
-            return [ACCOUNT]
-          }
+          if (method === 'eth_requestAccounts') return [ACCOUNT]
           if (method === 'eth_accounts') return [ACCOUNT]
           if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_getCode') {
@@ -226,11 +211,7 @@ describe('App', () => {
         },
       ),
     }
-    const stopAnnouncing = announceWallet(
-      'Pending Wallet',
-      'pending-wallet',
-      provider,
-    )
+    const stop = announceWallet('Pending Wallet', 'pending', provider)
 
     render(<App />)
     fireEvent.click(
@@ -302,6 +283,6 @@ describe('App', () => {
     expect(await screen.findByText(/confirmed in block 44/i)).toBeTruthy()
     expect((textarea as HTMLTextAreaElement).value).toBe('')
 
-    stopAnnouncing()
+    stop()
   })
 })
