@@ -14,6 +14,15 @@ const OTHER_TOPIC = `0x${'22'.repeat(32)}` as Hex
 const OTHER_ADDRESS = '0x000000000000000000000000000000000000b0b0'
 const FILTER = { address: PROTOCOL_ADDRESS, topics: [TOPIC] } as const
 
+function eventCursor(startBlock = 0n, rangeSize?: number, finalityDepth = 0n) {
+  return createEventCursor({
+    chainId: 1n,
+    filter: FILTER,
+    finalityDepth,
+    rangeSize,
+    startBlock,
+  })
+}
 function quantity(value: bigint | number) {
   return `0x${BigInt(value).toString(16)}`
 }
@@ -50,6 +59,7 @@ type ChainProviderOptions = {
   getLogs?: (fromBlock: bigint, toBlock: bigint) => unknown
   hashFor?: (block: bigint) => Hex
   head?: () => bigint
+  missingBlock?: (block: bigint) => boolean
 }
 function chainProvider(options: ChainProviderOptions = {}) {
   const request = vi.fn(async ({ method, params }: ProviderRequest) => {
@@ -59,6 +69,7 @@ function chainProvider(options: ChainProviderOptions = {}) {
       const [tag] = params as [string, boolean]
       const block = BigInt(tag)
       if (block > (options.head?.() ?? 20n)) return null
+      if (options.missingBlock?.(block)) return null
       return {
         hash: options.hashFor?.(block) ?? blockHash(block),
         number: tag,
@@ -93,9 +104,8 @@ describe('bounded event synchronization', () => {
           .filter((block) => block >= fromBlock && block <= toBlock)
           .map((block) => rpcLog(block)),
     })
-    const cursor = createEventCursor(1n, FILTER, 10n, 4)
+    const cursor = eventCursor(10n, 4, 2n)
     const result = await syncEventLogs(provider, FILTER, cursor, {
-      finalityDepth: 2n,
       maxLogsPerRange: 4,
       maxRangeSize: 4,
       maxRanges: 2,
@@ -129,17 +139,11 @@ describe('bounded event synchronization', () => {
         return [rpcLog(1n)]
       },
     })
-    const result = await syncEventLogs(
-      provider,
-      FILTER,
-      createEventCursor(1n, FILTER, 0n, 8),
-      {
-        finalityDepth: 0n,
-        maxLogsPerRange: 2,
-        maxRangeSize: 8,
-        maxRanges: 3,
-      },
-    )
+    const result = await syncEventLogs(provider, FILTER, eventCursor(0n, 8), {
+      maxLogsPerRange: 2,
+      maxRangeSize: 8,
+      maxRanges: 3,
+    })
     expect(requestedLogRanges(request)).toEqual([
       [0n, 7n],
       [0n, 3n],
@@ -157,8 +161,7 @@ describe('bounded event synchronization', () => {
       },
     })
     await expect(
-      syncEventLogs(provider, FILTER, createEventCursor(1n, FILTER, 0n, 8), {
-        finalityDepth: 0n,
+      syncEventLogs(provider, FILTER, eventCursor(0n, 8), {
         maxRanges: 1,
       }),
     ).rejects.toThrow(/rate limit exceeded/i)
@@ -170,8 +173,7 @@ describe('bounded event synchronization', () => {
       getLogs: () => [rpcLog(0n), rpcLog(0n, { logIndex: 1 })],
     })
     await expect(
-      syncEventLogs(provider, FILTER, createEventCursor(1n, FILTER, 0n, 1), {
-        finalityDepth: 0n,
+      syncEventLogs(provider, FILTER, eventCursor(0n, 1), {
         maxLogsPerRange: 1,
         maxRanges: 1,
       }),
@@ -183,8 +185,7 @@ describe('bounded event synchronization', () => {
     const result = await syncEventLogs(
       provider,
       FILTER,
-      createEventCursor(1n, FILTER, 0n),
-      { finalityDepth: 12n },
+      eventCursor(0n, undefined, 12n),
     )
     expect(result.safeHead).toBeUndefined()
     expect(result.caughtUp).toBe(true)
@@ -208,24 +209,17 @@ describe('canonical checkpoints', () => {
           .map((block) => rpcLog(block, { branch: currentBranch(block) }))
       },
     })
-    const first = await syncEventLogs(
-      provider,
-      FILTER,
-      createEventCursor(1n, FILTER, 0n, 4),
-      {
-        finalityDepth: 0n,
-        maxLogsPerRange: 2,
-        maxRangeSize: 4,
-        maxRanges: 2,
-      },
-    )
+    const first = await syncEventLogs(provider, FILTER, eventCursor(0n, 4), {
+      maxLogsPerRange: 2,
+      maxRangeSize: 4,
+      maxRanges: 2,
+    })
     expect(
       first.cursor.checkpoints.map(({ blockNumber }) => blockNumber),
     ).toEqual([3n, 7n])
     head = 9n
     reorgFrom = 4n
     const second = await syncEventLogs(provider, FILTER, first.cursor, {
-      finalityDepth: 0n,
       maxLogsPerRange: 2,
       maxRangeSize: 4,
       maxRanges: 2,
@@ -234,6 +228,38 @@ describe('canonical checkpoints', () => {
     expect(second.logs.map((log) => log.blockNumber)).toEqual([5n, 8n])
     expect(second.cursor.nextBlock).toBe(10n)
     expect(second.caughtUp).toBe(true)
+  })
+
+  it('preserves the cursor when the sampled head is temporarily behind', async () => {
+    let head = 7n
+    const { provider, request } = chainProvider({ head: () => head })
+    const cursor = await syncEventLogs(provider, FILTER, eventCursor(0n, 4), {
+      maxRangeSize: 4,
+      maxRanges: 2,
+    })
+    const logRequests = requestedLogRanges(request).length
+    head = 3n
+    await expect(
+      syncEventLogs(provider, FILTER, cursor.cursor),
+    ).rejects.toThrow(/head is behind the event cursor checkpoint/i)
+    expect(requestedLogRanges(request)).toHaveLength(logRequests)
+    expect(cursor.cursor.nextBlock).toBe(8n)
+  })
+
+  it('does not use a missing checkpoint block as reorg evidence', async () => {
+    const { provider: original } = chainProvider({ head: () => 3n })
+    const cursor = await syncEventLogs(original, FILTER, eventCursor(0n, 4), {
+      maxRangeSize: 4,
+      maxRanges: 1,
+    })
+    const { provider: incomplete } = chainProvider({
+      head: () => 3n,
+      missingBlock: (block) => block === 3n,
+    })
+    await expect(
+      syncEventLogs(incomplete, FILTER, cursor.cursor),
+    ).rejects.toThrow(/could not serve expected block 3/i)
+    expect(cursor.cursor.nextBlock).toBe(4n)
   })
 
   it('discards an unstable range and retries its replacement', async () => {
@@ -249,17 +275,11 @@ describe('canonical checkpoints', () => {
         return result
       },
     })
-    const result = await syncEventLogs(
-      provider,
-      FILTER,
-      createEventCursor(1n, FILTER, 0n, 4),
-      {
-        finalityDepth: 0n,
-        maxLogsPerRange: 2,
-        maxRangeSize: 4,
-        maxRanges: 2,
-      },
-    )
+    const result = await syncEventLogs(provider, FILTER, eventCursor(0n, 4), {
+      maxLogsPerRange: 2,
+      maxRangeSize: 4,
+      maxRanges: 2,
+    })
     expect(logRequests).toBe(2)
     expect(result.logs).toHaveLength(1)
     expect(result.logs[0]?.blockHash).toBe(blockHash(1n, 'b'))
@@ -271,18 +291,15 @@ describe('canonical checkpoints', () => {
       head: () => 7n,
       getLogs: () => [],
     })
-    const first = await syncEventLogs(
-      original,
-      FILTER,
-      createEventCursor(1n, FILTER, 0n, 4),
-      { finalityDepth: 0n, maxRangeSize: 4, maxRanges: 2 },
-    )
+    const first = await syncEventLogs(original, FILTER, eventCursor(0n, 4), {
+      maxRangeSize: 4,
+      maxRanges: 2,
+    })
     const { provider: replacement } = chainProvider({
       head: () => 7n,
       hashFor: (block) => blockHash(block, 'b'),
     })
     const rebuilt = await syncEventLogs(replacement, FILTER, first.cursor, {
-      finalityDepth: 0n,
       maxRanges: 1,
       maxReorgChecks: 1,
     })
@@ -313,16 +330,13 @@ describe('canonical checkpoints', () => {
           .map((block) => rpcLog(block, { branch: 'b' }))
       },
     })
-    const original = await syncEventLogs(
-      provider,
-      FILTER,
-      createEventCursor(1n, FILTER, 0n, 4),
-      { finalityDepth: 0n, maxRangeSize: 4, maxRanges: 2 },
-    )
+    const original = await syncEventLogs(provider, FILTER, eventCursor(0n, 4), {
+      maxRangeSize: 4,
+      maxRanges: 2,
+    })
     rebuilding = true
     head = 11n
     const result = await syncEventLogs(provider, FILTER, original.cursor, {
-      finalityDepth: 0n,
       maxLogsPerRange: 2,
       maxRangeSize: 4,
       maxRanges: 2,
@@ -348,7 +362,7 @@ describe('untrusted RPC and cursor data', () => {
 
   it('rejects a cursor for another filter before opening the RPC', async () => {
     const request = vi.fn()
-    const cursor = createEventCursor(1n, FILTER, 0n)
+    const cursor = eventCursor()
     await expect(
       syncEventLogs(
         { request },
@@ -362,7 +376,7 @@ describe('untrusted RPC and cursor data', () => {
   it('rejects a cursor for another RPC chain', async () => {
     const { provider } = chainProvider({ chainId: 2n })
     await expect(
-      syncEventLogs(provider, FILTER, createEventCursor(1n, FILTER, 0n)),
+      syncEventLogs(provider, FILTER, eventCursor()),
     ).rejects.toThrow(/different chain/i)
   })
 
@@ -372,7 +386,7 @@ describe('untrusted RPC and cursor data', () => {
     ['topics', { topics: [OTHER_TOPIC] }],
     ['block number', { blockNumber: '0x1' }],
     ['block hash', { blockHash: OTHER_TOPIC }],
-    ['log data', { data: `0x${'00'.repeat(16_385)}` }],
+    ['log data', { data: `0x${'00'.repeat(8_193)}` }],
     ['log index', { logIndex: `0x${'1'.repeat(65)}` }],
     ['transaction hash', { transactionHash: '0x01' }],
     ['topics', { topics: Array(5).fill(TOPIC) }],
@@ -382,8 +396,7 @@ describe('untrusted RPC and cursor data', () => {
       getLogs: () => [rpcLog(0n, { overrides })],
     })
     await expect(
-      syncEventLogs(provider, FILTER, createEventCursor(1n, FILTER, 0n, 1), {
-        finalityDepth: 0n,
+      syncEventLogs(provider, FILTER, eventCursor(0n, 1), {
         maxRangeSize: 1,
         maxRanges: 1,
       }),
@@ -397,18 +410,30 @@ describe('untrusted RPC and cursor data', () => {
       getLogs: () => [duplicate, duplicate],
     })
     await expect(
-      syncEventLogs(provider, FILTER, createEventCursor(1n, FILTER, 0n, 1), {
-        finalityDepth: 0n,
+      syncEventLogs(provider, FILTER, eventCursor(0n, 1), {
         maxRangeSize: 1,
         maxRanges: 1,
       }),
     ).rejects.toThrow(/duplicate event log/i)
   })
 
+  it('rejects mixed block hashes at one height', async () => {
+    const { provider } = chainProvider({
+      head: () => 0n,
+      getLogs: () => [rpcLog(0n), rpcLog(0n, { branch: 'b', logIndex: 1 })],
+    })
+    await expect(
+      syncEventLogs(provider, FILTER, eventCursor(0n, 1), {
+        maxRangeSize: 1,
+        maxRanges: 1,
+      }),
+    ).rejects.toThrow(/event block hash/i)
+  })
+
   it('bounds cursor identifiers before normalizing them', async () => {
     const request = vi.fn()
     const cursor = {
-      ...createEventCursor(1n, FILTER, 0n),
+      ...eventCursor(),
       filterId: `0x${'1'.repeat(1_000_000)}` as Hex,
     }
     await expect(syncEventLogs({ request }, FILTER, cursor)).rejects.toThrow(
@@ -424,17 +449,38 @@ describe('sync lifetime', () => {
     controller.abort()
     const request = vi.fn()
     await expect(
-      syncEventLogs({ request }, FILTER, createEventCursor(1n, FILTER, 0n), {
+      syncEventLogs({ request }, FILTER, eventCursor(), {
         signal: controller.signal,
       }),
     ).rejects.toThrow(/cancelled/i)
     expect(request).not.toHaveBeenCalled()
   })
 
+  it('interrupts an in-flight provider request on cancellation', async () => {
+    const controller = new AbortController()
+    let markStarted: (() => void) | undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    const request = vi.fn(() => {
+      markStarted?.()
+      return new Promise<unknown>(() => undefined)
+    })
+    const synchronization = syncEventLogs({ request }, FILTER, eventCursor(), {
+      signal: controller.signal,
+      timeoutMs: 60_000,
+    })
+    const rejected = expect(synchronization).rejects.toThrow(/cancelled/i)
+    await started
+    controller.abort()
+    await rejected
+    expect(request).toHaveBeenCalled()
+  })
+
   it('bounds a stalled provider request', async () => {
     const request = vi.fn(() => new Promise<unknown>(() => undefined))
     await expect(
-      syncEventLogs({ request }, FILTER, createEventCursor(1n, FILTER, 0n), {
+      syncEventLogs({ request }, FILTER, eventCursor(), {
         timeoutMs: 5,
       }),
     ).rejects.toThrow(/timed out/i)
@@ -459,9 +505,7 @@ describe('sync lifetime', () => {
       request,
     }
     await expect(
-      syncEventLogs(provider, FILTER, createEventCursor(1n, FILTER, 0n), {
-        finalityDepth: 0n,
-      }),
+      syncEventLogs(provider, FILTER, eventCursor(), {}),
     ).rejects.toThrow(/chain changed/i)
     expect(removeListener).toHaveBeenCalledTimes(2)
   })

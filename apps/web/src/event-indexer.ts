@@ -7,21 +7,17 @@ import {
   type Hash,
   type Hex,
 } from 'viem'
-import {
-  beforeDeadline,
-  type Eip1193Provider,
-  type ProviderRequest,
-} from './ethereum'
+import { type Eip1193Provider, type ProviderRequest } from './ethereum'
 
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 const MAX_CHECKPOINTS = 64
 const MAX_TOPIC_ALTERNATIVES = 32
-const MAX_LOG_DATA_BYTES = 16_384
+const MAX_LOG_DATA_BYTES = 8_192
 const HARD_MAX_BLOCK_RANGE = 10_000
 const HARD_MAX_LOGS_PER_RANGE = 2_000
 const HARD_MAX_RANGES_PER_SYNC = 16
 const HARD_MAX_REORG_CHECKS = 16
-const HARD_MAX_LOGS_PER_SYNC = 10_000
+const HARD_MAX_LOGS_PER_SYNC = 5_000
 export const DEFAULT_BLOCK_RANGE = 2_000
 export const DEFAULT_FINALITY_DEPTH = 12n
 export const DEFAULT_LOGS_PER_RANGE = 2_000
@@ -38,6 +34,7 @@ export type EventCheckpoint = {
 export type EventCursor = {
   chainId: bigint
   checkpoints: readonly EventCheckpoint[]
+  finalityDepth: bigint
   filterId: Hash
   nextBlock: bigint
   rangeSize: number
@@ -54,13 +51,19 @@ export type IndexedEventLog = {
   transactionIndex: number
 }
 export type EventSyncOptions = {
-  finalityDepth?: bigint
   maxLogsPerRange?: number
   maxRangeSize?: number
   maxRanges?: number
   maxReorgChecks?: number
   signal?: AbortSignal
   timeoutMs?: number
+}
+export type CreateEventCursorOptions = {
+  chainId: bigint
+  filter: EventLogFilter
+  finalityDepth?: bigint
+  rangeSize?: number
+  startBlock: bigint
 }
 export type EventSyncResult = {
   caughtUp: boolean
@@ -82,6 +85,42 @@ type BlockFingerprint = {
 }
 type RpcRequest = (request: ProviderRequest) => Promise<unknown>
 
+function cancelledError() {
+  return new Error('Event synchronization was cancelled.')
+}
+async function requestBeforeDeadline(
+  provider: Eip1193Provider,
+  request: ProviderRequest,
+  deadline: number,
+  signal?: AbortSignal,
+) {
+  const remainingMs = deadline - Date.now()
+  if (remainingMs <= 0) throw new Error('Event synchronization timed out.')
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  let handleAbort: (() => void) | undefined
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error('Event synchronization timed out.')),
+      remainingMs,
+    )
+  })
+  const aborted = signal
+    ? new Promise<never>((_resolve, reject) => {
+        handleAbort = () => reject(cancelledError())
+        signal.addEventListener('abort', handleAbort, { once: true })
+      })
+    : undefined
+  try {
+    if (signal?.aborted) throw cancelledError()
+    const pending = provider.request(request)
+    return await Promise.race(
+      aborted ? [pending, timedOut, aborted] : [pending, timedOut],
+    )
+  } finally {
+    clearTimeout(timeout)
+    if (handleAbort) signal?.removeEventListener('abort', handleAbort)
+  }
+}
 function invalidRpc(field: string) {
   return new Error(`The RPC returned an invalid ${field}.`)
 }
@@ -185,6 +224,7 @@ function normalizeCursor(
     throw new Error('Invalid event cursor.')
   }
   assertQuantity(cursor.chainId, 'event cursor chain identifier')
+  assertQuantity(cursor.finalityDepth, 'event cursor finality depth')
   assertQuantity(cursor.startBlock, 'event cursor start block')
   assertQuantity(cursor.nextBlock, 'event cursor next block')
   const filterId = parseHash(cursor.filterId, 'event cursor filter identifier')
@@ -323,10 +363,16 @@ function parseLogs(
   toBlock: bigint,
 ) {
   const uniqueLogs = new Map<string, IndexedEventLog>()
+  const blockHashes = new Map<bigint, Hash>()
   for (const rawLog of value) {
     const log = parseLog(rawLog, filter, fromBlock, toBlock)
     const key = `${log.blockNumber}:${log.logIndex}`
     if (uniqueLogs.has(key)) throw invalidRpc('duplicate event log')
+    const knownBlockHash = blockHashes.get(log.blockNumber)
+    if (knownBlockHash && knownBlockHash !== log.blockHash) {
+      throw invalidRpc('event block hash')
+    }
+    blockHashes.set(log.blockNumber, log.blockHash)
     uniqueLogs.set(key, log)
   }
   return [...uniqueLogs.values()].toSorted(compareLogs)
@@ -361,6 +407,11 @@ function growRange(
 function earliestRollback(current: bigint | undefined, candidate: bigint) {
   return current === undefined || candidate < current ? candidate : current
 }
+function unavailableBlock(blockNumber: bigint) {
+  return new Error(
+    `The RPC could not serve expected block ${blockNumber.toString()}.`,
+  )
+}
 async function reconcileCursor(
   request: RpcRequest,
   cursor: EventCursor,
@@ -373,7 +424,8 @@ async function reconcileCursor(
     const checkpoint = checkpoints.at(-1)!
     const block = await readBlock(request, checkpoint.blockNumber)
     checks += 1
-    if (block?.hash === checkpoint.blockHash) {
+    if (!block) throw unavailableBlock(checkpoint.blockNumber)
+    if (block.hash === checkpoint.blockHash) {
       foundCanonical = true
       break
     }
@@ -389,13 +441,15 @@ async function reconcileCursor(
     rollbackTo: nextBlock === cursor.nextBlock ? undefined : nextBlock,
   }
 }
-export function createEventCursor(
-  chainId: bigint,
-  filter: EventLogFilter,
-  startBlock: bigint,
+export function createEventCursor({
+  chainId,
+  filter,
+  finalityDepth = DEFAULT_FINALITY_DEPTH,
   rangeSize = DEFAULT_BLOCK_RANGE,
-): EventCursor {
+  startBlock,
+}: CreateEventCursorOptions): EventCursor {
   assertQuantity(chainId, 'event cursor chain identifier')
+  assertQuantity(finalityDepth, 'event cursor finality depth')
   assertQuantity(startBlock, 'event cursor start block')
   const normalizedFilter = normalizeFilter(filter)
   const parsedRangeSize = parsePositiveInteger(
@@ -407,6 +461,7 @@ export function createEventCursor(
   return {
     chainId,
     checkpoints: [],
+    finalityDepth,
     filterId: normalizedFilter.id,
     nextBlock: startBlock,
     rangeSize: parsedRangeSize,
@@ -424,8 +479,6 @@ export async function syncEventLogs(
 ): Promise<EventSyncResult> {
   const normalizedFilter = normalizeFilter(filter)
   let cursor = normalizeCursor(inputCursor, normalizedFilter)
-  const finalityDepth = options.finalityDepth ?? DEFAULT_FINALITY_DEPTH
-  assertQuantity(finalityDepth, 'event finality depth')
   const maxLogs = parsePositiveInteger(
     options.maxLogsPerRange,
     DEFAULT_LOGS_PER_RANGE,
@@ -473,11 +526,7 @@ export async function syncEventLogs(
   }
   const request: RpcRequest = async (rpcRequest) => {
     assertActive()
-    return beforeDeadline(
-      () => provider.request(rpcRequest),
-      deadline,
-      () => new Error('Event synchronization timed out.'),
-    )
+    return requestBeforeDeadline(provider, rpcRequest, deadline, options.signal)
   }
   try {
     const [chainValue, headValue] = await Promise.all([
@@ -489,10 +538,21 @@ export async function syncEventLogs(
       throw new Error('The event cursor belongs to a different chain.')
     }
     const head = parseQuantity(headValue, 'head block number')
-    const safeHead = head >= finalityDepth ? head - finalityDepth : undefined
+    const safeHead =
+      head >= cursor.finalityDepth ? head - cursor.finalityDepth : undefined
+    const latestCheckpoint = cursor.checkpoints.at(-1)
+    if (
+      latestCheckpoint &&
+      (safeHead === undefined || latestCheckpoint.blockNumber > safeHead)
+    ) {
+      throw new Error('The RPC head is behind the event cursor checkpoint.')
+    }
+    let rollbackTo: bigint | undefined
     const reconciled = await reconcileCursor(request, cursor, maxReorgChecks)
     cursor = reconciled.cursor
-    let rollbackTo = reconciled.rollbackTo
+    if (reconciled.rollbackTo !== undefined) {
+      rollbackTo = earliestRollback(rollbackTo, reconciled.rollbackTo)
+    }
     let logs: IndexedEventLog[] = []
     let scannedRanges = 0
     for (let attempt = 0; attempt < maxRanges; attempt += 1) {
@@ -506,7 +566,7 @@ export async function syncEventLogs(
       const span = Math.min(cursor.rangeSize, maxRange, Number(remaining))
       const toBlock = fromBlock + BigInt(span - 1)
       const beforeBlock = await readBlock(request, toBlock)
-      if (!beforeBlock) break
+      if (!beforeBlock) throw unavailableBlock(toBlock)
       let rawLogs: unknown
       try {
         rawLogs = await request({
@@ -540,8 +600,11 @@ export async function syncEventLogs(
         : undefined
       const afterBlock = await readBlock(request, toBlock)
       assertActive()
+      if (previousCheckpoint && !previousBlock) {
+        throw unavailableBlock(previousCheckpoint.blockNumber)
+      }
+      if (!afterBlock) throw unavailableBlock(toBlock)
       if (
-        !afterBlock ||
         beforeBlock.hash !== afterBlock.hash ||
         (previousCheckpoint &&
           previousBlock?.hash !== previousCheckpoint.blockHash)

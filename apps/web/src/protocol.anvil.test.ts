@@ -134,8 +134,14 @@ describe('wallet transaction helpers on Anvil', () => {
     const indexed = await syncEventLogs(
       provider,
       filter,
-      createEventCursor(LOCAL_CHAIN_ID, filter, 1n, 1),
-      { finalityDepth: 0n, maxRangeSize: 1, maxRanges: 4 },
+      createEventCursor({
+        chainId: LOCAL_CHAIN_ID,
+        filter,
+        finalityDepth: 0n,
+        rangeSize: 1,
+        startBlock: 1n,
+      }),
+      { maxRangeSize: 1, maxRanges: 4 },
     )
     expect(indexed.caughtUp).toBe(true)
     expect(indexed.logs).toHaveLength(1)

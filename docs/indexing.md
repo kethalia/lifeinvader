@@ -12,12 +12,12 @@ The first layer is implemented in `apps/web/src/event-indexer.ts`. It accepts an
 An event cursor is scoped to:
 
 ```text
-(chainId, normalized address and topic filter, startBlock)
+(chainId, normalized address and topic filter, startBlock, finalityDepth)
 ```
 
 The normalized filter is stored as a fixed-size hash. Topic alternatives are deduplicated and sorted before hashing, so equivalent filters share a cursor. A cursor for another filter or chain is rejected before log requests begin.
 
-The start block is an explicit input. A later chain configuration must supply a known deployment block or a separately verified discovery result; the scanner does not silently request `0x0` through `latest` in one call.
+The start block and finality depth are explicit cursor inputs. A later chain configuration must supply a known deployment block or a separately verified discovery result; the scanner does not silently request `0x0` through `latest` in one call. Changing confirmation policy requires a fresh cursor and cache rather than reinterpreting already accepted ranges.
 
 ## Bounded synchronization
 
@@ -25,7 +25,7 @@ The start block is an explicit input. A later chain configuration must supply a 
 
 - A log request covers no more than 10,000 blocks, with a 2,000-block initial range.
 - One invocation attempts at most four ranges by default and sixteen at the hard limit.
-- One range accepts at most 2,000 logs and one invocation returns at most 10,000 logs.
+- One range accepts at most 2,000 logs and one invocation returns at most 5,000 logs.
 - Log data, topic counts, topic alternatives, quantities, hashes, indexes, cursor checkpoints, time, and rollback probes are all bounded before expensive processing.
 - Requests are sequential within a range. There is no fan-out across historical ranges.
 
@@ -35,7 +35,7 @@ The engine returns `caughtUp: false` when its work budget ends before the safe h
 
 ## Canonical snapshots and rollback
 
-The default safe head trails the reported head by twelve blocks. Chain integrations may choose a different finality depth, including zero for isolated Anvil testing.
+The default safe head trails the reported head by twelve blocks. Chain integrations may choose a different finality depth when creating the cursor, including zero for isolated Anvil testing. If a sampled safe head is temporarily behind the cursor's newest checkpoint, synchronization fails without issuing a rollback. This protects the cache from a lagging load-balanced RPC node; a later sample can resume normally.
 
 For each range, the engine:
 
@@ -47,7 +47,7 @@ For each range, the engine:
 
 The accepted endpoint becomes a checkpoint. A final checkpoint validation is the last RPC read before the result is returned. This catches a reorganization during parsing, adaptation, or an otherwise unaccepted final attempt.
 
-On resume, the newest checkpoint is compared with the current canonical block. A mismatch rolls back checkpoints until a common canonical endpoint is found. `rollbackTo` tells the cache to delete every stored log at or after that block before applying the returned logs. If the bounded rollback search cannot find a common checkpoint, the cursor resets to `startBlock` and requests a full cache rebuild.
+On resume, the newest checkpoint is compared with the current canonical block. A different hash rolls back checkpoints until a common canonical endpoint is found. A `null` block response is treated as unavailable history and fails without rollback because absence is not evidence of a reorg. `rollbackTo` tells the cache to delete every stored log at or after that block before applying the returned logs. If the bounded rollback search cannot find a common checkpoint, the cursor resets to `startBlock` and requests a full cache rebuild.
 
 Only the latest 64 checkpoints are retained. Their newest canonical hash commits to the earlier ancestry. A reorganization deeper than the retained window therefore causes a safe rebuild instead of trusting unverifiable cached history.
 
