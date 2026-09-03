@@ -246,7 +246,7 @@ describe('post reaction projection run', () => {
     await run.advance()
     await run.advance()
     expect(run.snapshot).toMatchObject({
-      phase: 'authenticate-likes',
+      phase: 'authenticate',
       reposts: { complete: true, logsProcessed: 2n, pagesScanned: 2n },
     })
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
@@ -283,7 +283,7 @@ describe('post reaction projection run', () => {
     })
     await run.advance()
     expect(run.snapshot).toMatchObject({
-      phase: 'authenticate-likes',
+      phase: 'authenticate',
       reposts: { complete: true, logsProcessed: 0n, pagesScanned: 1n },
     })
     await run.advance()
@@ -381,12 +381,35 @@ describe('post reaction projection run', () => {
 
     await run.advance()
     await run.advance()
-    expect(run.snapshot.phase).toBe('authenticate-likes')
-    await expect(run.advance()).rejects.toThrow(
-      /scan boundary|canonical|baseline changed/i,
-    )
+    expect(run.snapshot.phase).toBe('authenticate')
+    await expect(run.advance()).rejects.toThrow(/baseline snapshot changed/i)
     expect(run.snapshot.phase).toBe('failed')
     expect(() => run.getSummary(7n, ACCOUNT_A)).toThrow(/not complete/i)
+  })
+
+  it('authenticates reposts in the same final cache transaction', async () => {
+    const prepared = await prepareProjection([likeLog(1n)], [repostLog(2n)])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    expect(run.snapshot.phase).toBe('authenticate')
+
+    const repostCache = await openEventCache({
+      ...prepared.storage,
+      filter: PUBLISHED_REPOST_FILTER,
+    })
+    try {
+      await repostCache.clear(seedCursor(PUBLISHED_REPOST_FILTER))
+    } finally {
+      repostCache.close()
+    }
+
+    await expect(run.advance()).rejects.toThrow(/baseline snapshot changed/i)
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.getSummary(7n)).toThrow(/not complete/i)
   })
 
   it('discards a partial projection when its scan session is invalidated', async () => {
@@ -419,6 +442,28 @@ describe('post reaction projection run', () => {
 
   it('rejects malformed, non-caught-up, and cross-filter anchors', async () => {
     const prepared = await prepareProjection([], [])
+    const conflictingRepostCheckpoints =
+      prepared.anchor.reposts.cursor.checkpoints.map(
+        (checkpoint, index, all) =>
+          index === all.length - 1
+            ? { ...checkpoint, blockHash: hash('another safe-head fork') }
+            : checkpoint,
+      )
+    await expect(
+      openPostReactionProjectionRun(
+        {
+          ...prepared.anchor,
+          reposts: {
+            ...prepared.anchor.reposts,
+            cursor: {
+              ...prepared.anchor.reposts.cursor,
+              checkpoints: conflictingRepostCheckpoints,
+            },
+          },
+        },
+        prepared.storage,
+      ),
+    ).rejects.toThrow(/shared safe-head checkpoint/i)
     await expect(
       openPostReactionProjectionRun(
         {
@@ -478,7 +523,7 @@ describe('post reaction projection run', () => {
     await expect(run.advance()).rejects.toThrow(/already advancing/i)
     await expect(advancing).resolves.toMatchObject({ phase: 'reposts' })
     await expect(run.advance()).resolves.toMatchObject({
-      phase: 'authenticate-likes',
+      phase: 'authenticate',
     })
     await expect(run.advance()).resolves.toMatchObject({ phase: 'complete' })
   })

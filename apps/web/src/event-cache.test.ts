@@ -921,6 +921,73 @@ describe('browser event cache', () => {
     })
   })
 
+  it('authenticates multiple completed scopes in one database snapshot', async () => {
+    const factory = new IDBFactory()
+    const firstSeed = seedCursor()
+    const firstCache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
+    await firstCache.apply(
+      await firstCache.readLatest(firstSeed),
+      syncResult(cursorAt(firstSeed, 4n), [eventLog(1n)]),
+    )
+    const firstBaseline = (await firstCache.scan(firstSeed)).baseline
+    firstCache.close()
+    expect(firstBaseline).toBeDefined()
+
+    const secondFilter = {
+      address: PROTOCOL_ADDRESS,
+      topics: [OTHER_TOPIC],
+    } as const
+    const secondSeed = seedCursor(secondFilter)
+    cache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: secondFilter,
+      keyRange: IDBKeyRange,
+    })
+    const secondLog = { ...eventLog(2n), topics: [OTHER_TOPIC] }
+    await cache.apply(
+      await cache.readLatest(secondSeed),
+      syncResult(cursorAt(secondSeed, 4n), [secondLog]),
+    )
+    const secondBaseline = (await cache.scan(secondSeed)).baseline
+    expect(secondBaseline).toBeDefined()
+    const authentications = [
+      { baseline: firstBaseline!, filter: FILTER, seed: firstSeed },
+      {
+        baseline: secondBaseline!,
+        filter: secondFilter,
+        seed: secondSeed,
+      },
+    ]
+
+    await expect(cache.authenticateBaselines(authentications)).resolves.toBe(
+      undefined,
+    )
+    await expect(
+      cache.authenticateBaselines([authentications[0], authentications[0]]),
+    ).rejects.toThrow(/duplicate.*scope/i)
+
+    const mutator = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
+    try {
+      await mutator.clear(firstSeed)
+    } finally {
+      mutator.close()
+    }
+    await expect(cache.authenticateBaselines(authentications)).rejects.toThrow(
+      /baseline snapshot changed or is corrupt/i,
+    )
+  })
+
   it('rejects a continuation prefix masquerading as a completed baseline', async () => {
     const { cache: opened } = await createCache()
     const seed = seedCursor()
