@@ -4,6 +4,7 @@ import { keccak256, stringToHex } from 'viem'
 import {
   BrowserEventCache,
   getEventCacheScope,
+  isDeferredEventCacheCorruptionError,
   openEventCache,
 } from './event-cache'
 import {
@@ -1279,9 +1280,15 @@ describe('browser event cache', () => {
     const scope = getEventCacheScope(seed)
     await deleteRawRecord(factory, 'logs', [scope, logIdentity(eventLog(2n))])
 
-    await expect(
-      opened.scan(seed, { resetOnCorruption: false }),
-    ).rejects.toThrow(/corrupt and was not reset/i)
+    const failure = await opened
+      .scan(seed, { resetOnCorruption: false })
+      .catch((error: unknown) => error)
+    expect(isDeferredEventCacheCorruptionError(failure)).toBe(true)
+    expect(failure).toEqual(
+      expect.objectContaining({
+        message: expect.stringMatching(/corrupt and was not reset/i),
+      }),
+    )
     expect(await countRawScopeLogs(factory, scope)).toBe(2)
     await expect(opened.readLatest(seed)).resolves.toMatchObject({
       cursor: seed,

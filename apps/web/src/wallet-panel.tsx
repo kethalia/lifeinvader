@@ -32,6 +32,7 @@ import type { WalletSession, WalletSessionController } from './wallet-session'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 import { ProfileComposer } from './profile-composer'
+import { ProfileReader } from './profile-reader'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -864,7 +865,9 @@ export function WalletPanel({
           )}
         </div>
         <div className="wallet-profile">
-          <h3>4. Publish a profile snapshot</h3>
+          <h3>4. Public profile</h3>
+          <ProfileReader session={session} />
+          <h4>Publish a complete snapshot</h4>
           {!connected ? (
             <p>
               Connect first. A verified v1 deployment is required before setting

@@ -418,6 +418,77 @@ h1 span {
   margin-top: 0.15rem;
 }
 
+.wallet-profile > h4 {
+  margin: 2rem 0 1rem;
+  font-size: 1rem;
+}
+
+.profile-reader {
+  display: grid;
+  padding: 0 0 2rem;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.profile-reader h4,
+.profile-read-status,
+.profile-cache-notice,
+.profile-empty-result,
+.profile-event-meta {
+  margin: 0;
+}
+
+.profile-read-status,
+.profile-cache-notice,
+.profile-event-meta,
+.profile-avatar-commitment {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.profile-cache-notice,
+.profile-empty-result {
+  padding: 0.75rem;
+  border: 1px solid var(--ink);
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.confirmed-profile {
+  display: grid;
+  margin-top: 0.25rem;
+  padding: 1rem;
+  gap: 0.75rem;
+  border: 1px solid var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.confirmed-profile > strong {
+  font-size: 1.15rem;
+}
+
+.confirmed-profile > p:not(.profile-event-meta) {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.profile-avatar-commitment {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--red);
+  font-weight: 800;
+}
+
+.profile-avatar-commitment code {
+  color: var(--ink);
+}
+
+.profile-event-meta {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+  color: rgba(25, 24, 23, 0.68);
+}
+
 .input-help {
   margin: -0.25rem 0 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

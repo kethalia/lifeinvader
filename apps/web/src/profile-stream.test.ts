@@ -11,11 +11,13 @@ import {
   type Hex,
 } from 'viem'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
-import { BrowserEventCache } from './event-cache'
-import type { IndexedEventLog } from './event-indexer'
+import { BrowserEventCache, openEventCache } from './event-cache'
+import { createEventCursor, type IndexedEventLog } from './event-indexer'
 import {
   assertIssuedProfileProjectionAnchor,
   authenticateIssuedProfileProjectionAnchor,
+  PROFILE_EVENT_START_BLOCK,
+  resetProfileStreamCache,
   synchronizeProfileStream,
   type ProfileStreamStorageOptions,
 } from './profile-stream'
@@ -101,6 +103,20 @@ function cachedPost(): IndexedEventLog {
   }
 }
 
+function cachedProfile(blockNumber: bigint): IndexedEventLog {
+  const profile = rawProfile(blockNumber)
+  return {
+    address: profile.address as Address,
+    blockHash: profile.blockHash,
+    blockNumber,
+    data: profile.data as Hex,
+    logIndex: 0,
+    topics: profile.topics as readonly Hex[],
+    transactionHash: profile.transactionHash,
+    transactionIndex: 0,
+  }
+}
+
 function storage(factory = new IDBFactory()): ProfileStreamStorageOptions {
   return {
     databaseName: `profiles-${crypto.randomUUID()}`,
@@ -120,6 +136,54 @@ function deferred<T>() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('profile stream synchronization', () => {
+  it('clears the profile scope for a bounded projection-corruption repair', async () => {
+    const cacheStorage = storage()
+    const seed = createEventCursor({
+      chainId: 1n,
+      filter: PROFILE_SET_FILTER,
+      finalityDepth: 12n,
+      startBlock: PROFILE_EVENT_START_BLOCK,
+    })
+    const cache = await openEventCache({
+      ...cacheStorage,
+      filter: PROFILE_SET_FILTER,
+    })
+    try {
+      const cursor = {
+        ...seed,
+        checkpoints: [{ blockHash: blockHash(1n), blockNumber: 1n }],
+        nextBlock: 2n,
+      }
+      await cache.apply(await cache.readLatest(seed), {
+        caughtUp: true,
+        cursor,
+        head: 13n,
+        logs: [cachedProfile(1n)],
+        safeHead: 1n,
+        scannedRanges: 1,
+      })
+    } finally {
+      cache.close()
+    }
+
+    await resetProfileStreamCache(1n, cacheStorage)
+
+    const reopened = await openEventCache({
+      ...cacheStorage,
+      filter: PROFILE_SET_FILTER,
+    })
+    try {
+      await expect(reopened.readLatest(seed)).resolves.toMatchObject({
+        cursor: seed,
+        logs: [],
+        reset: false,
+        revision: 2n,
+      })
+    } finally {
+      reopened.close()
+    }
+  })
+
   it('resumes one global stream through exactly one bounded range per call', async () => {
     const logQueries: Array<{
       address: Address
