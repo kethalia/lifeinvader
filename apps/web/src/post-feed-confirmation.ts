@@ -328,16 +328,18 @@ export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
                 finalBlockValue,
                 candidate.blockNumber,
               )
-              if (finalCanonicalBlock?.blockHash !== candidate.blockHash) {
-                continue
-              }
-              if (currentInclusion.reverted) {
-                throw new Error(
-                  'The post transaction is reverted in canonical history.',
+              if (finalCanonicalBlock?.blockHash === candidate.blockHash) {
+                if (currentInclusion.reverted) {
+                  throw new Error(
+                    'The post transaction is reverted in canonical history.',
+                  )
+                }
+                assertExpectedPost(
+                  currentInclusion.logs,
+                  inclusion.expectedPost,
                 )
+                return
               }
-              assertExpectedPost(currentInclusion.logs, inclusion.expectedPost)
-              return
             }
           }
         }
