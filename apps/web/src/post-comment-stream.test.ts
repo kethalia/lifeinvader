@@ -12,6 +12,7 @@ import {
 } from 'viem'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import { BrowserEventCache } from './event-cache'
+import type { IndexedEventLog } from './event-indexer'
 import {
   synchronizePostCommentStream,
   type PostCommentStreamStorageOptions,
@@ -20,6 +21,7 @@ import { PUBLISHED_COMMENT_FILTER } from './protocol-events'
 import {
   COMMENT_PUBLISHED_TOPIC,
   LIFEINVADER_INIT_CODE,
+  POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
 } from './protocol'
 
@@ -60,12 +62,37 @@ function rawComment(
   }
 }
 
+function cachedPost(): IndexedEventLog {
+  return {
+    address: PROTOCOL_ADDRESS,
+    blockHash: blockHash(2n),
+    blockNumber: 2n,
+    data: encodeAbiParameters(DATA_PARAMETERS, ['Another event.', '0x']),
+    logIndex: 0,
+    topics: [
+      POST_PUBLISHED_TOPIC,
+      padHex(toHex(1n), { size: 32 }),
+      padHex(AUTHOR, { size: 32 }),
+    ],
+    transactionHash: transactionHash(2n),
+    transactionIndex: 0,
+  }
+}
+
 function storage(factory = new IDBFactory()): PostCommentStreamStorageOptions {
   return {
     databaseName: `post-comments-${crypto.randomUUID()}`,
     factory,
     keyRange: IDBKeyRange,
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next) => {
+    resolve = next
+  })
+  return { promise, resolve }
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -276,6 +303,28 @@ describe('post comment stream synchronization', () => {
     )
   })
 
+  it('rechecks the chain after the concurrent final-head sample', async () => {
+    let blockReads = 0
+    let selectedChain = '0x1'
+    const provider: Eip1193Provider = {
+      async request({ method }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return selectedChain
+        if (method === 'eth_blockNumber') {
+          blockReads += 1
+          if (blockReads === 2) selectedChain = '0x2'
+          return '0x5'
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostCommentStream(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/different wallet chain/i)
+    expect(blockReads).toBe(2)
+  })
+
   it('observes a wallet chain change during stream verification', async () => {
     const listeners = new Map<string, (...args: unknown[]) => void>()
     const provider: Eip1193Provider = {
@@ -397,6 +446,42 @@ describe('post comment stream synchronization', () => {
       }),
     ).rejects.toThrow(/cancelled/i)
     expect(provider.request).not.toHaveBeenCalled()
+  })
+
+  it('honors cancellation after a cache read before recovery mutation', async () => {
+    const controller = new AbortController()
+    const enteredRead = deferred<void>()
+    const releaseRead = deferred<void>()
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+    const readLatest = BrowserEventCache.prototype.readLatest
+    vi.spyOn(BrowserEventCache.prototype, 'readLatest').mockImplementationOnce(
+      async function (this: BrowserEventCache, seed, limit) {
+        const page = await readLatest.call(this, seed, limit)
+        enteredRead.resolve()
+        await releaseRead.promise
+        return { ...page, logs: [cachedPost()] }
+      },
+    )
+    const clear = vi.spyOn(BrowserEventCache.prototype, 'clear')
+
+    const pending = synchronizePostCommentStream(provider, 1n, {
+      signal: controller.signal,
+      storage: storage(),
+    })
+    await enteredRead.promise
+    controller.abort()
+    releaseRead.resolve()
+
+    await expect(pending).rejects.toThrow(
+      /post comment synchronization was cancelled/i,
+    )
+    expect(clear).not.toHaveBeenCalled()
   })
 
   it('cancels a stalled protocol inspection without waiting for timeout', async () => {

@@ -242,12 +242,16 @@ export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
       try {
         assertContextActive()
         let before = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
+        assertContextActive()
         let cacheReset = before.reset
         try {
           decodeCommentLogs(before.logs)
         } catch {
+          assertContextActive()
           await cache.clear(seed)
+          assertContextActive()
           before = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
+          assertContextActive()
           cacheReset = true
         }
         const result = await syncEventLogs(
@@ -261,6 +265,7 @@ export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
         await cache.apply(before, result)
         assertContextActive()
         const after = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
+        assertContextActive()
         if (
           after.generation !== before.generation ||
           after.revision !== before.revision + 1n ||
@@ -274,7 +279,9 @@ export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
         try {
           recentComments = decodeCommentLogs(after.logs)
         } catch (error) {
+          assertContextActive()
           await cache.clear(seed)
+          assertContextActive()
           throw error
         }
         const indexedThrough =
@@ -313,6 +320,8 @@ export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
           )
           assertContextActive()
         }
+        await assertSelectedChain(provider, chainId, interruption.signal)
+        assertContextActive()
         const safeHead =
           finalHead >= POST_FEED_CONFIRMATION_DEPTH
             ? finalHead - POST_FEED_CONFIRMATION_DEPTH
