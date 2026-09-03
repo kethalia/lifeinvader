@@ -22,8 +22,8 @@ const AUTHOR = '0x000000000000000000000000000000000000b0b0' as Address
 const DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
 
-function blockHash(blockNumber: bigint) {
-  return keccak256(stringToHex(`block:${blockNumber.toString()}`))
+function blockHash(blockNumber: bigint, branch = 'a') {
+  return keccak256(stringToHex(`block:${blockNumber.toString()}:${branch}`))
 }
 
 function transactionHash(blockNumber: bigint) {
@@ -258,6 +258,36 @@ describe('post feed synchronization', () => {
         .mocked(provider.request)
         .mock.calls.filter(([request]) => request.method === 'eth_getLogs'),
     ).toHaveLength(1)
+  })
+
+  it('rejects a committed checkpoint replaced during cache work', async () => {
+    let endpointReads = 0
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(100n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          if (blockNumber === 88n) endpointReads += 1
+          return {
+            hash: blockHash(
+              blockNumber,
+              blockNumber === 88n && endpointReads > 4 ? 'b' : 'a',
+            ),
+            number,
+          }
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/confirmed post feed checkpoint changed/i)
+    expect(endpointReads).toBe(5)
   })
 
   it('rejects a post-apply page from a newer cache position', async () => {

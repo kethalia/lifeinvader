@@ -314,6 +314,23 @@ export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
               finalHead >=
               candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH
             ) {
+              const finalBlockValue = await requestBeforeDeadline(
+                provider,
+                {
+                  method: 'eth_getBlockByNumber',
+                  params: [`0x${candidate.blockNumber.toString(16)}`, false],
+                },
+                deadline,
+                interruption.signal,
+              )
+              assertActive()
+              const finalCanonicalBlock = parseCanonicalBlock(
+                finalBlockValue,
+                candidate.blockNumber,
+              )
+              if (finalCanonicalBlock?.blockHash !== candidate.blockHash) {
+                continue
+              }
               if (currentInclusion.reverted) {
                 throw new Error(
                   'The post transaction is reverted in canonical history.',

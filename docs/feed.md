@@ -12,7 +12,7 @@ Every chain uses a twelve-block confirmation depth, including chain ID `31337`. 
 
 ## Work budget
 
-One feed synchronization invocation permits exactly one bounded indexer range. Connecting a wallet performs one invocation. After a post receipt arrives, a separate confirmation monitor reads chain ID, head height, and the current receipt every twelve seconds, for at most 30 minutes and 240 attempts. At the target depth it verifies the expected `PostPublished` event, canonical block hash, and a fresh head-height reading. Earlier and later re-inclusions both replace the candidate height; a reverted replacement is terminal only after that replacement is canonical and twelve blocks deep. The monitor triggers one feed invocation only after that canonical evidence is safe. If history remains, the interface exposes a **Load next block range** button; it does not automatically loop toward the head on page load.
+One feed synchronization invocation permits exactly one bounded indexer range. Connecting a wallet performs one invocation. After a post receipt arrives, a separate confirmation monitor reads chain ID, head height, and the current receipt every twelve seconds, for at most 30 minutes and 240 attempts. At the target depth it brackets a fresh chain/head reading with two exact candidate-block reads and verifies the expected `PostPublished` event. Earlier and later re-inclusions both replace the candidate height; a reverted replacement is terminal only after that replacement is canonical and twelve blocks deep. The monitor triggers one feed invocation only after that canonical evidence is safe. If history remains, the interface exposes a **Load next block range** button; it does not automatically loop toward the head on page load.
 
 Each invocation follows one compare-and-swap cycle:
 
@@ -20,7 +20,7 @@ Each invocation follows one compare-and-swap cycle:
 2. Run one bounded `syncEventLogs` call through the selected provider.
 3. Atomically apply additions or rollback data to IndexedDB.
 4. Read and strictly decode at most 50 newest cached posts, accepting the snapshot only if its generation, revision, and cursor still identify the commit from step 3.
-5. Re-read chain ID and head height, rejecting the snapshot if its indexed endpoint no longer has the twelve-block depth and deriving the displayed head status only from this final reading.
+5. Bracket a fresh chain-ID/head read with exact block-hash reads of the committed endpoint, rejecting the snapshot if that checkpoint changed or no longer has the twelve-block depth. The displayed head status is derived only from this final reading.
 
 Changing provider or chain aborts active synchronization and confirmation monitoring and clears the rendered snapshot before starting the new scope. A late result from an old scope cannot replace the new view. Cross-tab cache conflicts—including a change between apply and the final read—are surfaced for an explicit retry rather than hidden behind an unbounded retry loop.
 

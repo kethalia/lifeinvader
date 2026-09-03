@@ -78,7 +78,7 @@ describe('post feed confirmation monitoring', () => {
         timeoutMs: 1_000,
       }),
     ).resolves.toBeUndefined()
-    expect(provider.request).toHaveBeenCalledTimes(9)
+    expect(provider.request).toHaveBeenCalledTimes(10)
   })
 
   it('restarts the depth check when the transaction is re-included', async () => {
@@ -188,7 +188,7 @@ describe('post feed confirmation monitoring', () => {
         timeoutMs: 1_000,
       }),
     ).rejects.toThrow(/reverted in canonical history/i)
-    expect(blockReads).toBe(1)
+    expect(blockReads).toBe(2)
   })
 
   it('does not accept a receipt from a non-canonical block', async () => {
@@ -215,7 +215,7 @@ describe('post feed confirmation monitoring', () => {
         timeoutMs: 1_000,
       }),
     ).resolves.toBeUndefined()
-    expect(blockReads).toBe(2)
+    expect(blockReads).toBe(3)
   })
 
   it('rechecks depth after canonical block validation', async () => {
@@ -240,7 +240,34 @@ describe('post feed confirmation monitoring', () => {
         timeoutMs: 1_000,
       }),
     ).resolves.toBeUndefined()
-    expect(blockReads).toBe(2)
+    expect(blockReads).toBe(3)
+  })
+
+  it('rechecks the canonical block after the fresh head', async () => {
+    let blockReads = 0
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getTransactionReceipt') return receipt()
+        if (method === 'eth_getBlockByNumber') {
+          blockReads += 1
+          return {
+            hash: blockReads === 2 ? REINCLUDED_BLOCK_HASH : BLOCK_HASH,
+            number: (params as [string])[0],
+          }
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      waitForPostFeedConfirmation(provider, 1n, inclusion(), {
+        pollIntervalMs: 1,
+        timeoutMs: 1_000,
+      }),
+    ).resolves.toBeUndefined()
+    expect(blockReads).toBe(4)
   })
 
   it('rejects a canonical replacement receipt without the expected post', async () => {

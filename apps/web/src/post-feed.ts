@@ -2,6 +2,7 @@ import { openEventCache, type OpenEventCacheOptions } from './event-cache'
 import {
   createEventCursor,
   syncEventLogs,
+  type EventCheckpoint,
   type EventCursor,
   type IndexedEventLog,
 } from './event-indexer'
@@ -123,6 +124,36 @@ async function readSelectedHead(
   return parseHead(headValue)
 }
 
+async function assertCanonicalCheckpoint(
+  provider: Eip1193Provider,
+  checkpoint: EventCheckpoint,
+  signal: AbortSignal,
+) {
+  const value = await requestInContext(
+    provider,
+    {
+      method: 'eth_getBlockByNumber',
+      params: [`0x${checkpoint.blockNumber.toString(16)}`, false],
+    },
+    signal,
+  )
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('The wallet returned invalid post feed checkpoint data.')
+  }
+  const block = value as Record<string, unknown>
+  const hash = block.hash
+  if (
+    parseHead(block.number) !== checkpoint.blockNumber ||
+    typeof hash !== 'string' ||
+    !/^0x[0-9a-f]{64}$/i.test(hash) ||
+    hash.toLowerCase() !== checkpoint.blockHash
+  ) {
+    throw new Error(
+      'The confirmed post feed checkpoint changed. Retry the bounded range.',
+    )
+  }
+}
+
 function decodePostLogs(logs: readonly IndexedEventLog[]) {
   return logs.map((log) => {
     const post = decodePublishedPost(log)
@@ -233,16 +264,25 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
         await cache.clear(seed)
         throw error
       }
+      const indexedThrough =
+        after.cursor.nextBlock > after.cursor.startBlock
+          ? after.cursor.nextBlock - 1n
+          : undefined
+      const finalCheckpoint = after.cursor.checkpoints.at(-1)
+      if (finalCheckpoint) {
+        await assertCanonicalCheckpoint(
+          provider,
+          finalCheckpoint,
+          interruption.signal,
+        )
+        assertContextActive()
+      }
       const finalHead = await readSelectedHead(
         provider,
         chainId,
         interruption.signal,
       )
       assertContextActive()
-      const indexedThrough =
-        after.cursor.nextBlock > after.cursor.startBlock
-          ? after.cursor.nextBlock - 1n
-          : undefined
       if (
         indexedThrough !== undefined &&
         (finalHead < indexedThrough ||
@@ -251,6 +291,14 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
         throw new Error(
           'The wallet head moved behind the confirmed post feed. Retry after the chain stabilizes.',
         )
+      }
+      if (finalCheckpoint) {
+        await assertCanonicalCheckpoint(
+          provider,
+          finalCheckpoint,
+          interruption.signal,
+        )
+        assertContextActive()
       }
       const safeHead =
         finalHead >= POST_FEED_CONFIRMATION_DEPTH
