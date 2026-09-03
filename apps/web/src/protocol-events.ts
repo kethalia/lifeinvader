@@ -1,5 +1,6 @@
 import {
   decodeEventLog,
+  encodeAbiParameters,
   getAddress,
   padHex,
   size,
@@ -10,6 +11,8 @@ import {
 } from 'viem'
 import type { EventLogFilter, IndexedEventLog } from './event-indexer'
 import {
+  COMMENT_PUBLISHED_EVENT_ABI,
+  COMMENT_PUBLISHED_TOPIC,
   getPostBodyByteLength,
   MAX_MEDIA_CID_BYTES,
   MAX_POST_BODY_BYTES,
@@ -23,6 +26,11 @@ import {
   REPOST_PUBLISHED_TOPIC,
 } from './protocol'
 
+const PUBLICATION_DATA_PARAMETERS = [
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+
 export const POST_CONTENT_KIND_TOPIC = padHex(toHex(POST_CONTENT_KIND), {
   size: 32,
 })
@@ -30,6 +38,11 @@ export const POST_CONTENT_KIND_TOPIC = padHex(toHex(POST_CONTENT_KIND), {
 export const POST_LIKE_SET_FILTER = {
   address: PROTOCOL_ADDRESS,
   topics: [LIKE_SET_TOPIC, POST_CONTENT_KIND_TOPIC],
+} as const satisfies EventLogFilter
+
+export const PUBLISHED_COMMENT_FILTER = {
+  address: PROTOCOL_ADDRESS,
+  topics: [COMMENT_PUBLISHED_TOPIC],
 } as const satisfies EventLogFilter
 
 export const PUBLISHED_REPOST_FILTER = {
@@ -47,6 +60,19 @@ export type PublishedPost = {
   blockHash: Hash
   blockNumber: bigint
   body: string
+  logIndex: number
+  mediaCid: Hex
+  postId: bigint
+  transactionHash: Hash
+  transactionIndex: number
+}
+
+export type PublishedComment = {
+  author: Address
+  blockHash: Hash
+  blockNumber: bigint
+  body: string
+  commentId: bigint
   logIndex: number
   mediaCid: Hex
   postId: bigint
@@ -77,6 +103,10 @@ export type PublishedRepost = {
 
 function invalidPostEvent() {
   return new Error('The chain returned an invalid PostPublished event.')
+}
+
+function invalidCommentEvent() {
+  return new Error('The chain returned an invalid CommentPublished event.')
 }
 
 function invalidPostLikeEvent() {
@@ -128,6 +158,64 @@ export function decodePublishedPost(
     }
   } catch {
     throw invalidPostEvent()
+  }
+}
+
+export function decodePublishedComment(
+  log: IndexedEventLog,
+): PublishedComment | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== COMMENT_PUBLISHED_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 4) throw invalidCommentEvent()
+  try {
+    const decoded = decodeEventLog({
+      abi: COMMENT_PUBLISHED_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { author, body, commentId, mediaCid, postId } = decoded.args
+    const normalizedAuthor = getAddress(author)
+    const bodyLength = getPostBodyByteLength(body)
+    const mediaCidLength = size(mediaCid)
+    if (
+      commentId === 0n ||
+      postId === 0n ||
+      (bodyLength === 0 && mediaCidLength === 0) ||
+      bodyLength > MAX_POST_BODY_BYTES ||
+      mediaCidLength > MAX_MEDIA_CID_BYTES ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(PUBLICATION_DATA_PARAMETERS, [
+          body,
+          mediaCid,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !==
+        padHex(toHex(commentId), { size: 32 }).toLowerCase() ||
+      log.topics[2]?.toLowerCase() !==
+        padHex(toHex(postId), { size: 32 }).toLowerCase() ||
+      log.topics[3]?.toLowerCase() !==
+        padHex(normalizedAuthor, { size: 32 }).toLowerCase()
+    ) {
+      throw invalidCommentEvent()
+    }
+    return {
+      author: normalizedAuthor,
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      body,
+      commentId,
+      logIndex: log.logIndex,
+      mediaCid,
+      postId,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidCommentEvent()
   }
 }
 
