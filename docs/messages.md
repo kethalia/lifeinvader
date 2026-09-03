@@ -37,4 +37,6 @@ Message identifiers are allocated by the contract and are shared with group mess
 
 ## Current boundary
 
-The client now provides conversation derivation, strict event decoding, filters, guarded writes, receipt verification, a bounded resumable conversation stream, and local Anvil coverage. It does not yet expose a message composer or conversation history in the React interface. Those screens will consume this stream without introducing a server or hosted database.
+The React client exposes an explicitly public composer and a selected-conversation reader without introducing a server or hosted database. Sending requires a separate no-privacy acknowledgment, preserves a returned transaction hash through uncertain receipt reads, and verifies the exact message event before reporting success. A hashless provider failure remains locked until the user confirms that they checked wallet activity, preventing an accidental duplicate broadcast.
+
+Conversation reads never begin as an effect of connecting, typing, or rendering. Each click advances no more than one bounded range for the exact address pair, stale reads are cancelled when the wallet context or recipient changes, and partial catch-up results remain hidden. Once caught up, the interface renders the newest retained page oldest first and labels that retention boundary rather than implying complete historical pagination.
