@@ -1,14 +1,19 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSynchronizer } from './post-feed'
 import type {
   IncludedPost,
   PostFeedConfirmationWaiter,
 } from './post-feed-confirmation'
-import { PublicGroupPanel } from './public-group-panel'
 import { PublicMessagePanel } from './public-message-panel'
 import { WalletPanel } from './wallet-panel'
 import { useWalletSession } from './wallet-session'
+
+const PublicGroupPanel = lazy(() =>
+  import('./public-group-panel').then((module) => ({
+    default: module.PublicGroupPanel,
+  })),
+)
 
 const principles = [
   {
@@ -104,7 +109,18 @@ export function App({
 
         <PublicMessagePanel session={walletSession.session} />
 
-        <PublicGroupPanel session={walletSession.session} />
+        <Suspense
+          fallback={
+            <section
+              aria-live="polite"
+              className="public-groups public-groups-loading"
+            >
+              Loading the public group ledger…
+            </section>
+          }
+        >
+          <PublicGroupPanel session={walletSession.session} />
+        </Suspense>
 
         <PostFeedPanel
           includedPost={includedPost}

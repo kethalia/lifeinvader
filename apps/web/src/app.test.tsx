@@ -82,7 +82,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 describe('App', () => {
-  it('states the deliberately public product boundary', () => {
+  it('states the deliberately public product boundary', async () => {
     renderApp()
     expect(
       screen.getByRole('heading', { name: /privacy was a bug/i }),
@@ -92,8 +92,13 @@ describe('App', () => {
       screen.getByRole('heading', { name: /^public messages/i }),
     ).toBeTruthy()
     expect(
-      screen.getByRole('heading', {
+      await screen.findByRole('heading', {
         name: /public groups\. public membership/i,
+      }),
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', {
+        name: /form a circle\. expose the membership list/i,
       }),
     ).toBeTruthy()
     expect(screen.getByText(/“Direct” only names the recipient/i)).toBeTruthy()

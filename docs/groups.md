@@ -144,9 +144,18 @@ the connected account's public membership status is derived from the same
 projection. Group metadata CIDs are labeled as commitments rather than promises
 of availability.
 
-The Anvil integration covers create, join, send, confirmed exact-group message
-and membership readback, and discovery of the immutable group definition. Later
-slices will add group transactions and confirmed messages to the interface
+The adjacent transaction console creates groups and publishes explicit join or
+leave events through the connected wallet. A directory selection feeds its
+membership target, while a confirmed creation selects the identifier assigned
+by the contract. It locks duplicate writes after a hash or ambiguous broadcast,
+keeps old wallet contexts isolated, and clears a creation draft only after the
+exact payload is authenticated in a canonical receipt. Unknown hashes can be
+retried only from the original provider, account, and chain with the expected
+creation or membership event bound into receipt validation.
+
+The Anvil integration covers create, join, leave, send, confirmed exact-group
+message and membership readback, and discovery of the immutable group
+definition. A later slice will add confirmed group messages to the interface
 without a hosted indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS

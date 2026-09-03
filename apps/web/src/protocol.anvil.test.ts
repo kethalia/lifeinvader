@@ -250,6 +250,17 @@ describe('wallet transaction helpers on Anvil', () => {
       messageId: 2n,
     })
     await expect(
+      setGroupMembership(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        groupReceipt.groupId,
+        false,
+        undefined,
+        provider,
+      ),
+    ).resolves.toMatchObject({ blockNumber: 12n })
+    await expect(
       setProfile(
         provider,
         account,
@@ -258,7 +269,7 @@ describe('wallet transaction helpers on Anvil', () => {
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 12n })
+    ).resolves.toMatchObject({ blockNumber: 13n })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,
@@ -337,6 +348,11 @@ describe('wallet transaction helpers on Anvil', () => {
       caughtUp: true,
       groupId: groupReceipt.groupId,
       recentSignals: [
+        {
+          account,
+          groupId: groupReceipt.groupId,
+          joined: false,
+        },
         {
           account,
           groupId: groupReceipt.groupId,
