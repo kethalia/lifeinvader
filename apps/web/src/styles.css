@@ -574,6 +574,58 @@ h1 span {
   color: var(--red);
 }
 
+.post-actions {
+  display: grid;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  gap: 0.65rem;
+  border-top: 1px solid var(--line);
+}
+
+.post-actions > div {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.post-actions button,
+.feed-feedback button {
+  min-height: 38px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.post-actions button:hover:not(:disabled),
+.post-actions button:focus-visible,
+.feed-feedback button:hover:not(:disabled),
+.feed-feedback button:focus-visible {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.post-actions button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.post-actions p {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.post-action-complete {
+  color: var(--ink);
+  background: var(--acid);
+  font-weight: 800;
+}
+
 .empty-feed,
 .feed-placeholder {
   min-height: 220px;

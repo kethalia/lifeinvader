@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Hex } from 'viem'
-import { describeRpcError } from './ethereum'
+import { describeRpcError, type Eip1193Provider } from './ethereum'
 import { decodeMediaCid } from './media-cid'
 import {
   synchronizePostFeed,
@@ -13,6 +13,16 @@ import {
   type IncludedPost,
   type PostFeedConfirmationWaiter,
 } from './post-feed-confirmation'
+import {
+  createTransactionGuard,
+  isTransactionRevertedError,
+  publishRepost,
+  setPostLike,
+  waitForTransactionReceipt,
+  type ExpectedPostAction,
+  type TransactionReceipt,
+  type TransactionSubmitted,
+} from './protocol'
 import type { WalletSession } from './wallet-session'
 
 function shortValue(value: string) {
@@ -50,15 +60,41 @@ function syncStatus(snapshot: PostFeedSnapshot) {
     : `Indexed through block ${snapshot.indexedThrough.toString()} of confirmed head ${snapshot.safeHead?.toString() ?? 'unknown'}.`
 }
 
+type SubmittedPostAction = {
+  chainId: bigint
+  expected: ExpectedPostAction
+  hash: TransactionReceipt['hash']
+  provider: Eip1193Provider
+  status: 'failed' | 'pending' | 'unknown'
+}
+
+type CompletedPostAction = {
+  chainId: bigint
+  expected: ExpectedPostAction
+  provider: Eip1193Provider
+  receipt: TransactionReceipt
+}
+
+function actionLabel(expected: ExpectedPostAction) {
+  if (expected.kind === 'repost') return 'Repost'
+  return expected.liked ? 'Like' : 'Unlike'
+}
+
 export function PostFeedPanel({
   includedPost,
+  publishRepostAction = publishRepost,
   session,
+  setPostLikeAction = setPostLike,
   synchronize = synchronizePostFeed,
+  waitForActionReceipt = waitForTransactionReceipt,
   waitForConfirmation = waitForPostFeedConfirmation,
 }: {
   includedPost?: IncludedPost
+  publishRepostAction?: typeof publishRepost
   session: WalletSession
+  setPostLikeAction?: typeof setPostLike
   synchronize?: PostFeedSynchronizer
+  waitForActionReceipt?: typeof waitForTransactionReceipt
   waitForConfirmation?: PostFeedConfirmationWaiter
 }) {
   const [loaded, setLoaded] = useState<{
@@ -80,6 +116,12 @@ export function PostFeedPanel({
     message?: string
     status: 'waiting' | 'stopped'
   }>()
+  const [busyPostAction, setBusyPostAction] = useState<ExpectedPostAction>()
+  const [completedPostAction, setCompletedPostAction] =
+    useState<CompletedPostAction>()
+  const [postActionError, setPostActionError] = useState<string>()
+  const [submittedPostAction, setSubmittedPostAction] =
+    useState<SubmittedPostAction>()
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const requestSequence = useRef(0)
   const connected =
@@ -113,6 +155,20 @@ export function PostFeedPanel({
     confirmation?.hash === includedPost.hash
       ? confirmation
       : undefined
+  const activeCompletedPostAction =
+    connected &&
+    completedPostAction !== undefined &&
+    completedPostAction.provider === session.provider &&
+    completedPostAction.chainId === session.chainId &&
+    completedPostAction.expected.account.toLowerCase() ===
+      session.account?.toLowerCase()
+      ? completedPostAction
+      : undefined
+  const postActionsLocked =
+    session.account === undefined ||
+    busyPostAction !== undefined ||
+    (submittedPostAction !== undefined &&
+      submittedPostAction.status !== 'failed')
 
   const runSynchronization = useCallback(() => {
     const provider = session.provider
@@ -169,6 +225,11 @@ export function PostFeedPanel({
   }, [connected, runSynchronization])
 
   useEffect(() => {
+    setCompletedPostAction(undefined)
+    setPostActionError(undefined)
+  }, [session.account, session.chainId, session.provider])
+
+  useEffect(() => {
     if (
       !connected ||
       includedPost === undefined ||
@@ -211,6 +272,132 @@ export function PostFeedPanel({
     session.provider,
     waitForConfirmation,
   ])
+
+  const runPostAction = (
+    postId: bigint,
+    action: 'like' | 'repost' | 'unlike',
+  ) => {
+    const account = session.account
+    const chainId = session.chainId
+    const provider = session.provider
+    if (
+      session.status !== 'connected' ||
+      !account ||
+      chainId === undefined ||
+      !provider ||
+      postActionsLocked
+    ) {
+      return
+    }
+    const expected: ExpectedPostAction =
+      action === 'repost'
+        ? { account, kind: 'repost', postId }
+        : { account, kind: 'like', liked: action === 'like', postId }
+    let submittedHash: TransactionReceipt['hash'] | undefined
+    setBusyPostAction(expected)
+    setCompletedPostAction(undefined)
+    setPostActionError(undefined)
+    if (submittedPostAction?.status === 'failed') {
+      setSubmittedPostAction(undefined)
+    }
+    const onSubmitted: TransactionSubmitted = (hash) => {
+      submittedHash = hash
+      setSubmittedPostAction({
+        chainId,
+        expected,
+        hash,
+        provider,
+        status: 'pending',
+      })
+    }
+    const operation =
+      action === 'repost'
+        ? publishRepostAction(provider, account, chainId, postId, onSubmitted)
+        : setPostLikeAction(
+            provider,
+            account,
+            chainId,
+            postId,
+            action === 'like',
+            onSubmitted,
+          )
+    void operation
+      .then((receipt) => {
+        setCompletedPostAction({ chainId, expected, provider, receipt })
+        setSubmittedPostAction(undefined)
+      })
+      .catch((actionError: unknown) => {
+        if (submittedHash) {
+          setSubmittedPostAction({
+            chainId,
+            expected,
+            hash: submittedHash,
+            provider,
+            status: isTransactionRevertedError(actionError)
+              ? 'failed'
+              : 'unknown',
+          })
+        }
+        setPostActionError(
+          describeRpcError(actionError, 'The public post action failed.'),
+        )
+      })
+      .finally(() => setBusyPostAction(undefined))
+  }
+
+  const retryPostActionReceipt = () => {
+    const transaction = submittedPostAction
+    if (transaction?.status !== 'unknown' || busyPostAction) return
+    void (async () => {
+      setBusyPostAction(transaction.expected)
+      setPostActionError(undefined)
+      setSubmittedPostAction({ ...transaction, status: 'pending' })
+      try {
+        if (session.provider !== transaction.provider) {
+          throw new Error(
+            'Reconnect the wallet that submitted this action to check its receipt.',
+          )
+        }
+        const guard = await createTransactionGuard(
+          transaction.provider,
+          transaction.expected.account,
+          transaction.chainId,
+        )
+        const receipt = await waitForActionReceipt(
+          transaction.provider,
+          transaction.hash,
+          {
+            assertCurrentChain: guard.assertSubmission,
+            assertUnchanged: guard.assertUnchanged,
+            expectedPostAction: transaction.expected,
+            selectedChainId: transaction.chainId,
+          },
+        ).finally(guard.release)
+        setCompletedPostAction({
+          chainId: transaction.chainId,
+          expected: transaction.expected,
+          provider: transaction.provider,
+          receipt,
+        })
+        setSubmittedPostAction(undefined)
+      } catch (receiptError) {
+        setSubmittedPostAction({
+          ...transaction,
+          status: isTransactionRevertedError(receiptError)
+            ? 'failed'
+            : 'unknown',
+        })
+        setPostActionError(
+          describeRpcError(
+            receiptError,
+            'The public action receipt could not be read.',
+          ),
+        )
+      } finally {
+        setBusyPostAction(undefined)
+      }
+    })()
+  }
 
   return (
     <section className="post-feed" aria-labelledby="post-feed-title">
@@ -265,6 +452,51 @@ export function PostFeedPanel({
             : activeConfirmation.message}
         </p>
       ) : null}
+      {postActionError ? (
+        <p className="error-message feed-feedback" role="alert">
+          {postActionError}
+        </p>
+      ) : null}
+      {submittedPostAction ? (
+        <div className="feed-feedback" role="status">
+          <span>
+            {actionLabel(submittedPostAction.expected)} for post #
+            {submittedPostAction.expected.postId.toString()} submitted ·{' '}
+            <code title={submittedPostAction.hash}>
+              {shortValue(submittedPostAction.hash)}
+            </code>
+            .{' '}
+            {submittedPostAction.status === 'pending'
+              ? 'Waiting for an on-chain receipt…'
+              : submittedPostAction.status === 'failed'
+                ? 'Reverted on-chain. This hash is final.'
+                : 'Its final status is unknown. Check this hash before trying again.'}
+          </span>
+          {submittedPostAction.status === 'unknown' ? (
+            <div className="transaction-recovery-actions">
+              <button type="button" onClick={retryPostActionReceipt}>
+                Check action receipt again
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSubmittedPostAction(undefined)
+                  setPostActionError(undefined)
+                }}
+              >
+                I checked this hash
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {activeCompletedPostAction ? (
+        <p className="feed-feedback post-action-complete" role="status">
+          {actionLabel(activeCompletedPostAction.expected)} for post #
+          {activeCompletedPostAction.expected.postId.toString()} was included in
+          block {activeCompletedPostAction.receipt.blockNumber.toString()}.
+        </p>
+      ) : null}
 
       {snapshot?.posts.length ? (
         <ol className="post-list" aria-busy={loading}>
@@ -287,6 +519,38 @@ export function PostFeedPanel({
                 {post.mediaCid !== '0x' ? (
                   <MediaCommitment value={post.mediaCid} />
                 ) : null}
+                <div
+                  aria-label={`Public actions for post ${post.postId.toString()}`}
+                  className="post-actions"
+                >
+                  <div>
+                    <button
+                      aria-label={`Record like for post ${post.postId.toString()}`}
+                      disabled={postActionsLocked}
+                      onClick={() => runPostAction(post.postId, 'like')}
+                      type="button"
+                    >
+                      Like
+                    </button>
+                    <button
+                      aria-label={`Record unlike for post ${post.postId.toString()}`}
+                      disabled={postActionsLocked}
+                      onClick={() => runPostAction(post.postId, 'unlike')}
+                      type="button"
+                    >
+                      Unlike
+                    </button>
+                    <button
+                      aria-label={`Repost post ${post.postId.toString()}`}
+                      disabled={postActionsLocked}
+                      onClick={() => runPostAction(post.postId, 'repost')}
+                      type="button"
+                    >
+                      Repost
+                    </button>
+                  </div>
+                  <p>Each click appends another public on-chain event.</p>
+                </div>
               </article>
             </li>
           ))}

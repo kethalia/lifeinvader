@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { encodeAbiParameters, padHex, toHex } from 'viem'
 import {
   parseAccounts,
   parseChainId,
@@ -6,6 +7,7 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import {
+  assertExpectedPostAction,
   assertProtocolConfiguration,
   deployProtocol,
   FACTORY_ADDRESS,
@@ -13,9 +15,13 @@ import {
   getPostBodyByteLength,
   inspectProtocol,
   isTransactionRevertedError,
+  LIKE_SET_TOPIC,
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
+  publishRepost,
   publishPost,
+  REPOST_PUBLISHED_TOPIC,
+  setPostLike,
   switchToLocalChain,
   verifyLocalChain,
   waitForTransactionReceipt,
@@ -172,6 +178,61 @@ describe('post transactions', () => {
       }),
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
+  })
+  it('rejects invalid reaction targets before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+    await expect(publishRepost(provider, ACCOUNT, 1n, 0n)).rejects.toThrow(
+      /post identifier is invalid/i,
+    )
+    await expect(
+      setPostLike(provider, ACCOUNT, 1n, 1n << 256n, true),
+    ).rejects.toThrow(/post identifier is invalid/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('requires exact like and repost events in action receipts', () => {
+    const postId = 7n
+    const accountTopic = padHex(ACCOUNT, { size: 32 })
+    const postTopic = padHex(toHex(postId), { size: 32 })
+    const likeLog = {
+      address: PROTOCOL_ADDRESS,
+      data: encodeAbiParameters([{ type: 'bool' }], [true]),
+      topics: [
+        LIKE_SET_TOPIC,
+        padHex(toHex(0n), { size: 32 }),
+        postTopic,
+        accountTopic,
+      ],
+    }
+    const repostLog = {
+      address: PROTOCOL_ADDRESS,
+      data: '0x',
+      topics: [REPOST_PUBLISHED_TOPIC, postTopic, accountTopic],
+    }
+
+    expect(() =>
+      assertExpectedPostAction([likeLog], {
+        account: ACCOUNT,
+        kind: 'like',
+        liked: true,
+        postId,
+      }),
+    ).not.toThrow()
+    expect(() =>
+      assertExpectedPostAction([repostLog], {
+        account: ACCOUNT,
+        kind: 'repost',
+        postId,
+      }),
+    ).not.toThrow()
+    expect(() =>
+      assertExpectedPostAction([likeLog], {
+        account: ACCOUNT,
+        kind: 'like',
+        liked: false,
+        postId,
+      }),
+    ).toThrow(/expected like event/i)
   })
   it('surfaces an on-chain revert from the receipt', async () => {
     const error = await waitForTransactionReceipt(
