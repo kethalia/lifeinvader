@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { synchronizeDirectMessageStream } from './direct-message-stream'
 import {
   parseAccounts,
   type Eip1193Provider,
@@ -229,6 +230,31 @@ describe('wallet transaction helpers on Anvil', () => {
     )
     await provider.request({ method: 'anvil_mine', params: ['0xc'] })
     await confirmation
+    const publicConversation = await synchronizeDirectMessageStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      account,
+      recipient,
+      {
+        storage: {
+          databaseName: 'lifeinvader-anvil-direct-messages',
+          factory: new IDBFactory(),
+          keyRange: IDBKeyRange,
+        },
+      },
+    )
+    expect(publicConversation).toMatchObject({
+      caughtUp: true,
+      recentMessages: [
+        {
+          body: 'This message is permanently public.',
+          mediaCid: '0x',
+          messageId: 1n,
+          recipient,
+          sender: account,
+        },
+      ],
+    })
     const feed = await synchronizePostFeed(provider, LOCAL_CHAIN_ID, {
       storage: {
         databaseName: 'lifeinvader-anvil-post-feed',
