@@ -8,22 +8,30 @@ import {
 } from './ethereum'
 import {
   assertExpectedDirectMessage,
+  assertExpectedGroupCreated,
+  assertExpectedGroupMembership,
+  assertExpectedGroupMessage,
   assertExpectedProfile,
   assertExpectedPostAction,
   assertProtocolConfiguration,
   COMMENT_PUBLISHED_TOPIC,
+  createGroup,
   deployProtocol,
   DIRECT_MESSAGE_SENT_TOPIC,
   FACTORY_ADDRESS,
   FACTORY_CODE_HASH,
   getDirectConversationId,
   getPostBodyByteLength,
+  GROUP_CREATED_TOPIC,
+  GROUP_MEMBERSHIP_SET_TOPIC,
+  GROUP_MESSAGE_SENT_TOPIC,
   inspectProtocol,
   isTransactionRevertedError,
   isTransactionSubmissionUnknownError,
   LIFEINVADER_INIT_CODE,
   LIKE_SET_TOPIC,
   MAX_POST_BODY_BYTES,
+  MAX_GROUP_NAME_BYTES,
   MAX_PROFILE_BIO_BYTES,
   MAX_PROFILE_DISPLAY_NAME_BYTES,
   PROTOCOL_ADDRESS,
@@ -33,6 +41,8 @@ import {
   publishPost,
   REPOST_PUBLISHED_TOPIC,
   sendDirectMessage,
+  sendGroupMessage,
+  setGroupMembership,
   setPostLike,
   setProfile,
   switchToLocalChain,
@@ -279,6 +289,57 @@ describe('protocol transactions', () => {
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
   })
+  it('rejects invalid public-group actions before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+
+    await expect(
+      createGroup(provider, ACCOUNT, 1n, { metadataCid: '0x', name: '' }),
+    ).rejects.toThrow(/requires a name/i)
+    await expect(
+      createGroup(provider, ACCOUNT, 1n, {
+        metadataCid: '0x',
+        name: '🫥'.repeat(MAX_GROUP_NAME_BYTES),
+      }),
+    ).rejects.toThrow(/96 UTF-8 bytes/i)
+    await expect(
+      createGroup(provider, ACCOUNT, 1n, {
+        metadataCid: '0x01',
+        name: 'Bagholders Anonymous',
+      }),
+    ).rejects.toThrow(/media CID/i)
+    await expect(
+      setGroupMembership(provider, ACCOUNT, 1n, 0n, true),
+    ).rejects.toThrow(/group identifier is invalid/i)
+    await expect(
+      setGroupMembership(provider, ACCOUNT, 1n, 1n << 256n, false),
+    ).rejects.toThrow(/group identifier is invalid/i)
+    await expect(
+      sendGroupMessage(provider, ACCOUNT, 1n, 0n, {
+        body: 'Unknown group.',
+        mediaCid: '0x',
+      }),
+    ).rejects.toThrow(/group identifier is invalid/i)
+    await expect(
+      sendGroupMessage(provider, ACCOUNT, 1n, 1n, {
+        body: '',
+        mediaCid: '0x',
+      }),
+    ).rejects.toThrow(/write a public group message/i)
+    await expect(
+      sendGroupMessage(provider, ACCOUNT, 1n, 1n, {
+        body: '🫥'.repeat(MAX_POST_BODY_BYTES),
+        mediaCid: '0x',
+      }),
+    ).rejects.toThrow(/4096 UTF-8 bytes/i)
+    await expect(
+      sendGroupMessage(provider, ACCOUNT, 1n, 1n, {
+        body: 'This attachment is not a CID.',
+        mediaCid: '0x01',
+      }),
+    ).rejects.toThrow(/media CID/i)
+    expect(request).not.toHaveBeenCalled()
+  })
   it('requires an exact public direct-message event and accepts its assigned ID', () => {
     const receipt = {
       blockHash: BLOCK_HASH,
@@ -354,6 +415,158 @@ describe('protocol transactions', () => {
         receipt,
       ),
     ).toThrow(/expected direct-message event/i)
+  })
+  it('requires exact group events and accepts their assigned identifiers', () => {
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const groupId = 17n
+    const groupTopic = padHex(toHex(groupId), { size: 32 })
+    const accountTopic = padHex(ACCOUNT, { size: 32 })
+    const createdData = encodeAbiParameters(
+      [{ type: 'string' }, { type: 'bytes' }],
+      ['Bagholders Anonymous', '0x01701220'],
+    )
+    const createdLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: createdData,
+      topics: [GROUP_CREATED_TOPIC, groupTopic, accountTopic],
+      transactionHash: TRANSACTION_HASH,
+    }
+    const membershipLog = {
+      ...createdLog,
+      data: encodeAbiParameters([{ type: 'bool' }], [true]),
+      topics: [GROUP_MEMBERSHIP_SET_TOPIC, groupTopic, accountTopic],
+    }
+    const messageData = encodeAbiParameters(
+      [{ type: 'string' }, { type: 'bytes' }],
+      ['Every member is an observer.', '0x'],
+    )
+    const messageLog = {
+      ...createdLog,
+      data: messageData,
+      topics: [
+        GROUP_MESSAGE_SENT_TOPIC,
+        groupTopic,
+        accountTopic,
+        padHex(toHex(91n), { size: 32 }),
+      ],
+    }
+
+    expect(
+      assertExpectedGroupCreated(
+        [createdLog],
+        {
+          creator: ACCOUNT,
+          metadataCid: '0x01701220',
+          name: 'Bagholders Anonymous',
+        },
+        receipt,
+      ),
+    ).toBe(groupId)
+    expect(() =>
+      assertExpectedGroupMembership(
+        [membershipLog],
+        { account: ACCOUNT, groupId, joined: true },
+        receipt,
+      ),
+    ).not.toThrow()
+    expect(
+      assertExpectedGroupMessage(
+        [messageLog],
+        {
+          body: 'Every member is an observer.',
+          groupId,
+          mediaCid: '0x',
+          sender: ACCOUNT,
+        },
+        receipt,
+      ),
+    ).toBe(91n)
+
+    expect(() =>
+      assertExpectedGroupCreated(
+        [
+          {
+            ...createdLog,
+            topics: [
+              GROUP_CREATED_TOPIC,
+              padHex(toHex(0n), { size: 32 }),
+              accountTopic,
+            ],
+          },
+        ],
+        {
+          creator: ACCOUNT,
+          metadataCid: '0x01701220',
+          name: 'Bagholders Anonymous',
+        },
+        receipt,
+      ),
+    ).toThrow(/expected group event/i)
+    expect(() =>
+      assertExpectedGroupCreated(
+        [createdLog],
+        {
+          creator: ACCOUNT,
+          metadataCid: '0x01701220',
+          name: 'A substituted name',
+        },
+        receipt,
+      ),
+    ).toThrow(/expected group event/i)
+    expect(() =>
+      assertExpectedGroupMembership(
+        [{ ...membershipLog, blockHash: OTHER_BLOCK_HASH }],
+        { account: ACCOUNT, groupId, joined: true },
+        receipt,
+      ),
+    ).toThrow(/expected group-membership event/i)
+    expect(() =>
+      assertExpectedGroupMembership(
+        [membershipLog],
+        { account: ACCOUNT, groupId, joined: false },
+        receipt,
+      ),
+    ).toThrow(/expected group-membership event/i)
+    expect(() =>
+      assertExpectedGroupMessage(
+        [
+          {
+            ...messageLog,
+            topics: [
+              GROUP_MESSAGE_SENT_TOPIC,
+              groupTopic,
+              accountTopic,
+              padHex(toHex(0n), { size: 32 }),
+            ],
+          },
+        ],
+        {
+          body: 'Every member is an observer.',
+          groupId,
+          mediaCid: '0x',
+          sender: ACCOUNT,
+        },
+        receipt,
+      ),
+    ).toThrow(/expected group-message event/i)
+    expect(() =>
+      assertExpectedGroupMessage(
+        [{ ...messageLog, data: createdData }],
+        {
+          body: 'Every member is an observer.',
+          groupId,
+          mediaCid: '0x',
+          sender: ACCOUNT,
+        },
+        receipt,
+      ),
+    ).toThrow(/expected group-message event/i)
   })
   it('requires the exact complete profile snapshot in its receipt', () => {
     const profileReceipt = {

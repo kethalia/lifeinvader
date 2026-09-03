@@ -15,9 +15,16 @@ import {
   COMMENT_PUBLISHED_TOPIC,
   DIRECT_MESSAGE_SENT_EVENT_ABI,
   DIRECT_MESSAGE_SENT_TOPIC,
+  GROUP_CREATED_EVENT_ABI,
+  GROUP_CREATED_TOPIC,
+  GROUP_MEMBERSHIP_SET_EVENT_ABI,
+  GROUP_MEMBERSHIP_SET_TOPIC,
+  GROUP_MESSAGE_SENT_EVENT_ABI,
+  GROUP_MESSAGE_SENT_TOPIC,
   getDirectConversationId,
   getPostBodyByteLength,
   getUtf8ByteLength,
+  MAX_GROUP_NAME_BYTES,
   MAX_MEDIA_CID_BYTES,
   MAX_POST_BODY_BYTES,
   MAX_PROFILE_BIO_BYTES,
@@ -51,7 +58,15 @@ const DIRECT_MESSAGE_DATA_PARAMETERS = [
   { type: 'bytes' },
 ] as const
 
+const GROUP_CREATED_DATA_PARAMETERS = [
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+
+const GROUP_MEMBERSHIP_DATA_PARAMETERS = [{ type: 'bool' }] as const
+
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+const MAX_UINT256 = (1n << 256n) - 1n
 
 export const POST_CONTENT_KIND_TOPIC = padHex(toHex(POST_CONTENT_KIND), {
   size: 32,
@@ -71,6 +86,42 @@ export const DIRECT_MESSAGE_SENT_FILTER = {
   address: PROTOCOL_ADDRESS,
   topics: [DIRECT_MESSAGE_SENT_TOPIC],
 } as const satisfies EventLogFilter
+
+export const GROUP_CREATED_FILTER = {
+  address: PROTOCOL_ADDRESS,
+  topics: [GROUP_CREATED_TOPIC],
+} as const satisfies EventLogFilter
+
+export const GROUP_MEMBERSHIP_SET_FILTER = {
+  address: PROTOCOL_ADDRESS,
+  topics: [GROUP_MEMBERSHIP_SET_TOPIC],
+} as const satisfies EventLogFilter
+
+export const GROUP_MESSAGE_SENT_FILTER = {
+  address: PROTOCOL_ADDRESS,
+  topics: [GROUP_MESSAGE_SENT_TOPIC],
+} as const satisfies EventLogFilter
+
+function getGroupIdTopic(groupId: bigint) {
+  if (groupId < 1n || groupId > MAX_UINT256) {
+    throw new Error('The selected group identifier is invalid.')
+  }
+  return padHex(toHex(groupId), { size: 32 })
+}
+
+export function getGroupMembershipFilter(groupId: bigint): EventLogFilter {
+  return {
+    address: PROTOCOL_ADDRESS,
+    topics: [GROUP_MEMBERSHIP_SET_TOPIC, getGroupIdTopic(groupId)],
+  }
+}
+
+export function getGroupMessageFilter(groupId: bigint): EventLogFilter {
+  return {
+    address: PROTOCOL_ADDRESS,
+    topics: [GROUP_MESSAGE_SENT_TOPIC, getGroupIdTopic(groupId)],
+  }
+}
 
 export function getDirectMessageConversationFilter(
   firstAccount: Address,
@@ -172,6 +223,42 @@ export type PublishedDirectMessage = {
   transactionIndex: number
 }
 
+export type PublishedGroup = {
+  blockHash: Hash
+  blockNumber: bigint
+  creator: Address
+  groupId: bigint
+  logIndex: number
+  metadataCid: Hex
+  name: string
+  transactionHash: Hash
+  transactionIndex: number
+}
+
+export type GroupMembershipSet = {
+  account: Address
+  blockHash: Hash
+  blockNumber: bigint
+  groupId: bigint
+  joined: boolean
+  logIndex: number
+  transactionHash: Hash
+  transactionIndex: number
+}
+
+export type PublishedGroupMessage = {
+  blockHash: Hash
+  blockNumber: bigint
+  body: string
+  groupId: bigint
+  logIndex: number
+  mediaCid: Hex
+  messageId: bigint
+  sender: Address
+  transactionHash: Hash
+  transactionIndex: number
+}
+
 function invalidPostEvent() {
   return new Error('The chain returned an invalid PostPublished event.')
 }
@@ -194,6 +281,18 @@ function invalidProfileEvent() {
 
 function invalidDirectMessageEvent() {
   return new Error('The chain returned an invalid DirectMessageSent event.')
+}
+
+function invalidGroupCreatedEvent() {
+  return new Error('The chain returned an invalid GroupCreated event.')
+}
+
+function invalidGroupMembershipEvent() {
+  return new Error('The chain returned an invalid GroupMembershipSet event.')
+}
+
+function invalidGroupMessageEvent() {
+  return new Error('The chain returned an invalid GroupMessageSent event.')
 }
 
 export function decodePublishedPost(
@@ -500,5 +599,163 @@ export function decodePublishedDirectMessage(
     }
   } catch {
     throw invalidDirectMessageEvent()
+  }
+}
+
+export function decodePublishedGroup(
+  log: IndexedEventLog,
+): PublishedGroup | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== GROUP_CREATED_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 3) throw invalidGroupCreatedEvent()
+  try {
+    const decoded = decodeEventLog({
+      abi: GROUP_CREATED_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { creator, groupId, metadataCid, name } = decoded.args
+    const normalizedCreator = getAddress(creator)
+    const nameLength = getUtf8ByteLength(name)
+    if (
+      groupId === 0n ||
+      normalizedCreator.toLowerCase() === ZERO_ADDRESS ||
+      nameLength === 0 ||
+      nameLength > MAX_GROUP_NAME_BYTES ||
+      size(metadataCid) > MAX_MEDIA_CID_BYTES ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(GROUP_CREATED_DATA_PARAMETERS, [
+          name,
+          metadataCid,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !== getGroupIdTopic(groupId).toLowerCase() ||
+      log.topics[2]?.toLowerCase() !==
+        padHex(normalizedCreator, { size: 32 }).toLowerCase()
+    ) {
+      throw invalidGroupCreatedEvent()
+    }
+    return {
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      creator: normalizedCreator,
+      groupId,
+      logIndex: log.logIndex,
+      metadataCid,
+      name,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidGroupCreatedEvent()
+  }
+}
+
+export function decodeGroupMembershipSet(
+  log: IndexedEventLog,
+): GroupMembershipSet | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== GROUP_MEMBERSHIP_SET_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 3) throw invalidGroupMembershipEvent()
+  try {
+    const decoded = decodeEventLog({
+      abi: GROUP_MEMBERSHIP_SET_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { account, groupId, joined } = decoded.args
+    const normalizedAccount = getAddress(account)
+    if (
+      groupId === 0n ||
+      normalizedAccount.toLowerCase() === ZERO_ADDRESS ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(GROUP_MEMBERSHIP_DATA_PARAMETERS, [
+          joined,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !== getGroupIdTopic(groupId).toLowerCase() ||
+      log.topics[2]?.toLowerCase() !==
+        padHex(normalizedAccount, { size: 32 }).toLowerCase()
+    ) {
+      throw invalidGroupMembershipEvent()
+    }
+    return {
+      account: normalizedAccount,
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      groupId,
+      joined,
+      logIndex: log.logIndex,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidGroupMembershipEvent()
+  }
+}
+
+export function decodePublishedGroupMessage(
+  log: IndexedEventLog,
+): PublishedGroupMessage | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== GROUP_MESSAGE_SENT_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 4) throw invalidGroupMessageEvent()
+  try {
+    const decoded = decodeEventLog({
+      abi: GROUP_MESSAGE_SENT_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { body, groupId, mediaCid, messageId, sender } = decoded.args
+    const normalizedSender = getAddress(sender)
+    const bodyLength = getPostBodyByteLength(body)
+    const mediaCidLength = size(mediaCid)
+    if (
+      groupId === 0n ||
+      messageId === 0n ||
+      normalizedSender.toLowerCase() === ZERO_ADDRESS ||
+      (bodyLength === 0 && mediaCidLength === 0) ||
+      bodyLength > MAX_POST_BODY_BYTES ||
+      mediaCidLength > MAX_MEDIA_CID_BYTES ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(PUBLICATION_DATA_PARAMETERS, [
+          body,
+          mediaCid,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !== getGroupIdTopic(groupId).toLowerCase() ||
+      log.topics[2]?.toLowerCase() !==
+        padHex(normalizedSender, { size: 32 }).toLowerCase() ||
+      log.topics[3]?.toLowerCase() !==
+        padHex(toHex(messageId), { size: 32 }).toLowerCase()
+    ) {
+      throw invalidGroupMessageEvent()
+    }
+    return {
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      body,
+      groupId,
+      logIndex: log.logIndex,
+      mediaCid,
+      messageId,
+      sender: normalizedSender,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidGroupMessageEvent()
   }
 }

@@ -38,6 +38,7 @@ export const INIT_CODE_HASH =
 export const MAX_POST_BODY_BYTES = 4_096
 export const MAX_PROFILE_DISPLAY_NAME_BYTES = 64
 export const MAX_PROFILE_BIO_BYTES = 1_024
+export const MAX_GROUP_NAME_BYTES = 96
 export const LOCAL_CHAIN_ID = 31_337n
 export const LOCAL_RPC_URL = 'http://127.0.0.1:8545'
 export const LIFEINVADER_INIT_CODE =
@@ -109,6 +110,43 @@ const SEND_DIRECT_MESSAGE_ABI = [
     stateMutability: 'nonpayable',
     inputs: [
       { name: 'recipient', type: 'address' },
+      { name: 'body', type: 'string' },
+      { name: 'mediaCid', type: 'bytes' },
+    ],
+    outputs: [{ name: 'messageId', type: 'uint256' }],
+  },
+] as const
+const CREATE_GROUP_ABI = [
+  {
+    type: 'function',
+    name: 'createGroup',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'name', type: 'string' },
+      { name: 'metadataCid', type: 'bytes' },
+    ],
+    outputs: [{ name: 'groupId', type: 'uint256' }],
+  },
+] as const
+const SET_GROUP_MEMBERSHIP_ABI = [
+  {
+    type: 'function',
+    name: 'setGroupMembership',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'groupId', type: 'uint256' },
+      { name: 'joined', type: 'bool' },
+    ],
+    outputs: [],
+  },
+] as const
+const SEND_GROUP_MESSAGE_ABI = [
+  {
+    type: 'function',
+    name: 'sendGroupMessage',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'groupId', type: 'uint256' },
       { name: 'body', type: 'string' },
       { name: 'mediaCid', type: 'bytes' },
     ],
@@ -194,6 +232,45 @@ export const DIRECT_MESSAGE_SENT_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const GROUP_CREATED_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'groupId', type: 'uint256' },
+      { indexed: true, name: 'creator', type: 'address' },
+      { indexed: false, name: 'name', type: 'string' },
+      { indexed: false, name: 'metadataCid', type: 'bytes' },
+    ],
+    name: 'GroupCreated',
+    type: 'event',
+  },
+] as const
+export const GROUP_MEMBERSHIP_SET_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'groupId', type: 'uint256' },
+      { indexed: true, name: 'account', type: 'address' },
+      { indexed: false, name: 'joined', type: 'bool' },
+    ],
+    name: 'GroupMembershipSet',
+    type: 'event',
+  },
+] as const
+export const GROUP_MESSAGE_SENT_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'groupId', type: 'uint256' },
+      { indexed: true, name: 'sender', type: 'address' },
+      { indexed: true, name: 'messageId', type: 'uint256' },
+      { indexed: false, name: 'body', type: 'string' },
+      { indexed: false, name: 'mediaCid', type: 'bytes' },
+    ],
+    name: 'GroupMessageSent',
+    type: 'event',
+  },
+] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
 export const COMMENT_PUBLISHED_TOPIC =
@@ -206,6 +283,12 @@ export const PROFILE_SET_TOPIC =
   '0x033f4d6cdbbae83b8a59446e605fd37762898192566e447aed006d0d815842a7'
 export const DIRECT_MESSAGE_SENT_TOPIC =
   '0xd3c21a10e60cff821a30409b33f5e1cbe639483334abf0a56db83cbdbd3f5732'
+export const GROUP_CREATED_TOPIC =
+  '0xf32741f516bc616f96857271f14729f50e80882de799470133ec54117df98edd'
+export const GROUP_MEMBERSHIP_SET_TOPIC =
+  '0x35b852f9d0970d7d7c8d97158385a3a58772cab7af8c74714b25f79ae466641c'
+export const GROUP_MESSAGE_SENT_TOPIC =
+  '0xd09a35baad2f16a457a76f1875dcc3ffa7556a6515782e018f8ab2a13798c308'
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const PROFILE_DATA_PARAMETERS = [
   { type: 'string' },
@@ -218,6 +301,12 @@ const DIRECT_MESSAGE_DATA_PARAMETERS = [
   { type: 'string' },
   { type: 'bytes' },
 ] as const
+const GROUP_CREATED_DATA_PARAMETERS = [
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+const GROUP_MEMBERSHIP_DATA_PARAMETERS = [{ type: 'bool' }] as const
+const GROUP_MESSAGE_DATA_PARAMETERS = POST_DATA_PARAMETERS
 const MAX_UINT256 = (1n << 256n) - 1n
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MAX_RECEIPT_EVENT_DATA_BYTES =
@@ -236,7 +325,9 @@ export type ProtocolInspection =
 export type TransactionReceipt = {
   blockHash: Hash
   blockNumber: bigint
+  groupId?: bigint
   hash: Hash
+  messageId?: bigint
 }
 export type TransactionSubmitted = (hash: Hash) => void
 type BlockFingerprint = {
@@ -688,6 +779,17 @@ export type ExpectedDirectMessage = DirectMessagePayload & {
   recipient: Address
   sender: Address
 }
+export type GroupPayload = { metadataCid: Hex; name: string }
+export type ExpectedGroupCreated = GroupPayload & { creator: Address }
+export type ExpectedGroupMembership = {
+  account: Address
+  groupId: bigint
+  joined: boolean
+}
+export type ExpectedGroupMessage = PostPayload & {
+  groupId: bigint
+  sender: Address
+}
 export type ProfilePayload = {
   avatarCid: Hex
   bio: string
@@ -727,7 +829,7 @@ function expectedTopic(value: Address | bigint) {
   }).toLowerCase() as Hex
 }
 
-function getMatchingProtocolLogData(
+function getMatchingProtocolLogs(
   logs: unknown,
   receipt: TransactionReceipt,
   expectedTopics: readonly (Hex | undefined)[],
@@ -735,7 +837,7 @@ function getMatchingProtocolLogData(
   if (!Array.isArray(logs) || logs.length > 1_000) {
     throw new Error('The wallet returned invalid receipt logs.')
   }
-  const matches: Hex[] = []
+  const matches: { data: Hex; topics: readonly Hex[] }[] = []
   for (const log of logs) {
     if (typeof log !== 'object' || log === null) continue
     const { address, data, topics } = log as Record<string, unknown>
@@ -771,10 +873,23 @@ function getMatchingProtocolLogData(
       data.length <= MAX_RECEIPT_EVENT_DATA_BYTES * 2 + 2 &&
       /^0x(?:[0-9a-f]{2})*$/i.test(data)
     ) {
-      matches.push(data.toLowerCase() as Hex)
+      matches.push({
+        data: data.toLowerCase() as Hex,
+        topics: topics.map((topic) => (topic as string).toLowerCase() as Hex),
+      })
     }
   }
   return matches
+}
+
+function getMatchingProtocolLogData(
+  logs: unknown,
+  receipt: TransactionReceipt,
+  expectedTopics: readonly (Hex | undefined)[],
+) {
+  return getMatchingProtocolLogs(logs, receipt, expectedTopics).map(
+    (log) => log.data,
+  )
 }
 
 function hasExpectedProtocolLog(
@@ -882,6 +997,88 @@ export function assertExpectedDirectMessage(
   )
 }
 
+export function assertExpectedGroupCreated(
+  logs: unknown,
+  expected: ExpectedGroupCreated,
+  receipt: TransactionReceipt,
+) {
+  const expectedData = encodeAbiParameters(GROUP_CREATED_DATA_PARAMETERS, [
+    expected.name,
+    expected.metadataCid,
+  ]).toLowerCase()
+  const matches = getMatchingProtocolLogs(logs, receipt, [
+    GROUP_CREATED_TOPIC,
+    undefined,
+    expectedTopic(expected.creator),
+  ])
+  for (const log of matches) {
+    const groupId = BigInt(log.topics[1]!)
+    if (
+      groupId > 0n &&
+      log.data.length === expectedData.length &&
+      log.data === expectedData
+    ) {
+      return groupId
+    }
+  }
+  throw new Error('The receipt did not contain the expected group event.')
+}
+
+export function assertExpectedGroupMembership(
+  logs: unknown,
+  expected: ExpectedGroupMembership,
+  receipt: TransactionReceipt,
+) {
+  assertGroupId(expected.groupId)
+  if (
+    !hasExpectedProtocolLog(
+      logs,
+      receipt,
+      [
+        GROUP_MEMBERSHIP_SET_TOPIC,
+        expectedTopic(expected.groupId),
+        expectedTopic(expected.account),
+      ],
+      encodeAbiParameters(GROUP_MEMBERSHIP_DATA_PARAMETERS, [expected.joined]),
+    )
+  ) {
+    throw new Error(
+      'The receipt did not contain the expected group-membership event.',
+    )
+  }
+}
+
+export function assertExpectedGroupMessage(
+  logs: unknown,
+  expected: ExpectedGroupMessage,
+  receipt: TransactionReceipt,
+) {
+  assertGroupId(expected.groupId)
+  const expectedData = encodeAbiParameters(GROUP_MESSAGE_DATA_PARAMETERS, [
+    expected.body,
+    expected.mediaCid,
+  ]).toLowerCase()
+  const matches = getMatchingProtocolLogs(logs, receipt, [
+    GROUP_MESSAGE_SENT_TOPIC,
+    expectedTopic(expected.groupId),
+    expectedTopic(expected.sender),
+    undefined,
+  ])
+  for (const log of matches) {
+    const messageId = BigInt(log.topics[3]!)
+    if (
+      messageId > 0n &&
+      log.data.length === expectedData.length &&
+      log.data === expectedData
+    ) {
+      return messageId
+    }
+  }
+  throw new Error(
+    'The receipt did not contain the expected group-message event.',
+  )
+}
+
 export function assertExpectedPostAction(
   logs: unknown,
   expected: ExpectedPostAction,
@@ -945,6 +1142,9 @@ export async function waitForTransactionReceipt(
     assertCurrentChain?: () => Promise<void>
     assertUnchanged?: () => void
     expectedDirectMessage?: ExpectedDirectMessage
+    expectedGroupCreated?: ExpectedGroupCreated
+    expectedGroupMembership?: ExpectedGroupMembership
+    expectedGroupMessage?: ExpectedGroupMessage
     expectedPost?: ExpectedPost
     expectedPostAction?: ExpectedPostAction
     expectedProfile?: ExpectedProfile
@@ -1009,6 +1209,8 @@ export async function waitForTransactionReceipt(
           canonicalBlock.number === receipt.blockNumber &&
           canonicalBlock.hash === receipt.blockHash
         ) {
+          let groupId: bigint | undefined
+          let messageId: bigint | undefined
           if (protocolCode && keccak256(protocolCode) !== PROTOCOL_CODE_HASH) {
             throw new Error('The receipt did not deploy Lifeinvader v1.')
           }
@@ -1022,14 +1224,39 @@ export async function waitForTransactionReceipt(
             assertExpectedProfile(logs, options.expectedProfile, receipt)
           }
           if (!reverted && options.expectedDirectMessage) {
-            assertExpectedDirectMessage(
+            messageId = assertExpectedDirectMessage(
               logs,
               options.expectedDirectMessage,
               receipt,
             )
           }
+          if (!reverted && options.expectedGroupCreated) {
+            groupId = assertExpectedGroupCreated(
+              logs,
+              options.expectedGroupCreated,
+              receipt,
+            )
+          }
+          if (!reverted && options.expectedGroupMembership) {
+            assertExpectedGroupMembership(
+              logs,
+              options.expectedGroupMembership,
+              receipt,
+            )
+          }
+          if (!reverted && options.expectedGroupMessage) {
+            messageId = assertExpectedGroupMessage(
+              logs,
+              options.expectedGroupMessage,
+              receipt,
+            )
+          }
           if (reverted) throw new TransactionRevertedError(hash)
-          return receipt
+          return {
+            ...receipt,
+            ...(groupId === undefined ? {} : { groupId }),
+            ...(messageId === undefined ? {} : { messageId }),
+          }
         }
       }
     }
@@ -1178,6 +1405,12 @@ export async function publishComment(
 function assertPostId(postId: bigint) {
   if (postId < 1n || postId > MAX_UINT256) {
     throw new Error('The selected post identifier is invalid.')
+  }
+}
+
+function assertGroupId(groupId: bigint) {
+  if (groupId < 1n || groupId > MAX_UINT256) {
+    throw new Error('The selected group identifier is invalid.')
   }
 }
 
@@ -1398,4 +1631,160 @@ export async function sendDirectMessage(
   } finally {
     guard.release()
   }
+}
+
+type GroupTransactionExpectation =
+  | { expected: ExpectedGroupCreated; kind: 'create' }
+  | { expected: ExpectedGroupMembership; kind: 'membership' }
+  | { expected: ExpectedGroupMessage; kind: 'message' }
+
+async function submitGroupTransaction(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  data: Hex,
+  expectation: GroupTransactionExpectation,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  const guard = await createTransactionGuard(provider, account, chainId)
+  try {
+    if ((await inspectProtocol(provider)).kind !== 'ready') {
+      throw new Error(
+        'Verified Lifeinvader v1 code is required before changing a public group.',
+      )
+    }
+    const hash = await sendTransaction(
+      provider,
+      { data, from: account, to: PROTOCOL_ADDRESS },
+      guard,
+      onSubmitted,
+      localProvider,
+    )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
+      expectedGroupCreated:
+        expectation.kind === 'create' ? expectation.expected : undefined,
+      expectedGroupMembership:
+        expectation.kind === 'membership' ? expectation.expected : undefined,
+      expectedGroupMessage:
+        expectation.kind === 'message' ? expectation.expected : undefined,
+      localProvider,
+      selectedChainId: chainId,
+    })
+  } finally {
+    guard.release()
+  }
+}
+
+export async function createGroup(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  payload: GroupPayload,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  const { metadataCid, name } = payload
+  const nameLength =
+    name.length > MAX_GROUP_NAME_BYTES
+      ? MAX_GROUP_NAME_BYTES + 1
+      : getUtf8ByteLength(name)
+  if (nameLength === 0) {
+    throw new Error('A public group requires a name.')
+  }
+  if (nameLength > MAX_GROUP_NAME_BYTES) {
+    throw new Error(
+      `Group names are limited to ${MAX_GROUP_NAME_BYTES} UTF-8 bytes.`,
+    )
+  }
+  if (metadataCid !== '0x') decodeMediaCid(metadataCid)
+  const receipt = await submitGroupTransaction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: CREATE_GROUP_ABI,
+      functionName: 'createGroup',
+      args: [name, metadataCid],
+    }),
+    { expected: { creator: account, metadataCid, name }, kind: 'create' },
+    onSubmitted,
+    localProvider,
+  )
+  if (receipt.groupId === undefined) {
+    throw new Error('The confirmed group transaction did not return its ID.')
+  }
+  return { ...receipt, groupId: receipt.groupId }
+}
+
+export async function setGroupMembership(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  groupId: bigint,
+  joined: boolean,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertGroupId(groupId)
+  return await submitGroupTransaction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: SET_GROUP_MEMBERSHIP_ABI,
+      functionName: 'setGroupMembership',
+      args: [groupId, joined],
+    }),
+    { expected: { account, groupId, joined }, kind: 'membership' },
+    onSubmitted,
+    localProvider,
+  )
+}
+
+export async function sendGroupMessage(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  groupId: bigint,
+  payload: PostPayload,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertGroupId(groupId)
+  const { body, mediaCid } = payload
+  const bodyLength =
+    body.length > MAX_POST_BODY_BYTES
+      ? MAX_POST_BODY_BYTES + 1
+      : getPostBodyByteLength(body)
+  if (bodyLength === 0 && mediaCid === '0x') {
+    throw new Error(
+      'Write a public group message or add a media CID before sending.',
+    )
+  }
+  if (bodyLength > MAX_POST_BODY_BYTES) {
+    throw new Error(
+      `Group messages are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`,
+    )
+  }
+  if (mediaCid !== '0x') decodeMediaCid(mediaCid)
+  const receipt = await submitGroupTransaction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: SEND_GROUP_MESSAGE_ABI,
+      functionName: 'sendGroupMessage',
+      args: [groupId, body, mediaCid],
+    }),
+    { expected: { body, groupId, mediaCid, sender: account }, kind: 'message' },
+    onSubmitted,
+    localProvider,
+  )
+  if (receipt.messageId === undefined) {
+    throw new Error('The confirmed group message did not return its ID.')
+  }
+  return { ...receipt, messageId: receipt.messageId }
 }
