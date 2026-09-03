@@ -60,11 +60,20 @@ invalid booleans, non-canonical topic padding or ABI data, empty or oversized
 content, and malformed dynamic values. Raw on-chain CID bytes are length-checked
 rather than treated as proof that content exists.
 
-This slice provides the guarded transaction and event-decoding boundary plus a
-real Anvil create/join/send round trip. A later slice will build the resumable,
-reorganization-aware group projections and React interface. It will use the same
-bounded range and disposable local-cache rules as other Lifeinvader streams; no
-hosted indexer, application server, or database is introduced.
+The selected-group message stream verifies the chosen chain and exact v1 runtime
+before touching logs. Each explicit invocation scans at most one bounded range
+with the exact group filter, persists a reorganization-aware cursor in disposable
+IndexedDB storage, and returns at most the newest 100 retained messages. Separate
+group IDs use separate cache scopes. A malformed cached page clears only that
+scope and restarts from genesis; fresh malformed logs fail before cursor commit.
+
+The stream rechecks its final checkpoint, confirmation depth, head, and wallet
+chain after cache work. It cannot claim catch-up unless its checkpoint anchors the
+twice-sampled safe head. Partial catch-up remains identifiable to the caller, and
+no history is read merely because a wallet connected or a component rendered.
+The Anvil integration covers create, join, send, and confirmed exact-group
+readback. Later slices will add bounded group discovery, membership projections,
+and the React interface without a hosted indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see

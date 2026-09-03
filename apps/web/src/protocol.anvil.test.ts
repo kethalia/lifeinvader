@@ -5,6 +5,7 @@ import { createServer } from 'node:net'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { synchronizeDirectMessageStream } from './direct-message-stream'
+import { synchronizeGroupMessageStream } from './group-message-stream'
 import {
   parseAccounts,
   type Eip1193Provider,
@@ -292,6 +293,31 @@ describe('wallet transaction helpers on Anvil', () => {
           mediaCid: '0x',
           messageId: 1n,
           recipient,
+          sender: account,
+        },
+      ],
+    })
+    const publicGroup = await synchronizeGroupMessageStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      groupReceipt.groupId,
+      {
+        storage: {
+          databaseName: 'lifeinvader-anvil-group-messages',
+          factory: new IDBFactory(),
+          keyRange: IDBKeyRange,
+        },
+      },
+    )
+    expect(publicGroup).toMatchObject({
+      caughtUp: true,
+      groupId: groupReceipt.groupId,
+      recentMessages: [
+        {
+          body: 'Membership does not make this private.',
+          groupId: groupReceipt.groupId,
+          mediaCid: MEDIA_CID.bytes,
+          messageId: groupMessageReceipt.messageId,
           sender: account,
         },
       ],
