@@ -5,6 +5,7 @@ import type {
   IncludedPost,
   PostFeedConfirmationWaiter,
 } from './post-feed-confirmation'
+import { PublicGroupPanel } from './public-group-panel'
 import { PublicMessagePanel } from './public-message-panel'
 import { WalletPanel } from './wallet-panel'
 import { useWalletSession } from './wallet-session'
@@ -102,6 +103,8 @@ export function App({
         />
 
         <PublicMessagePanel session={walletSession.session} />
+
+        <PublicGroupPanel session={walletSession.session} />
 
         <PostFeedPanel
           includedPost={includedPost}

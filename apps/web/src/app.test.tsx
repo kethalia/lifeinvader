@@ -91,6 +91,11 @@ describe('App', () => {
     expect(
       screen.getByRole('heading', { name: /^public messages/i }),
     ).toBeTruthy()
+    expect(
+      screen.getByRole('heading', {
+        name: /public groups\. public membership/i,
+      }),
+    ).toBeTruthy()
     expect(screen.getByText(/“Direct” only names the recipient/i)).toBeTruthy()
     expect(screen.getByText(/unofficial parody project/i)).toBeTruthy()
   })
