@@ -16,6 +16,7 @@ const MAX_BATCH_LOGS = 5_000
 
 type CursorRecord = {
   cursor: unknown
+  revision: bigint
   schemaVersion: number
   scope: string
 }
@@ -25,12 +26,11 @@ type LogRecord = {
   schemaVersion: number
   scope: string
 }
-type RawCachePage = {
-  cursorRecord?: unknown
-  logRecords: unknown[]
-}
-export type EventCachePage = {
+export type EventCachePosition = {
   cursor: EventCursor
+  revision: bigint
+}
+export type EventCachePage = EventCachePosition & {
   logs: readonly IndexedEventLog[]
   reset: boolean
 }
@@ -52,6 +52,13 @@ function isSeedCursor(cursor: EventCursor) {
   return (
     cursor.checkpoints.length === 0 && cursor.nextBlock === cursor.startBlock
   )
+}
+function getSeedCursor(cursor: EventCursor): EventCursor {
+  return {
+    ...cursor,
+    checkpoints: [],
+    nextBlock: cursor.startBlock,
+  }
 }
 function sameCursor(first: EventCursor, second: EventCursor) {
   return (
@@ -110,12 +117,30 @@ function assertRollbackTo(value: unknown, cursor: EventCursor) {
   }
   return value
 }
-function asCursorRecord(value: unknown, scope: string) {
+function asCachePosition(value: unknown): EventCachePosition {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw cacheError('Invalid event cache position.')
+  }
+  const position = value as Partial<EventCachePosition>
+  if (typeof position.revision !== 'bigint' || position.revision < 0n) {
+    throw cacheError('Invalid event cache revision.')
+  }
+  return {
+    cursor: validateEventCursor(position.cursor),
+    revision: position.revision,
+  }
+}
+function asCursorRecord(value: unknown, scope: string): EventCachePosition {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new EventCacheCorruptionError()
   }
   const record = value as Partial<CursorRecord>
-  if (record.schemaVersion !== CACHE_SCHEMA_VERSION || record.scope !== scope) {
+  if (
+    record.schemaVersion !== CACHE_SCHEMA_VERSION ||
+    record.scope !== scope ||
+    typeof record.revision !== 'bigint' ||
+    record.revision < 1n
+  ) {
     throw new EventCacheCorruptionError()
   }
   try {
@@ -123,10 +148,17 @@ function asCursorRecord(value: unknown, scope: string) {
     if (getEventCacheScope(cursor) !== scope) {
       throw new EventCacheCorruptionError()
     }
-    return cursor
+    return { cursor, revision: record.revision }
   } catch {
     throw new EventCacheCorruptionError()
   }
+}
+function getResetRevision(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return 1n
+  }
+  const revision = (value as Partial<CursorRecord>).revision
+  return typeof revision === 'bigint' && revision >= 0n ? revision + 1n : 1n
 }
 function asLogRecord(value: unknown, scope: string) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -188,24 +220,50 @@ export class BrowserEventCache {
     this.#database.close()
   }
 
-  async clear(value: unknown) {
-    const scope = getEventCacheScope(value)
+  async clear(seedValue: unknown) {
+    const seedCursor = validateEventCursor(seedValue)
+    if (!isSeedCursor(seedCursor)) {
+      throw cacheError('The event cache requires a fresh seed cursor.')
+    }
+    const scope = getEventCacheScope(seedCursor)
     await new Promise<void>((resolve, reject) => {
       const transaction = this.#database.transaction(
         [CURSOR_STORE, LOG_STORE],
         'readwrite',
       )
-      transaction.objectStore(CURSOR_STORE).delete(scope)
-      transaction
-        .objectStore(LOG_STORE)
-        .delete(getScopeRange(this.#keyRange, scope))
+      let failure: Error | undefined
+      const cursorStore = transaction.objectStore(CURSOR_STORE)
+      const logStore = transaction.objectStore(LOG_STORE)
+      const cursorRequest = cursorStore.get(scope)
+      cursorRequest.onsuccess = () => {
+        try {
+          this.#resetScope(
+            cursorStore,
+            logStore,
+            scope,
+            seedCursor,
+            cursorRequest.result,
+          )
+        } catch (error) {
+          failure = asError(error, 'The browser event cache could not clear.')
+          transaction.abort()
+        }
+      }
+      cursorRequest.onerror = () => {
+        failure = asError(
+          cursorRequest.error,
+          'The browser event cache could not clear.',
+        )
+        transaction.abort()
+      }
       transaction.oncomplete = () => resolve()
       transaction.onabort = () =>
         reject(
-          asError(
-            transaction.error,
-            'The browser event cache could not clear.',
-          ),
+          failure ??
+            asError(
+              transaction.error,
+              'The browser event cache could not clear.',
+            ),
         )
       transaction.onerror = () => undefined
     })
@@ -221,37 +279,15 @@ export class BrowserEventCache {
     }
     assertPageSize(limit)
     const scope = getEventCacheScope(seedCursor)
-    const rawPage = await this.#readRawPage(scope, limit)
-    try {
-      if (!rawPage.cursorRecord && rawPage.logRecords.length > 0) {
-        throw new EventCacheCorruptionError()
-      }
-      const cursor = rawPage.cursorRecord
-        ? asCursorRecord(rawPage.cursorRecord, scope)
-        : seedCursor
-      const logs = rawPage.logRecords.map((record) =>
-        asLogRecord(record, scope),
-      )
-      for (let index = 0; index < logs.length; index += 1) {
-        const log = logs[index]!
-        if (
-          log.blockNumber < cursor.startBlock ||
-          log.blockNumber >= cursor.nextBlock ||
-          (index > 0 && compareLogs(logs[index - 1]!, log) <= 0)
-        ) {
-          throw new EventCacheCorruptionError()
-        }
-      }
-      return { cursor, logs, reset: false }
-    } catch (error) {
-      if (!(error instanceof EventCacheCorruptionError)) throw error
-      await this.clear(seedCursor)
-      return { cursor: seedCursor, logs: [], reset: true }
-    }
+    return this.#readLatestTransaction(seedCursor, scope, limit)
   }
 
-  async apply(expectedValue: unknown, result: EventSyncResult): Promise<void> {
-    const expectedCursor = validateEventCursor(expectedValue)
+  async apply(
+    expectedValue: EventCachePosition,
+    result: EventSyncResult,
+  ): Promise<void> {
+    const expected = asCachePosition(expectedValue)
+    const expectedCursor = expected.cursor
     const nextCursor = validateEventCursor(result.cursor)
     if (!sameCursorIdentity(expectedCursor, nextCursor)) {
       throw cacheError('The event sync result belongs to another cache.')
@@ -280,42 +316,135 @@ export class BrowserEventCache {
         throw cacheError('The event sync batch is not canonically ordered.')
       }
     }
-    try {
-      await this.#applyRaw(scope, expectedCursor, nextCursor, logs, rollbackTo)
-    } catch (error) {
-      if (!(error instanceof EventCacheCorruptionError)) throw error
-      await this.clear(expectedCursor)
-      throw cacheError(
-        'The browser event cache was corrupt and has been reset. Synchronize again.',
-      )
-    }
+    await this.#applyRaw(scope, expected, nextCursor, logs, rollbackTo)
   }
 
-  #readRawPage(scope: string, limit: number) {
-    return new Promise<RawCachePage>((resolve, reject) => {
+  #resetScope(
+    cursorStore: IDBObjectStore,
+    logStore: IDBObjectStore,
+    scope: string,
+    seedCursor: EventCursor,
+    observedCursorRecord: unknown,
+  ) {
+    const revision = getResetRevision(observedCursorRecord)
+    logStore.delete(getScopeRange(this.#keyRange, scope))
+    cursorStore.put({
+      cursor: seedCursor,
+      revision,
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      scope,
+    } satisfies CursorRecord)
+    return revision
+  }
+
+  #readLatestTransaction(
+    seedCursor: EventCursor,
+    scope: string,
+    limit: number,
+  ) {
+    return new Promise<EventCachePage>((resolve, reject) => {
       const transaction = this.#database.transaction(
         [CURSOR_STORE, LOG_STORE],
-        'readonly',
+        'readwrite',
       )
+      let failure: Error | undefined
+      let page: EventCachePage | undefined
       let cursorRecord: unknown
       const logRecords: unknown[] = []
-      const cursorRequest = transaction.objectStore(CURSOR_STORE).get(scope)
+      let cursorDone = false
+      let logsDone = false
+      let finalized = false
+      const cursorStore = transaction.objectStore(CURSOR_STORE)
+      const logStore = transaction.objectStore(LOG_STORE)
+      const fail = (error: unknown) => {
+        if (failure) return
+        finalized = true
+        failure = asError(error, 'The browser event cache could not read.')
+        try {
+          transaction.abort()
+        } catch {
+          reject(failure)
+        }
+      }
+      const finalize = () => {
+        if (finalized || !cursorDone || !logsDone) return
+        finalized = true
+        try {
+          if (!cursorRecord && logRecords.length > 0) {
+            throw new EventCacheCorruptionError()
+          }
+          const position = cursorRecord
+            ? asCursorRecord(cursorRecord, scope)
+            : { cursor: seedCursor, revision: 0n }
+          const logs = logRecords.map((record) => asLogRecord(record, scope))
+          for (let index = 0; index < logs.length; index += 1) {
+            const log = logs[index]!
+            if (
+              log.blockNumber < position.cursor.startBlock ||
+              log.blockNumber >= position.cursor.nextBlock ||
+              (index > 0 && compareLogs(logs[index - 1]!, log) <= 0)
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+          }
+          page = { ...position, logs, reset: false }
+        } catch (error) {
+          if (!(error instanceof EventCacheCorruptionError)) {
+            fail(error)
+            return
+          }
+          try {
+            const revision = this.#resetScope(
+              cursorStore,
+              logStore,
+              scope,
+              seedCursor,
+              cursorRecord,
+            )
+            page = { cursor: seedCursor, logs: [], reset: true, revision }
+          } catch (resetError) {
+            fail(resetError)
+          }
+        }
+      }
+      const cursorRequest = cursorStore.get(scope)
       cursorRequest.onsuccess = () => {
         cursorRecord = cursorRequest.result
+        cursorDone = true
+        finalize()
       }
-      const logRequest = transaction
-        .objectStore(LOG_STORE)
-        .openCursor(getScopeRange(this.#keyRange, scope), 'prev')
+      cursorRequest.onerror = () => fail(cursorRequest.error)
+      const logRequest = logStore.openCursor(
+        getScopeRange(this.#keyRange, scope),
+        'prev',
+      )
       logRequest.onsuccess = () => {
         const cursor = logRequest.result
-        if (!cursor || logRecords.length >= limit) return
+        if (!cursor) {
+          logsDone = true
+          finalize()
+          return
+        }
         logRecords.push(cursor.value)
-        if (logRecords.length < limit) cursor.continue()
+        if (logRecords.length < limit) {
+          cursor.continue()
+          return
+        }
+        logsDone = true
+        finalize()
       }
-      transaction.oncomplete = () => resolve({ cursorRecord, logRecords })
+      logRequest.onerror = () => fail(logRequest.error)
+      transaction.oncomplete = () => {
+        if (page) resolve(page)
+        else reject(cacheError('The browser event cache returned no page.'))
+      }
       transaction.onabort = () =>
         reject(
-          asError(transaction.error, 'The browser event cache could not read.'),
+          failure ??
+            asError(
+              transaction.error,
+              'The browser event cache could not read.',
+            ),
         )
       transaction.onerror = () => undefined
     })
@@ -323,7 +452,7 @@ export class BrowserEventCache {
 
   #applyRaw(
     scope: string,
-    expectedCursor: EventCursor,
+    expected: EventCachePosition,
     nextCursor: EventCursor,
     logs: readonly IndexedEventLog[],
     rollbackTo: bigint | undefined,
@@ -334,7 +463,15 @@ export class BrowserEventCache {
         'readwrite',
       )
       let failure: Error | undefined
+      let reset = false
+      let cursorRecord: unknown
+      let cursorDone = false
+      let hasLogs = false
+      let logsDone = false
+      let finalized = false
       const fail = (error: unknown) => {
+        if (failure) return
+        finalized = true
         failure = asError(error, 'The browser event cache could not update.')
         try {
           transaction.abort()
@@ -344,15 +481,19 @@ export class BrowserEventCache {
       }
       const cursorStore = transaction.objectStore(CURSOR_STORE)
       const logStore = transaction.objectStore(LOG_STORE)
-      const cursorRequest = cursorStore.get(scope)
-      cursorRequest.onsuccess = () => {
+      const finalize = () => {
+        if (finalized || !cursorDone || !logsDone) return
+        finalized = true
         try {
-          const storedCursor = cursorRequest.result
-            ? asCursorRecord(cursorRequest.result, scope)
-            : undefined
+          if (!cursorRecord && hasLogs) {
+            throw new EventCacheCorruptionError()
+          }
+          const stored = cursorRecord
+            ? asCursorRecord(cursorRecord, scope)
+            : { cursor: getSeedCursor(expected.cursor), revision: 0n }
           if (
-            (storedCursor && !sameCursor(storedCursor, expectedCursor)) ||
-            (!storedCursor && !isSeedCursor(expectedCursor))
+            stored.revision !== expected.revision ||
+            !sameCursor(stored.cursor, expected.cursor)
           ) {
             throw cacheError('The event cache changed during synchronization.')
           }
@@ -369,15 +510,56 @@ export class BrowserEventCache {
           }
           cursorStore.put({
             cursor: nextCursor,
+            revision: stored.revision + 1n,
             schemaVersion: CACHE_SCHEMA_VERSION,
             scope,
           } satisfies CursorRecord)
         } catch (error) {
-          fail(error)
+          if (error instanceof EventCacheCorruptionError) {
+            try {
+              this.#resetScope(
+                cursorStore,
+                logStore,
+                scope,
+                getSeedCursor(expected.cursor),
+                cursorRecord,
+              )
+              reset = true
+            } catch (resetError) {
+              fail(resetError)
+            }
+          } else {
+            fail(error)
+          }
         }
       }
+      const cursorRequest = cursorStore.get(scope)
+      cursorRequest.onsuccess = () => {
+        cursorRecord = cursorRequest.result
+        cursorDone = true
+        finalize()
+      }
       cursorRequest.onerror = () => fail(cursorRequest.error)
-      transaction.oncomplete = () => resolve()
+      const logRequest = logStore.openKeyCursor(
+        getScopeRange(this.#keyRange, scope),
+      )
+      logRequest.onsuccess = () => {
+        hasLogs = Boolean(logRequest.result)
+        logsDone = true
+        finalize()
+      }
+      logRequest.onerror = () => fail(logRequest.error)
+      transaction.oncomplete = () => {
+        if (reset) {
+          reject(
+            cacheError(
+              'The browser event cache was corrupt and has been reset. Synchronize again.',
+            ),
+          )
+        } else {
+          resolve()
+        }
+      }
       transaction.onabort = () =>
         reject(
           failure ??

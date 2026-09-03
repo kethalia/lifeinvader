@@ -76,6 +76,16 @@ describe('PostPublished decoding', () => {
     ).toBeUndefined()
   })
 
+  it('rejects surplus indexed topics on the matching event family', () => {
+    const log = postLog()
+    expect(() =>
+      decodePublishedPost({
+        ...log,
+        topics: [...log.topics, keccak256(stringToHex('surplus'))],
+      }),
+    ).toThrow(/invalid PostPublished/i)
+  })
+
   it.each([
     ['malformed ABI data', postLog({ data: '0x01' })],
     ['zero post identifier', postLog({ postId: 0n })],

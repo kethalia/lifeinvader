@@ -46,6 +46,7 @@ export function decodePublishedPost(
   ) {
     return undefined
   }
+  if (log.topics.length !== 3) throw invalidPostEvent()
   try {
     const decoded = decodeEventLog({
       abi: POST_PUBLISHED_EVENT_ABI,
