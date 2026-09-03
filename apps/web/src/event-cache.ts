@@ -499,6 +499,9 @@ export class BrowserEventCache {
       let scopeRecord: unknown
       let cursorRecord: unknown
       const logRecords: unknown[] = []
+      let boundaryBlock: bigint | undefined
+      let boundaryLogCount = 0
+      let boundaryOverflow = false
       let scopeDone = false
       let cursorDone = false
       let logsDone = false
@@ -540,6 +543,7 @@ export class BrowserEventCache {
             cursorRecord !== undefined
               ? asCursorRecord(cursorRecord, scope)
               : seedCursor
+          if (boundaryOverflow) throw new EventCacheCorruptionError()
           const logs = logRecords.map((record) => asLogRecord(record, scope))
           for (let index = 0; index < logs.length; index += 1) {
             const log = logs[index]!
@@ -612,9 +616,40 @@ export class BrowserEventCache {
           return
         }
         logRecords.push(cursor.value)
-        if (logRecords.length <= limit) {
+        let log: IndexedEventLog
+        try {
+          log = asLogRecord(cursor.value, scope)
+        } catch (error) {
+          if (!(error instanceof EventCacheCorruptionError)) {
+            fail(error)
+            return
+          }
+          logsDone = true
+          finalize()
+          return
+        }
+        if (logRecords.length < limit) {
           cursor.continue()
           return
+        }
+        if (logRecords.length === limit) {
+          boundaryBlock = log.blockNumber
+          boundaryLogCount = logRecords.reduce<number>((count, record) => {
+            return (
+              count +
+              Number(asLogRecord(record, scope).blockNumber === boundaryBlock)
+            )
+          }, 0)
+          cursor.continue()
+          return
+        }
+        if (log.blockNumber === boundaryBlock) {
+          boundaryLogCount += 1
+          if (boundaryLogCount <= MAX_BATCH_LOGS) {
+            cursor.continue()
+            return
+          }
+          boundaryOverflow = true
         }
         logsDone = true
         finalize()
@@ -736,40 +771,65 @@ export class BrowserEventCache {
             throw cacheError('The event cache changed during synchronization.')
           }
           if (rollbackTo !== undefined) {
-            const rollbackRange = this.#keyRange.bound(
-              [scope, `${fixedHex(rollbackTo, 64)}:${'0'.repeat(16)}`],
-              [scope, '\uffff'],
-            )
-            const traverseRollback = (
-              source: IDBIndex | IDBObjectStore,
-              onComplete: () => void,
-            ) => {
-              const rollbackRequest = source.openCursor(rollbackRange, 'prev')
-              rollbackRequest.onsuccess = () => {
-                const rollbackCursor = rollbackRequest.result
+            let blockLogs: IndexedEventLog[] = []
+            let previousLog: IndexedEventLog | undefined
+            const validateBlock = () => {
+              if (
+                blockLogs.length > MAX_BATCH_LOGS ||
+                getLogStreamProblem(
+                  blockLogs,
+                  storedCursor,
+                  currentState.filter,
+                )
+              ) {
+                throw new EventCacheCorruptionError()
+              }
+            }
+            const rollbackRequest = logStore
+              .index(LOG_SCOPE_INDEX)
+              .openCursor(this.#keyRange.only(scope))
+            rollbackRequest.onsuccess = () => {
+              const rollbackCursor = rollbackRequest.result
+              try {
                 if (!rollbackCursor) {
-                  onComplete()
+                  validateBlock()
+                  commitUpdate(currentState)
                   return
                 }
-                try {
-                  asLogRecord(rollbackCursor.value, scope)
+                const log = asLogRecord(rollbackCursor.value, scope)
+                if (
+                  log.blockNumber < storedCursor.startBlock ||
+                  log.blockNumber >= storedCursor.nextBlock ||
+                  (previousLog !== undefined &&
+                    compareLogs(previousLog, log) >= 0)
+                ) {
+                  throw new EventCacheCorruptionError()
+                }
+                if (
+                  previousLog !== undefined &&
+                  previousLog.blockNumber !== log.blockNumber
+                ) {
+                  validateBlock()
+                  blockLogs = []
+                }
+                blockLogs.push(log)
+                if (blockLogs.length > MAX_BATCH_LOGS) {
+                  throw new EventCacheCorruptionError()
+                }
+                previousLog = log
+                if (log.blockNumber >= rollbackTo) {
                   logStore.delete(rollbackCursor.primaryKey)
-                  rollbackCursor.continue()
-                } catch (error) {
-                  if (error instanceof EventCacheCorruptionError) {
-                    resetFromCorruption()
-                  } else {
-                    fail(error)
-                  }
+                }
+                rollbackCursor.continue()
+              } catch (error) {
+                if (error instanceof EventCacheCorruptionError) {
+                  resetFromCorruption()
+                } else {
+                  fail(error)
                 }
               }
-              rollbackRequest.onerror = () => fail(rollbackRequest.error)
             }
-            traverseRollback(logStore, () =>
-              traverseRollback(logStore.index(LOG_IDENTITY_INDEX), () =>
-                commitUpdate(currentState),
-              ),
-            )
+            rollbackRequest.onerror = () => fail(rollbackRequest.error)
           } else {
             commitUpdate(currentState)
           }

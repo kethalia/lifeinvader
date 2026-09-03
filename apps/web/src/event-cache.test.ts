@@ -509,20 +509,24 @@ describe('browser event cache', () => {
     })
   })
 
-  it('validates transaction metadata across the page boundary', async () => {
+  it('validates the complete block crossing the page boundary', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
     const initial = await opened.readLatest(seed)
-    const first = eventLog(1n)
-    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [first]))
-    const second = {
-      ...eventLog(1n, { logIndex: 1 }),
-      transactionHash: OTHER_TOPIC,
+    const blockLogs = [
+      eventLog(1n),
+      eventLog(1n, { logIndex: 1, transactionIndex: 1 }),
+      eventLog(1n, { logIndex: 2, transactionIndex: 2 }),
+    ]
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), blockLogs))
+    const corrupt = {
+      ...blockLogs[0]!,
+      transactionHash: blockLogs[2]!.transactionHash,
     }
     await putRawRecord(factory, 'logs', {
-      identity: logIdentity(second),
-      log: second,
-      position: logIdentity(second),
+      identity: logIdentity(corrupt),
+      log: corrupt,
+      position: logIdentity(corrupt),
       schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
@@ -749,28 +753,32 @@ describe('browser event cache', () => {
     expect(await countRawScopeLogs(factory, scope)).toBe(0)
   })
 
-  it('seeks directly to the affected rollback suffix', async () => {
+  it('resets an affected rollback record whose stored keys both evade the suffix', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
     const initial = await opened.readLatest(seed)
     await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
     const active = await opened.readLatest(seed)
     const scope = getEventCacheScope(seed)
+    const hiddenKey = logIdentity(eventLog(0n))
     await putRawRecord(factory, 'logs', {
-      identity: logIdentity(eventLog(0n)),
-      log: eventLog(0n),
-      position: 7,
+      identity: hiddenKey,
+      log: eventLog(3n),
+      position: hiddenKey,
       schemaVersion: 6,
       scope,
     })
 
-    await opened.apply(
-      active,
-      syncResult(cursorAt(seed, 4n, 'b'), [eventLog(2n, { branch: 'b' })], 2n),
-    )
-    expect(await countRawScopeLogs(factory, scope)).toBe(3)
-
-    await opened.clear(seed)
+    await expect(
+      opened.apply(
+        active,
+        syncResult(
+          cursorAt(seed, 4n, 'b'),
+          [eventLog(2n, { branch: 'b' })],
+          2n,
+        ),
+      ),
+    ).rejects.toThrow(/corrupt/i)
     expect(await countRawScopeLogs(factory, scope)).toBe(0)
   })
 
