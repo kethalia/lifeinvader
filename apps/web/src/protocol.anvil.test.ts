@@ -114,7 +114,7 @@ describe('wallet transaction helpers on Anvil', () => {
       kind: 'deployable',
     })
     await expect(
-      deployProtocol(provider, account, LOCAL_CHAIN_ID),
+      deployProtocol(provider, account, LOCAL_CHAIN_ID, undefined, provider),
     ).resolves.toMatchObject({ blockNumber: 1n })
     await expect(inspectProtocol(provider)).resolves.toEqual({ kind: 'ready' })
     const postReceipt = await publishPost(
@@ -122,6 +122,8 @@ describe('wallet transaction helpers on Anvil', () => {
       account,
       LOCAL_CHAIN_ID,
       'Local chain, globally embarrassing.',
+      undefined,
+      provider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
     const postBlock = `0x${postReceipt.blockNumber.toString(16)}`

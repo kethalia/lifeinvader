@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-
 import { App } from './app'
 import {
   FACTORY_ADDRESS,
@@ -8,7 +7,6 @@ import {
   PROTOCOL_ADDRESS,
 } from './protocol'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
-
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
@@ -20,7 +18,6 @@ const UNKNOWN_TRANSACTION_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 const RECEIPT_BLOCK_HASH = `0x${'dd'.repeat(32)}`
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
-
 function announceWallet(name: string, uuid: string, provider: unknown) {
   const announce = () =>
     window.dispatchEvent(
@@ -31,27 +28,22 @@ function announceWallet(name: string, uuid: string, provider: unknown) {
   window.addEventListener('eip6963:requestProvider', announce)
   return () => window.removeEventListener('eip6963:requestProvider', announce)
 }
-
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
   vi.unstubAllGlobals()
 })
-
 describe('App', () => {
   it('states the deliberately public product boundary', () => {
     render(<App />)
-
     expect(
       screen.getByRole('heading', { name: /privacy was a bug/i }),
     ).toBeTruthy()
     expect(screen.getByText(/no delete button/i)).toBeTruthy()
     expect(screen.getByText(/unofficial parody project/i)).toBeTruthy()
   })
-
   it('offers an honest wallet entry point without claiming a wallet exists', () => {
     render(<App />)
-
     expect(
       screen.getByRole('link', {
         name: /invade with your wallet/i,
@@ -60,7 +52,6 @@ describe('App', () => {
     expect(screen.getByText(/no injected wallet found/i)).toBeTruthy()
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
   })
-
   it('refreshes after concurrent deployment and rejected post preflights', async () => {
     let protocolChecks = 0
     const provider = {
@@ -83,13 +74,10 @@ describe('App', () => {
       ),
     }
     const stop = announceWallet('Test Wallet', 'test-wallet', provider)
-
     render(<App />)
-
     fireEvent.click(
       await screen.findByRole('button', { name: /connect test wallet/i }),
     )
-
     expect(await screen.findByText('1')).toBeTruthy()
     fireEvent.click(
       await screen.findByRole('button', { name: /deploy protocol here/i }),
@@ -105,10 +93,8 @@ describe('App', () => {
       await screen.findByRole('button', { name: /deploy protocol here/i }),
     ).toBeTruthy()
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
-
     stop()
   })
-
   it('does not trust a reused local chain ID with a different fingerprint', async () => {
     const walletBlockHash = `0x${'aa'.repeat(32)}`
     const localBlockHash = `0x${'bb'.repeat(32)}`
@@ -125,7 +111,6 @@ describe('App', () => {
         return new Response(JSON.stringify({ id: 1, jsonrpc: '2.0', result }))
       }),
     )
-
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
         if (method === 'eth_requestAccounts') return [ACCOUNT]
@@ -138,23 +123,19 @@ describe('App', () => {
       }),
     }
     const stop = announceWallet('Other Local Wallet', 'other', provider)
-
     render(<App />)
     fireEvent.click(
       await screen.findByRole('button', {
         name: /connect other local wallet/i,
       }),
     )
-
     expect(await screen.findByText(/does not match Anvil/i)).toBeTruthy()
     expect(
       screen.queryByRole('button', { name: /deploy protocol here/i }),
     ).toBeNull()
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
-
     stop()
   })
-
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
     let deployed = false
     let failNextInspection = false
@@ -216,6 +197,7 @@ describe('App', () => {
             return {
               blockHash: RECEIPT_BLOCK_HASH,
               blockNumber: '0x2c',
+              logs: [],
               status: '0x1',
               transactionHash: UNKNOWN_TRANSACTION_HASH,
             }
@@ -229,7 +211,6 @@ describe('App', () => {
       ),
     }
     const stop = announceWallet('Pending Wallet', 'pending', provider)
-
     render(<App />)
     fireEvent.click(
       await screen.findByRole('button', {
@@ -239,7 +220,6 @@ describe('App', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: /deploy protocol here/i }),
     )
-
     expect(await screen.findByText(/deployment submitted/i)).toBeTruthy()
     expect(screen.getByTitle(TRANSACTION_HASH)).toBeTruthy()
     expect(
@@ -247,7 +227,6 @@ describe('App', () => {
         .getByRole('button', { name: /deploying/i })
         .hasAttribute('disabled'),
     ).toBe(true)
-
     await act(async () => {
       resolveReceipt?.({
         blockHash: RECEIPT_BLOCK_HASH,
@@ -256,7 +235,6 @@ describe('App', () => {
         transactionHash: TRANSACTION_HASH,
       })
     })
-
     expect(await screen.findByText(/confirmed in block 42/i)).toBeTruthy()
     const retryButton = await screen.findByRole('button', {
       name: /retry verification/i,
@@ -265,7 +243,6 @@ describe('App', () => {
     expect(
       await screen.findByText(/verified Lifeinvader v1 code is ready/i),
     ).toBeTruthy()
-
     const textarea = screen.getByLabelText(/permanent public statement/i)
     fireEvent.change(textarea, { target: { value: 'Try, try again.' } })
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
@@ -280,7 +257,6 @@ describe('App', () => {
         .getByRole('button', { name: /publish on-chain/i })
         .hasAttribute('disabled'),
     ).toBe(false)
-
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
@@ -294,13 +270,14 @@ describe('App', () => {
         .getByRole('button', { name: /connect pending wallet/i })
         .hasAttribute('disabled'),
     ).toBe(true)
-
     fireEvent.click(
       screen.getByRole('button', { name: /check receipt again/i }),
     )
-    expect(await screen.findByText(/confirmed in block 44/i)).toBeTruthy()
-    expect((textarea as HTMLTextAreaElement).value).toBe('')
-
+    expect(
+      await screen.findByText(/did not contain the expected post event/i),
+    ).toBeTruthy()
+    expect(screen.getByText(/final status is unknown/i)).toBeTruthy()
+    expect((textarea as HTMLTextAreaElement).value).toBe('Try, try again.')
     stop()
   })
 })

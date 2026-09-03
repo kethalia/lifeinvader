@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Address } from 'viem'
-
 import {
   beforeDeadline,
   describeRpcError,
@@ -10,7 +9,6 @@ import {
   type Eip1193Provider,
 } from './ethereum'
 import type { DiscoveredWallet } from './wallet-providers'
-
 export type WalletSession = {
   account?: Address
   chainId?: bigint
@@ -19,9 +17,7 @@ export type WalletSession = {
   provider?: Eip1193Provider
   status: 'disconnected' | 'connecting' | 'connected'
 }
-
 const INITIAL_SESSION: WalletSession = { status: 'disconnected' }
-
 async function readConnection(provider: Eip1193Provider) {
   let revision = 0
   let disconnected = false
@@ -63,11 +59,9 @@ async function readConnection(provider: Eip1193Provider) {
     provider.removeListener?.('disconnect', trackDisconnect)
   }
 }
-
 export function useWalletSession() {
   const [session, setSession] = useState<WalletSession>(INITIAL_SESSION)
   const requestSequence = useRef(0)
-
   const connect = useCallback(async (wallet: DiscoveredWallet) => {
     const requestId = ++requestSequence.current
     setSession({
@@ -86,7 +80,6 @@ export function useWalletSession() {
       })
     }
     wallet.provider.on?.('disconnect', handleApprovalDisconnect)
-
     try {
       await wallet.provider.request({ method: 'eth_requestAccounts' })
       if (requestId !== requestSequence.current) return
@@ -113,14 +106,11 @@ export function useWalletSession() {
       wallet.provider.removeListener?.('disconnect', handleApprovalDisconnect)
     }
   }, [])
-
   const refresh = useCallback(async () => {
     const provider = session.provider
     if (!provider) return
-
     try {
       const { account, chainId } = await readConnection(provider)
-
       setSession((current) =>
         current.provider === provider
           ? {
@@ -149,7 +139,6 @@ export function useWalletSession() {
       )
     }
   }, [session.provider])
-
   useEffect(() => {
     const provider = session.provider
     if (!provider?.on) return
@@ -157,7 +146,6 @@ export function useWalletSession() {
       setSession((current) =>
         current.provider === provider ? { ...current, ...changes } : current,
       )
-
     const handleAccounts = (value: unknown) => {
       try {
         const account = parseAccounts(value)[0]
@@ -178,7 +166,6 @@ export function useWalletSession() {
         })
       }
     }
-
     const handleChain = (value: unknown) => {
       try {
         const chainId = parseChainId(value)
@@ -195,7 +182,6 @@ export function useWalletSession() {
         })
       }
     }
-
     const handleDisconnect = () => {
       update({
         account: undefined,
@@ -204,17 +190,14 @@ export function useWalletSession() {
         status: 'disconnected',
       })
     }
-
     provider.on('accountsChanged', handleAccounts)
     provider.on('chainChanged', handleChain)
     provider.on('disconnect', handleDisconnect)
-
     return () => {
       provider.removeListener?.('accountsChanged', handleAccounts)
       provider.removeListener?.('chainChanged', handleChain)
       provider.removeListener?.('disconnect', handleDisconnect)
     }
   }, [refresh, session.provider])
-
   return { connect, refresh, session }
 }

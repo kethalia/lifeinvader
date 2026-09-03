@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { Address } from 'viem'
-
 import {
   beforeDeadline,
   describeRpcError,
@@ -27,7 +26,6 @@ import {
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
 import { useWalletSession } from './wallet-session'
-
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -37,11 +35,9 @@ const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
     'Code at the factory address does not match the canonical factory.',
   'address-conflict': 'Unexpected code occupies the Lifeinvader v1 address.',
 }
-
 function shortAddress(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`
 }
-
 function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
   return (
     <p className="transaction-result">
@@ -50,16 +46,15 @@ function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
     </p>
   )
 }
-
 type SubmittedTransaction = {
   account: Address
   action: 'deploy' | 'post'
   chainId: bigint
   hash: TransactionReceipt['hash']
+  postBody: string
   provider: Eip1193Provider
   status: 'pending' | 'unknown' | 'failed'
 }
-
 function TransactionStatus({
   onDismiss,
   onRetry,
@@ -76,7 +71,6 @@ function TransactionStatus({
       : transaction.status === 'failed'
         ? 'Reverted on-chain. This hash is final; you can safely try again.'
         : 'Its final status is unknown. Check this hash before trying again.'
-
   return (
     <div className="transaction-pending action-feedback" role="status">
       <span>
@@ -97,7 +91,6 @@ function TransactionStatus({
     </div>
   )
 }
-
 export function WalletPanel() {
   const wallets = useWalletProviders()
   const { connect, refresh, session } = useWalletSession()
@@ -115,7 +108,6 @@ export function WalletPanel() {
     useState<SubmittedTransaction>()
   const [body, setBody] = useState('')
   const inspectionSequence = useRef(0)
-
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
     const provider = session.provider
@@ -127,7 +119,6 @@ export function WalletPanel() {
       setLocalChainState('not-selected')
       return
     }
-
     try {
       const selectedChainId = parseChainId(
         await beforeDeadline(
@@ -147,7 +138,6 @@ export function WalletPanel() {
       } else if (requestId === inspectionSequence.current) {
         setLocalChainState('not-selected')
       }
-
       const nextInspection = await inspectProtocol(provider)
       if (requestId === inspectionSequence.current)
         setInspection(nextInspection)
@@ -169,16 +159,13 @@ export function WalletPanel() {
       }
     }
   }, [session.chainId, session.provider, session.status])
-
   useEffect(() => {
     void refreshInspection()
   }, [refreshInspection, session.chainId])
-
   useEffect(() => {
     setActionError(undefined)
     setReceipt(undefined)
   }, [session.account, session.chainId])
-
   const runAction = async (
     action: 'chain' | 'deploy' | 'post',
     operation: (
@@ -195,6 +182,7 @@ export function WalletPanel() {
             account: session.account,
             action,
             chainId: session.chainId,
+            postBody: action === 'post' ? body : '',
             provider: session.provider,
           }
         : undefined
@@ -202,7 +190,6 @@ export function WalletPanel() {
     setActionError(undefined)
     setReceipt(undefined)
     if (action !== 'chain') setSubmittedTransaction(undefined)
-
     try {
       const nextReceipt = await operation((hash) => {
         if (!submittedContext) return
@@ -232,7 +219,6 @@ export function WalletPanel() {
       setBusyAction(undefined)
     }
   }
-
   const handleLocalChain = () => {
     const provider = session.provider
     if (!provider) return
@@ -242,7 +228,6 @@ export function WalletPanel() {
       await refreshInspection()
     })
   }
-
   const handleDeploy = () => {
     const provider = session.provider
     const account = session.account
@@ -252,7 +237,6 @@ export function WalletPanel() {
       return deployProtocol(provider, account, chainId, onSubmitted)
     })
   }
-
   const handlePublish = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const provider = session.provider
@@ -271,18 +255,15 @@ export function WalletPanel() {
       return nextReceipt
     })
   }
-
   const handleRetryReceipt = () => {
     const transaction = submittedTransaction
     if (transaction?.status !== 'unknown') return
     const provider = transaction.provider
-
     void (async () => {
       setBusyAction('receipt')
       setActionError(undefined)
       setReceipt(undefined)
       setSubmittedTransaction({ ...transaction, status: 'pending' })
-
       try {
         if (session.provider !== provider) {
           throw new Error(
@@ -309,16 +290,25 @@ export function WalletPanel() {
             )
           }
         }
-        await assertOriginalContext()
+        await beforeDeadline(
+          assertOriginalContext,
+          Date.now() + WALLET_READ_TIMEOUT_MS,
+          () => new Error('Wallet receipt context read timed out.'),
+        )
         if (transaction.chainId === LOCAL_CHAIN_ID)
           await verifyLocalChain(provider)
         const nextReceipt = await waitForTransactionReceipt(
           provider,
           transaction.hash,
-          { assertCurrentChain: assertOriginalContext },
+          {
+            assertCurrentChain: assertOriginalContext,
+            expectedPost:
+              transaction.action === 'post'
+                ? { author: transaction.account, body: transaction.postBody }
+                : undefined,
+            selectedChainId: transaction.chainId,
+          },
         )
-        if (transaction.chainId === LOCAL_CHAIN_ID)
-          await verifyLocalChain(provider)
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
         if (transaction.action === 'post') setBody('')
@@ -336,7 +326,6 @@ export function WalletPanel() {
       }
     })()
   }
-
   const bodyBytes = getPostBodyByteLength(body)
   const connected =
     session.status === 'connected' &&
@@ -344,7 +333,6 @@ export function WalletPanel() {
   const transactionWriteLocked =
     submittedTransaction !== undefined &&
     submittedTransaction.status !== 'failed'
-
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
       <div className="wallet-panel-heading">
@@ -359,7 +347,6 @@ export function WalletPanel() {
           history are public forever.
         </p>
       </div>
-
       <div className="wallet-console">
         <div className="wallet-connect">
           <h3>1. Connect a wallet</h3>
@@ -388,13 +375,11 @@ export function WalletPanel() {
               ))}
             </div>
           )}
-
           {session.error ? (
             <p className="error-message" role="alert">
               {session.error}
             </p>
           ) : null}
-
           {connected && session.account ? (
             <dl className="connection-facts">
               <div>
@@ -408,7 +393,6 @@ export function WalletPanel() {
             </dl>
           ) : null}
         </div>
-
         <div className="wallet-network">
           <h3>2. Verify the protocol</h3>
           {!connected ? (
@@ -474,7 +458,6 @@ export function WalletPanel() {
             </>
           )}
         </div>
-
         <div className="wallet-publish">
           <h3>3. Publish a post</h3>
           {!connected || inspection?.kind !== 'ready' ? (
@@ -518,7 +501,6 @@ export function WalletPanel() {
           )}
         </div>
       </div>
-
       {actionError ? (
         <p className="error-message action-feedback" role="alert">
           {actionError}
