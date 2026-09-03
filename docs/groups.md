@@ -112,15 +112,24 @@ The projection deliberately does not materialize or hash a monolithic member
 snapshot after each history page. Durable derived membership will use bounded
 member chunks in a later local IndexedDB layer; until then, the resumable event
 cache remains authoritative and projection work advances explicitly page by
-page. Membership remains public social metadata, never access control. A later
-runner will authenticate the exact cache generation before publishing results to
-React.
+page. The authenticated projection runner opens only the anchor's exact-group
+cache scope and consumes one caller-requested, complete-block page per explicit
+advance. It rejects cache resets, moved generations, revisions, cursors, malformed
+page boundaries, mismatched totals, and mismatched tails before any result is
+published.
+
+Once scanning is complete, the runner authenticates the cache baseline, brackets
+a second proof with the anchor's canonical wallet-chain checks, and confirms the
+projection through the anchor checkpoint. Member reads remain unavailable until
+that gate succeeds; failure or cancellation discards partial membership state.
+The completed baseline can seed a later append-only scan, while the retained
+members remain boundedly readable by address cursor. Membership is public social
+metadata, never access control.
 
 The Anvil integration covers create, join, send, confirmed exact-group message
 and membership readback, and discovery of the immutable group definition. Later
-slices will connect the membership projection to its authenticated cache runner
-and add the React interface without a hosted indexer, application server, or
-database.
+slices will connect the authenticated membership runner to the React interface
+without a hosted indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
