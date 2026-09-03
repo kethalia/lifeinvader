@@ -225,11 +225,20 @@ async function getCode(
   address: Address,
   deadline: number,
   blockTag = 'latest',
+  signal?: AbortSignal,
 ): Promise<Hex> {
   const request = () =>
     provider.request({ method: 'eth_getCode', params: [address, blockTag] })
   const timeout = () => new Error('Contract code inspection timed out.')
-  return parseCode(await beforeDeadline(request, deadline, timeout))
+  return parseCode(
+    await beforeDeadline(
+      request,
+      deadline,
+      timeout,
+      signal,
+      () => new Error('Contract code inspection was cancelled.'),
+    ),
+  )
 }
 
 export class TransactionSubmissionUnknownError extends Error {
@@ -266,15 +275,28 @@ export function assertProtocolConfiguration() {
 export async function inspectProtocol(
   provider: Eip1193Provider,
   timeoutMs = WALLET_READ_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<ProtocolInspection> {
   const deadline = Date.now() + timeoutMs
-  const protocolCode = await getCode(provider, PROTOCOL_ADDRESS, deadline)
+  const protocolCode = await getCode(
+    provider,
+    PROTOCOL_ADDRESS,
+    deadline,
+    'latest',
+    signal,
+  )
   if (protocolCode !== '0x') {
     return keccak256(protocolCode) === PROTOCOL_CODE_HASH
       ? { kind: 'ready' }
       : { kind: 'address-conflict' }
   }
-  const factoryCode = await getCode(provider, FACTORY_ADDRESS, deadline)
+  const factoryCode = await getCode(
+    provider,
+    FACTORY_ADDRESS,
+    deadline,
+    'latest',
+    signal,
+  )
   if (factoryCode === '0x') return { kind: 'missing-factory' }
   if (keccak256(factoryCode) !== FACTORY_CODE_HASH)
     return { kind: 'unsafe-factory' }

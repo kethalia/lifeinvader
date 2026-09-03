@@ -272,6 +272,31 @@ describe('post reaction stream synchronization', () => {
     expect(likeFromBlocks).toEqual(['0x0', '0x0'])
   })
 
+  it('revalidates the like checkpoint after the repost scan', async () => {
+    let branch = 'a'
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number), branch), number }
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ topics: readonly Hex[] }]
+          if (filter.topics[0] === REPOST_PUBLISHED_TOPIC) branch = 'b'
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/confirmed post-like stream checkpoint changed/i)
+  })
+
   it('rejects an unverified contract without requesting reaction logs', async () => {
     const provider: Eip1193Provider = {
       request: vi.fn(async ({ method }) => {
@@ -344,5 +369,27 @@ describe('post reaction stream synchronization', () => {
       }),
     ).rejects.toThrow(/cancelled/i)
     expect(provider.request).not.toHaveBeenCalled()
+  })
+
+  it('cancels a stalled protocol inspection without waiting for timeout', async () => {
+    const controller = new AbortController()
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') {
+          queueMicrotask(() => controller.abort())
+          return new Promise<unknown>(() => undefined)
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizePostReactionStream(provider, 1n, {
+        signal: controller.signal,
+        storage: storage(),
+      }),
+    ).rejects.toThrow(/reaction synchronization was cancelled/i)
+    expect(provider.request).toHaveBeenCalledTimes(2)
   })
 })

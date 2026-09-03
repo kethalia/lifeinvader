@@ -70,6 +70,12 @@ type StreamDefinition<Event> = {
   label: string
 }
 
+type SynchronizedStream<Event> = ReactionEventStreamSnapshot & {
+  checkpoint?: EventCheckpoint
+  events: readonly Event[]
+  nextBlock: bigint
+}
+
 function cancelledError() {
   return new Error('Post reaction synchronization was cancelled.')
 }
@@ -210,7 +216,7 @@ async function synchronizeStream<Event>(
   definition: StreamDefinition<Event>,
   signal: AbortSignal,
   storage?: PostReactionStreamStorageOptions,
-): Promise<ReactionEventStreamSnapshot & { events: readonly Event[] }> {
+): Promise<SynchronizedStream<Event>> {
   const seed = createEventCursor({
     chainId,
     filter: definition.filter,
@@ -294,9 +300,11 @@ async function synchronizeStream<Event>(
     return {
       cacheReset: cacheReset || after.reset,
       caughtUp: safeHead === undefined || after.cursor.nextBlock > safeHead,
+      checkpoint: finalCheckpoint,
       events,
       head: finalHead,
       indexedThrough,
+      nextBlock: after.cursor.nextBlock,
       safeHead,
       scannedRanges: result.scannedRanges,
     }
@@ -316,6 +324,57 @@ const REPOST_STREAM = {
   filter: PUBLISHED_REPOST_FILTER,
   label: 'repost stream',
 } as const satisfies StreamDefinition<PublishedRepost>
+
+async function verifyCombinedSnapshot(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  likes: SynchronizedStream<PostLikeSet>,
+  reposts: SynchronizedStream<PublishedRepost>,
+  signal: AbortSignal,
+) {
+  const streams = [
+    {
+      checkpoint: likes.checkpoint,
+      indexedThrough: likes.indexedThrough,
+      label: LIKE_STREAM.label,
+    },
+    {
+      checkpoint: reposts.checkpoint,
+      indexedThrough: reposts.indexedThrough,
+      label: REPOST_STREAM.label,
+    },
+  ]
+  const verifyCheckpoints = () =>
+    Promise.all(
+      streams.map(({ checkpoint, label }) =>
+        checkpoint
+          ? assertCanonicalCheckpoint(provider, checkpoint, signal, label)
+          : Promise.resolve(),
+      ),
+    )
+  await verifyCheckpoints()
+  const head = await readSelectedHead(provider, chainId, signal)
+  for (const { indexedThrough, label } of streams) {
+    if (
+      indexedThrough !== undefined &&
+      (head < indexedThrough ||
+        head - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
+    ) {
+      throw new Error(
+        `The wallet head moved behind the confirmed ${label}. Retry after the chain stabilizes.`,
+      )
+    }
+  }
+  await verifyCheckpoints()
+  await assertSelectedChain(provider, chainId, signal)
+  return {
+    head,
+    safeHead:
+      head >= POST_FEED_CONFIRMATION_DEPTH
+        ? head - POST_FEED_CONFIRMATION_DEPTH
+        : undefined,
+  }
+}
 
 export const synchronizePostReactionStream: PostReactionStreamSynchronizer =
   async (provider, chainId, options = {}) => {
@@ -341,7 +400,11 @@ export const synchronizePostReactionStream: PostReactionStreamSynchronizer =
     try {
       await assertSelectedChain(provider, chainId, interruption.signal)
       assertContextActive()
-      const inspection = await inspectProtocol(provider)
+      const inspection = await inspectProtocol(
+        provider,
+        WALLET_READ_TIMEOUT_MS,
+        interruption.signal,
+      )
       assertContextActive()
       await assertSelectedChain(provider, chainId, interruption.signal)
       assertContextActive()
@@ -366,16 +429,35 @@ export const synchronizePostReactionStream: PostReactionStreamSynchronizer =
         options.storage,
       )
       assertContextActive()
-      const { events: recentSignals, ...likeProgress } = likes
-      const { events: recentReposts, ...repostProgress } = reposts
+      const shared = await verifyCombinedSnapshot(
+        provider,
+        chainId,
+        likes,
+        reposts,
+        interruption.signal,
+      )
+      assertContextActive()
       return {
         likes: {
-          ...likeProgress,
-          recentSignals,
+          cacheReset: likes.cacheReset,
+          caughtUp:
+            shared.safeHead === undefined || likes.nextBlock > shared.safeHead,
+          head: shared.head,
+          indexedThrough: likes.indexedThrough,
+          recentSignals: likes.events,
+          safeHead: shared.safeHead,
+          scannedRanges: likes.scannedRanges,
         },
         reposts: {
-          ...repostProgress,
-          recentReposts,
+          cacheReset: reposts.cacheReset,
+          caughtUp:
+            shared.safeHead === undefined ||
+            reposts.nextBlock > shared.safeHead,
+          head: shared.head,
+          indexedThrough: reposts.indexedThrough,
+          recentReposts: reposts.events,
+          safeHead: shared.safeHead,
+          scannedRanges: reposts.scannedRanges,
         },
       }
     } catch (error) {
