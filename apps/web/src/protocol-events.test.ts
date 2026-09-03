@@ -11,11 +11,14 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
+  decodePublishedDirectMessage,
   decodeProfileSet,
   decodePostLikeSet,
   decodePublishedComment,
   decodePublishedPost,
   decodePublishedRepost,
+  DIRECT_MESSAGE_SENT_FILTER,
+  getDirectMessageConversationFilter,
   POST_CONTENT_KIND_TOPIC,
   POST_LIKE_SET_FILTER,
   PROFILE_SET_FILTER,
@@ -24,6 +27,8 @@ import {
 } from './protocol-events'
 import {
   COMMENT_PUBLISHED_TOPIC,
+  DIRECT_MESSAGE_SENT_TOPIC,
+  getDirectConversationId,
   LIKE_SET_TOPIC,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
@@ -33,10 +38,16 @@ import {
 
 const AUTHOR = '0x000000000000000000000000000000000000b0b0' as Address
 const ACCOUNT = '0x000000000000000000000000000000000000c0c0' as Address
+const RECIPIENT = '0x000000000000000000000000000000000000d0d0' as Address
 const DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
 const PROFILE_DATA_PARAMETERS = [
   { type: 'string' },
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+const DIRECT_MESSAGE_DATA_PARAMETERS = [
+  { type: 'uint256' },
   { type: 'string' },
   { type: 'bytes' },
 ] as const
@@ -172,6 +183,45 @@ function profileLog(
     topics: options.topics ?? [
       options.topic ?? PROFILE_SET_TOPIC,
       options.accountTopic ?? padHex(ACCOUNT, { size: 32 }),
+    ],
+  }
+}
+
+function directMessageLog(
+  options: {
+    body?: string
+    conversationTopic?: Hex
+    data?: Hex
+    mediaCid?: Hex
+    messageId?: bigint
+    recipient?: Address
+    recipientTopic?: Hex
+    sender?: Address
+    senderTopic?: Hex
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const body = options.body ?? 'This direct message is public.'
+  const mediaCid = options.mediaCid ?? '0x01701220'
+  const messageId = options.messageId ?? 13n
+  const recipient = options.recipient ?? RECIPIENT
+  const sender = options.sender ?? AUTHOR
+  const conversationId = getDirectConversationId(sender, recipient)
+  return {
+    ...postLog(),
+    data:
+      options.data ??
+      encodeAbiParameters(DIRECT_MESSAGE_DATA_PARAMETERS, [
+        messageId,
+        body,
+        mediaCid,
+      ]),
+    topics: options.topics ?? [
+      options.topic ?? DIRECT_MESSAGE_SENT_TOPIC,
+      options.conversationTopic ?? conversationId,
+      options.senderTopic ?? padHex(sender, { size: 32 }),
+      options.recipientTopic ?? padHex(recipient, { size: 32 }),
     ],
   }
 }
@@ -491,5 +541,108 @@ describe('RepostPublished decoding', () => {
     ['malformed account topic', repostLog({ accountTopic: '0x01' })],
   ])('rejects %s', (_description, log) => {
     expect(() => decodePublishedRepost(log)).toThrow(/invalid RepostPublished/i)
+  })
+})
+
+describe('DirectMessageSent decoding', () => {
+  it('decodes a canonical deliberately public direct message', () => {
+    expect(decodePublishedDirectMessage(directMessageLog())).toEqual({
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      body: 'This direct message is public.',
+      conversationId: getDirectConversationId(AUTHOR, RECIPIENT),
+      logIndex: 2,
+      mediaCid: '0x01701220',
+      messageId: 13n,
+      recipient: getAddress(RECIPIENT),
+      sender: getAddress(AUTHOR),
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', directMessageLog({ topic: POST_PUBLISHED_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...directMessageLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodePublishedDirectMessage(log)).toBeUndefined()
+  })
+
+  it.each([
+    [
+      'missing indexed topics',
+      directMessageLog({ topics: [DIRECT_MESSAGE_SENT_TOPIC] }),
+    ],
+    [
+      'surplus indexed topics',
+      directMessageLog({
+        topics: [
+          ...directMessageLog().topics,
+          keccak256(stringToHex('surplus')),
+        ],
+      }),
+    ],
+    ['zero message identifier', directMessageLog({ messageId: 0n })],
+    [
+      'a zero sender',
+      directMessageLog({
+        sender: '0x0000000000000000000000000000000000000000',
+      }),
+    ],
+    [
+      'a zero recipient',
+      directMessageLog({
+        recipient: '0x0000000000000000000000000000000000000000',
+      }),
+    ],
+    ['an empty message', directMessageLog({ body: '', mediaCid: '0x' })],
+    ['an oversized body', directMessageLog({ body: 'x'.repeat(4_097) })],
+    [
+      'an oversized media CID',
+      directMessageLog({ mediaCid: `0x${'00'.repeat(129)}` as Hex }),
+    ],
+    [
+      'a substituted conversation',
+      directMessageLog({
+        conversationTopic: keccak256(stringToHex('another conversation')),
+      }),
+    ],
+    [
+      'non-canonical sender padding',
+      directMessageLog({ senderTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    [
+      'non-canonical recipient padding',
+      directMessageLog({ recipientTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed ABI data', directMessageLog({ data: '0x01' })],
+    [
+      'surplus ABI data',
+      directMessageLog({
+        data: `${directMessageLog().data}${'00'.repeat(32)}` as Hex,
+      }),
+    ],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodePublishedDirectMessage(log)).toThrow(
+      /invalid DirectMessageSent/i,
+    )
+  })
+
+  it('offers a global family filter and a symmetric exact conversation filter', () => {
+    const conversationId = getDirectConversationId(AUTHOR, RECIPIENT)
+    expect(DIRECT_MESSAGE_SENT_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [DIRECT_MESSAGE_SENT_TOPIC],
+    })
+    expect(getDirectMessageConversationFilter(AUTHOR, RECIPIENT)).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [DIRECT_MESSAGE_SENT_TOPIC, conversationId],
+    })
+    expect(getDirectMessageConversationFilter(RECIPIENT, AUTHOR)).toEqual(
+      getDirectMessageConversationFilter(AUTHOR, RECIPIENT),
+    )
   })
 })

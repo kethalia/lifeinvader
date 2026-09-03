@@ -1,8 +1,11 @@
 import {
   concatHex,
+  decodeAbiParameters,
   encodeAbiParameters,
   encodeFunctionData,
+  getAddress,
   getCreate2Address,
+  isAddress,
   keccak256,
   padHex,
   toHex,
@@ -20,7 +23,7 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
-import { decodeMediaCid } from './media-cid'
+import { decodeMediaCid, MAX_MEDIA_CID_BYTES } from './media-cid'
 export { MAX_MEDIA_CID_BYTES } from './media-cid'
 export const FACTORY_ADDRESS = '0x4e59b44847b379578588920cA78FbF26c0B4956C'
 export const FACTORY_CODE_HASH =
@@ -99,6 +102,19 @@ const SET_PROFILE_ABI = [
     outputs: [],
   },
 ] as const
+const SEND_DIRECT_MESSAGE_ABI = [
+  {
+    type: 'function',
+    name: 'sendDirectMessage',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'recipient', type: 'address' },
+      { name: 'body', type: 'string' },
+      { name: 'mediaCid', type: 'bytes' },
+    ],
+    outputs: [{ name: 'messageId', type: 'uint256' }],
+  },
+] as const
 export const POST_PUBLISHED_EVENT_ABI = [
   {
     anonymous: false,
@@ -163,6 +179,21 @@ export const PROFILE_SET_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const DIRECT_MESSAGE_SENT_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'conversationId', type: 'bytes32' },
+      { indexed: true, name: 'sender', type: 'address' },
+      { indexed: true, name: 'recipient', type: 'address' },
+      { indexed: false, name: 'messageId', type: 'uint256' },
+      { indexed: false, name: 'body', type: 'string' },
+      { indexed: false, name: 'mediaCid', type: 'bytes' },
+    ],
+    name: 'DirectMessageSent',
+    type: 'event',
+  },
+] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
 export const COMMENT_PUBLISHED_TOPIC =
@@ -173,6 +204,8 @@ export const LIKE_SET_TOPIC =
   '0xa6fa55005fe0b190111a9abc7df43c5e4b986d6332d5971d6fe809390bb97aa0'
 export const PROFILE_SET_TOPIC =
   '0x033f4d6cdbbae83b8a59446e605fd37762898192566e447aed006d0d815842a7'
+export const DIRECT_MESSAGE_SENT_TOPIC =
+  '0xd3c21a10e60cff821a30409b33f5e1cbe639483334abf0a56db83cbdbd3f5732'
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const PROFILE_DATA_PARAMETERS = [
   { type: 'string' },
@@ -180,7 +213,19 @@ const PROFILE_DATA_PARAMETERS = [
   { type: 'bytes' },
 ] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
+const DIRECT_MESSAGE_DATA_PARAMETERS = [
+  { type: 'uint256' },
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
 const MAX_UINT256 = (1n << 256n) - 1n
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+const MAX_RECEIPT_EVENT_DATA_BYTES =
+  32 * DIRECT_MESSAGE_DATA_PARAMETERS.length +
+  32 +
+  MAX_POST_BODY_BYTES +
+  32 +
+  MAX_MEDIA_CID_BYTES
 export const POST_CONTENT_KIND = 0
 export type ProtocolInspection =
   | { kind: 'ready' }
@@ -637,6 +682,12 @@ function parseReceipt(
 }
 export type PostPayload = { body: string; mediaCid: Hex }
 export type ExpectedPost = PostPayload & { author: Address }
+export type DirectMessagePayload = PostPayload
+export type ExpectedDirectMessage = DirectMessagePayload & {
+  conversationId: Hash
+  recipient: Address
+  sender: Address
+}
 export type ProfilePayload = {
   avatarCid: Hex
   bio: string
@@ -652,30 +703,47 @@ export type ExpectedPostAction =
   | { account: Address; kind: 'like'; liked: boolean; postId: bigint }
   | { account: Address; kind: 'repost'; postId: bigint }
 
+function normalizeDirectMessageAccount(value: unknown, label: string) {
+  if (typeof value !== 'string' || !isAddress(value)) {
+    throw new Error(`The direct-message ${label} is invalid.`)
+  }
+  return getAddress(value)
+}
+
+export function getDirectConversationId(
+  firstAccount: Address,
+  secondAccount: Address,
+) {
+  const first = normalizeDirectMessageAccount(firstAccount, 'participant')
+  const second = normalizeDirectMessageAccount(secondAccount, 'participant')
+  const [lower, higher] =
+    BigInt(first) < BigInt(second) ? [first, second] : [second, first]
+  return keccak256(concatHex([lower, higher]))
+}
+
 function expectedTopic(value: Address | bigint) {
   return padHex(typeof value === 'bigint' ? toHex(value) : value, {
     size: 32,
   }).toLowerCase() as Hex
 }
 
-function hasExpectedProtocolLog(
+function getMatchingProtocolLogData(
   logs: unknown,
   receipt: TransactionReceipt,
   expectedTopics: readonly (Hex | undefined)[],
-  expectedData: Hex,
 ) {
   if (!Array.isArray(logs) || logs.length > 1_000) {
     throw new Error('The wallet returned invalid receipt logs.')
   }
-  const normalizedData = expectedData.toLowerCase()
-  return logs.some((log) => {
-    if (typeof log !== 'object' || log === null) return false
+  const matches: Hex[] = []
+  for (const log of logs) {
+    if (typeof log !== 'object' || log === null) continue
     const { address, data, topics } = log as Record<string, unknown>
     const blockHash = 'blockHash' in log ? log.blockHash : undefined
     const blockNumber = 'blockNumber' in log ? log.blockNumber : undefined
     const transactionHash =
       'transactionHash' in log ? log.transactionHash : undefined
-    return (
+    const matchesReceipt =
       typeof address === 'string' &&
       /^0x[0-9a-f]{40}$/i.test(address) &&
       address.toLowerCase() === PROTOCOL_ADDRESS.toLowerCase() &&
@@ -696,12 +764,29 @@ function hasExpectedProtocolLog(
           /^0x[0-9a-f]{64}$/i.test(topic) &&
           (expectedTopics[index] === undefined ||
             topic.toLowerCase() === expectedTopics[index]?.toLowerCase()),
-      ) &&
+      )
+    if (
+      matchesReceipt &&
       typeof data === 'string' &&
-      data.length === normalizedData.length &&
-      data.toLowerCase() === normalizedData
-    )
-  })
+      data.length <= MAX_RECEIPT_EVENT_DATA_BYTES * 2 + 2 &&
+      /^0x(?:[0-9a-f]{2})*$/i.test(data)
+    ) {
+      matches.push(data.toLowerCase() as Hex)
+    }
+  }
+  return matches
+}
+
+function hasExpectedProtocolLog(
+  logs: unknown,
+  receipt: TransactionReceipt,
+  expectedTopics: readonly (Hex | undefined)[],
+  expectedData: Hex,
+) {
+  const normalizedData = expectedData.toLowerCase()
+  return getMatchingProtocolLogData(logs, receipt, expectedTopics).some(
+    (data) => data.length === normalizedData.length && data === normalizedData,
+  )
 }
 
 export function assertExpectedPost(
@@ -745,6 +830,56 @@ export function assertExpectedProfile(
   ) {
     throw new Error('The receipt did not contain the expected profile event.')
   }
+}
+
+export function assertExpectedDirectMessage(
+  logs: unknown,
+  expected: ExpectedDirectMessage,
+  receipt: TransactionReceipt,
+) {
+  const canonicalConversationId = getDirectConversationId(
+    expected.sender,
+    expected.recipient,
+  )
+  if (
+    canonicalConversationId.toLowerCase() !==
+    expected.conversationId.toLowerCase()
+  ) {
+    throw new Error(
+      'The receipt did not contain the expected direct-message event.',
+    )
+  }
+  const matchingData = getMatchingProtocolLogData(logs, receipt, [
+    DIRECT_MESSAGE_SENT_TOPIC,
+    canonicalConversationId,
+    expectedTopic(expected.sender),
+    expectedTopic(expected.recipient),
+  ])
+  for (const data of matchingData) {
+    try {
+      const [messageId, body, mediaCid] = decodeAbiParameters(
+        DIRECT_MESSAGE_DATA_PARAMETERS,
+        data,
+      )
+      if (
+        messageId > 0n &&
+        body === expected.body &&
+        mediaCid.toLowerCase() === expected.mediaCid.toLowerCase() &&
+        encodeAbiParameters(DIRECT_MESSAGE_DATA_PARAMETERS, [
+          messageId,
+          body,
+          mediaCid,
+        ]).toLowerCase() === data
+      ) {
+        return messageId
+      }
+    } catch {
+      // Another matching receipt log cannot confirm this exact message.
+    }
+  }
+  throw new Error(
+    'The receipt did not contain the expected direct-message event.',
+  )
 }
 
 export function assertExpectedPostAction(
@@ -809,6 +944,7 @@ export async function waitForTransactionReceipt(
   options: {
     assertCurrentChain?: () => Promise<void>
     assertUnchanged?: () => void
+    expectedDirectMessage?: ExpectedDirectMessage
     expectedPost?: ExpectedPost
     expectedPostAction?: ExpectedPostAction
     expectedProfile?: ExpectedProfile
@@ -884,6 +1020,13 @@ export async function waitForTransactionReceipt(
           }
           if (!reverted && options.expectedProfile) {
             assertExpectedProfile(logs, options.expectedProfile, receipt)
+          }
+          if (!reverted && options.expectedDirectMessage) {
+            assertExpectedDirectMessage(
+              logs,
+              options.expectedDirectMessage,
+              receipt,
+            )
           }
           if (reverted) throw new TransactionRevertedError(hash)
           return receipt
@@ -1177,6 +1320,78 @@ export async function setProfile(
       assertCurrentChain: guard.assertSubmission,
       assertUnchanged: guard.assertUnchanged,
       expectedProfile: { account, avatarCid, bio, displayName },
+      localProvider,
+      selectedChainId: chainId,
+    })
+  } finally {
+    guard.release()
+  }
+}
+
+export async function sendDirectMessage(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  recipientValue: Address,
+  payload: DirectMessagePayload,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+): Promise<TransactionReceipt> {
+  const sender = normalizeDirectMessageAccount(account, 'sender')
+  const recipient = normalizeDirectMessageAccount(recipientValue, 'recipient')
+  if (sender.toLowerCase() === ZERO_ADDRESS) {
+    throw new Error('A public direct message requires a nonzero sender.')
+  }
+  if (recipient.toLowerCase() === ZERO_ADDRESS) {
+    throw new Error('A public direct message requires a nonzero recipient.')
+  }
+  const { body, mediaCid } = payload
+  const bodyLength =
+    body.length > MAX_POST_BODY_BYTES
+      ? MAX_POST_BODY_BYTES + 1
+      : getPostBodyByteLength(body)
+  if (bodyLength === 0 && mediaCid === '0x') {
+    throw new Error('Write a public message or add a media CID before sending.')
+  }
+  if (bodyLength > MAX_POST_BODY_BYTES) {
+    throw new Error(
+      `Direct messages are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`,
+    )
+  }
+  if (mediaCid !== '0x') decodeMediaCid(mediaCid)
+  const conversationId = getDirectConversationId(sender, recipient)
+  const guard = await createTransactionGuard(provider, sender, chainId)
+  try {
+    if ((await inspectProtocol(provider)).kind !== 'ready') {
+      throw new Error(
+        'Verified Lifeinvader v1 code is required before sending a public direct message.',
+      )
+    }
+    const hash = await sendTransaction(
+      provider,
+      {
+        data: encodeFunctionData({
+          abi: SEND_DIRECT_MESSAGE_ABI,
+          functionName: 'sendDirectMessage',
+          args: [recipient, body, mediaCid],
+        }),
+        from: sender,
+        to: PROTOCOL_ADDRESS,
+      },
+      guard,
+      onSubmitted,
+      localProvider,
+    )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
+      expectedDirectMessage: {
+        body,
+        conversationId,
+        mediaCid,
+        recipient,
+        sender,
+      },
       localProvider,
       selectedChainId: chainId,
     })

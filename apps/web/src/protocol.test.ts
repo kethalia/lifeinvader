@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { encodeAbiParameters, padHex, toHex } from 'viem'
+import { encodeAbiParameters, padHex, toHex, type Address } from 'viem'
 import {
   parseAccounts,
   parseChainId,
@@ -7,13 +7,16 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import {
+  assertExpectedDirectMessage,
   assertExpectedProfile,
   assertExpectedPostAction,
   assertProtocolConfiguration,
   COMMENT_PUBLISHED_TOPIC,
   deployProtocol,
+  DIRECT_MESSAGE_SENT_TOPIC,
   FACTORY_ADDRESS,
   FACTORY_CODE_HASH,
+  getDirectConversationId,
   getPostBodyByteLength,
   inspectProtocol,
   isTransactionRevertedError,
@@ -29,6 +32,7 @@ import {
   publishRepost,
   publishPost,
   REPOST_PUBLISHED_TOPIC,
+  sendDirectMessage,
   setPostLike,
   setProfile,
   switchToLocalChain,
@@ -44,7 +48,8 @@ const BLOCK_HASH =
   '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 const OTHER_BLOCK_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
-const ACCOUNT = '0x000000000000000000000000000000000000a11c'
+const ACCOUNT = '0x000000000000000000000000000000000000a11c' as Address
+const RECIPIENT = '0x000000000000000000000000000000000000b0b0' as Address
 function providerFrom(
   request: (args: ProviderRequest) => Promise<unknown>,
 ): Eip1193Provider {
@@ -96,6 +101,17 @@ describe('protocol configuration', () => {
     expect(() => parseAccounts(Array(1_001).fill(ACCOUNT))).toThrow(
       /invalid account list/i,
     )
+  })
+  it('derives the exact symmetric direct-message conversation identifier', () => {
+    expect(getDirectConversationId(ACCOUNT, RECIPIENT)).toBe(
+      '0x7506dccaa96eb75e1859d1d5aec685aac9f9281d5a59b00f0f3d40a234e2fe9c',
+    )
+    expect(getDirectConversationId(RECIPIENT, ACCOUNT)).toBe(
+      getDirectConversationId(ACCOUNT, RECIPIENT),
+    )
+    expect(() =>
+      getDirectConversationId('0x1234' as Address, RECIPIENT),
+    ).toThrow(/participant is invalid/i)
   })
   it('recognizes a chain where the canonical factory can deploy v1', async () => {
     const provider = providerFrom(async ({ method, params }) => {
@@ -227,6 +243,117 @@ describe('protocol transactions', () => {
       }),
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
+  })
+  it('rejects invalid public direct messages before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+    const send = (recipient: Address, body: string, mediaCid = '0x' as const) =>
+      sendDirectMessage(provider, ACCOUNT, 1n, recipient, { body, mediaCid })
+
+    await expect(send('0x1234' as Address, 'hello')).rejects.toThrow(
+      /recipient is invalid/i,
+    )
+    await expect(
+      send('0x0000000000000000000000000000000000000000', 'hello'),
+    ).rejects.toThrow(/nonzero recipient/i)
+    await expect(
+      sendDirectMessage(
+        provider,
+        '0x0000000000000000000000000000000000000000',
+        1n,
+        RECIPIENT,
+        { body: 'hello', mediaCid: '0x' },
+      ),
+    ).rejects.toThrow(/nonzero sender/i)
+    await expect(send(RECIPIENT, '')).rejects.toThrow(
+      /write a public message or add a media CID/i,
+    )
+    await expect(
+      send(RECIPIENT, '🫥'.repeat(MAX_POST_BODY_BYTES)),
+    ).rejects.toThrow(/4096 UTF-8 bytes/i)
+    await expect(
+      sendDirectMessage(provider, ACCOUNT, 1n, RECIPIENT, {
+        body: 'This attachment is not a CID.',
+        mediaCid: '0x01',
+      }),
+    ).rejects.toThrow(/media CID/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('requires an exact public direct-message event and accepts its assigned ID', () => {
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const conversationId = getDirectConversationId(ACCOUNT, RECIPIENT)
+    const expected = {
+      body: 'There are no secrets here.',
+      conversationId,
+      mediaCid: '0x01701220' as const,
+      recipient: RECIPIENT,
+      sender: ACCOUNT,
+    }
+    const data = encodeAbiParameters(
+      [{ type: 'uint256' }, { type: 'string' }, { type: 'bytes' }],
+      [91n, expected.body, expected.mediaCid],
+    )
+    const log = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data,
+      topics: [
+        DIRECT_MESSAGE_SENT_TOPIC,
+        conversationId,
+        padHex(ACCOUNT, { size: 32 }),
+        padHex(RECIPIENT, { size: 32 }),
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
+
+    expect(assertExpectedDirectMessage([log], expected, receipt)).toBe(91n)
+    for (const invalidLog of [
+      {
+        ...log,
+        data: encodeAbiParameters(
+          [{ type: 'uint256' }, { type: 'string' }, { type: 'bytes' }],
+          [0n, expected.body, expected.mediaCid],
+        ),
+      },
+      {
+        ...log,
+        data: encodeAbiParameters(
+          [{ type: 'uint256' }, { type: 'string' }, { type: 'bytes' }],
+          [91n, 'A substituted body.', expected.mediaCid],
+        ),
+      },
+      { ...log, data: `${data}${'00'.repeat(32)}` },
+      { ...log, blockHash: OTHER_BLOCK_HASH },
+      {
+        ...log,
+        topics: [
+          DIRECT_MESSAGE_SENT_TOPIC,
+          conversationId,
+          padHex(ACCOUNT, { size: 32 }),
+          padHex(ACCOUNT, { size: 32 }),
+        ],
+      },
+    ]) {
+      expect(() =>
+        assertExpectedDirectMessage([invalidLog], expected, receipt),
+      ).toThrow(/expected direct-message event/i)
+    }
+    expect(() =>
+      assertExpectedDirectMessage(
+        [log],
+        {
+          ...expected,
+          conversationId:
+            '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        },
+        receipt,
+      ),
+    ).toThrow(/expected direct-message event/i)
   })
   it('requires the exact complete profile snapshot in its receipt', () => {
     const profileReceipt = {
