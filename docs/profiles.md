@@ -33,10 +33,12 @@ protocol foundation.
 
 Profile history is independently queryable through the `ProfileSet` signature
 and indexed account topic. The canonical decoder and global event-family filter
-are available now. A later profile projection will scan bounded block ranges,
-persist reorg-aware checkpoints only on the user's device, and retain only the
-latest canonical snapshot needed by its active view. No hosted indexer or
-database is part of the protocol.
+are available now. The pure projection core validates complete-block event
+pages, retains only the latest snapshot for one to fifty requested accounts,
+records compatible confirmation checkpoints, and exports canonical
+schema-versioned snapshots for resumable local work. A separate runner will
+connect this core to bounded RPC scans and reorg-aware IndexedDB checkpoints.
+No hosted indexer or database is part of the protocol.
 
 Avatar CIDs identify content; they do not pay for or prove persistence. See
 [`media.md`](./media.md) for the storage boundary.
