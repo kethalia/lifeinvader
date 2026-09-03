@@ -20,16 +20,22 @@ export type PostFeedConfirmationOptions = {
 }
 
 export type IncludedPost = {
+  blockHash: Hash
   blockNumber: bigint
   chainId: bigint
   hash: Hash
   provider: Eip1193Provider
 }
 
+export type PostInclusion = Pick<
+  IncludedPost,
+  'blockHash' | 'blockNumber' | 'hash'
+>
+
 export type PostFeedConfirmationWaiter = (
   provider: Eip1193Provider,
   chainId: bigint,
-  includedBlock: bigint,
+  inclusion: PostInclusion,
   options?: PostFeedConfirmationOptions,
 ) => Promise<void>
 
@@ -46,6 +52,58 @@ function parseBlockNumber(value: unknown) {
     throw new Error('The wallet returned an invalid block number.')
   }
   return BigInt(value)
+}
+
+function parseHash(value: unknown, field: string): Hash {
+  if (
+    typeof value !== 'string' ||
+    value.length !== 66 ||
+    !/^0x[0-9a-f]{64}$/i.test(value)
+  ) {
+    throw new Error(`The wallet returned an invalid ${field}.`)
+  }
+  return value.toLowerCase() as Hash
+}
+
+function parseReceiptInclusion(value: unknown, expectedHash: Hash) {
+  if (value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('The wallet returned an invalid post receipt.')
+  }
+  const receipt = value as Record<string, unknown>
+  const transactionHash = parseHash(
+    receipt.transactionHash,
+    'receipt transaction hash',
+  )
+  if (transactionHash !== expectedHash) {
+    throw new Error('The wallet returned a receipt for a different post.')
+  }
+  if (receipt.status === '0x0') {
+    throw new Error('The post transaction is reverted in canonical history.')
+  }
+  if (receipt.status !== '0x1') {
+    throw new Error('The wallet returned an invalid post receipt status.')
+  }
+  return {
+    blockHash: parseHash(receipt.blockHash, 'receipt block hash'),
+    blockNumber: parseBlockNumber(receipt.blockNumber),
+  }
+}
+
+function parseCanonicalBlock(value: unknown, expectedNumber: bigint) {
+  if (value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('The wallet returned invalid canonical block data.')
+  }
+  const block = value as Record<string, unknown>
+  const blockNumber = parseBlockNumber(block.number)
+  if (blockNumber !== expectedNumber) {
+    throw new Error('The wallet returned an unexpected canonical block.')
+  }
+  return {
+    blockHash: parseHash(block.hash, 'canonical block hash'),
+    blockNumber,
+  }
 }
 
 function parseMilliseconds(
@@ -128,13 +186,18 @@ function wait(milliseconds: number, signal: AbortSignal) {
 export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
   provider,
   chainId,
-  includedBlock,
+  inclusion,
   options = {},
 ) => {
   assertQuantity(chainId, 'chain identifier')
-  assertQuantity(includedBlock, 'block number')
-  if (includedBlock > MAX_EVM_QUANTITY - POST_FEED_CONFIRMATION_DEPTH) {
+  assertQuantity(inclusion.blockNumber, 'block number')
+  if (inclusion.blockNumber > MAX_EVM_QUANTITY - POST_FEED_CONFIRMATION_DEPTH) {
     throw new Error('Invalid post confirmation block number.')
+  }
+  const transactionHash = parseHash(inclusion.hash, 'transaction hash')
+  let candidate = {
+    blockHash: parseHash(inclusion.blockHash, 'receipt block hash'),
+    blockNumber: inclusion.blockNumber,
   }
   const pollIntervalMs = parseMilliseconds(
     options.pollIntervalMs,
@@ -187,7 +250,64 @@ export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
         throw new Error('The wallet chain changed while awaiting confirmation.')
       }
       const head = parseBlockNumber(headValue)
-      if (head >= includedBlock + POST_FEED_CONFIRMATION_DEPTH) return
+      if (head >= candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH) {
+        const receiptValue = await requestBeforeDeadline(
+          provider,
+          {
+            method: 'eth_getTransactionReceipt',
+            params: [transactionHash],
+          },
+          deadline,
+          interruption.signal,
+        )
+        assertActive()
+        const currentInclusion = parseReceiptInclusion(
+          receiptValue,
+          transactionHash,
+        )
+        if (currentInclusion) {
+          if (
+            currentInclusion.blockNumber >
+            MAX_EVM_QUANTITY - POST_FEED_CONFIRMATION_DEPTH
+          ) {
+            throw new Error('Invalid post confirmation block number.')
+          }
+          candidate = currentInclusion
+          if (head >= candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH) {
+            const blockValue = await requestBeforeDeadline(
+              provider,
+              {
+                method: 'eth_getBlockByNumber',
+                params: [`0x${candidate.blockNumber.toString(16)}`, false],
+              },
+              deadline,
+              interruption.signal,
+            )
+            assertActive()
+            const canonicalBlock = parseCanonicalBlock(
+              blockValue,
+              candidate.blockNumber,
+            )
+            if (canonicalBlock?.blockHash === candidate.blockHash) {
+              const finalChainId = parseChainId(
+                await requestBeforeDeadline(
+                  provider,
+                  { method: 'eth_chainId' },
+                  deadline,
+                  interruption.signal,
+                ),
+              )
+              assertActive()
+              if (finalChainId !== chainId) {
+                throw new Error(
+                  'The wallet chain changed while awaiting confirmation.',
+                )
+              }
+              return
+            }
+          }
+        }
+      }
       const remainingMs = deadline - Date.now()
       if (remainingMs <= 0) break
       await wait(Math.min(pollIntervalMs, remainingMs), interruption.signal)

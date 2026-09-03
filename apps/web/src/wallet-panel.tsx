@@ -212,6 +212,7 @@ export function WalletPanel({
         setSubmittedTransaction(undefined)
         if (action === 'post' && submittedContext) {
           onPostConfirmed({
+            blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
             chainId: submittedContext.chainId,
             hash: nextReceipt.hash,
@@ -309,6 +310,7 @@ export function WalletPanel({
         if (transaction.action === 'post') {
           setBody('')
           onPostConfirmed({
+            blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
             chainId: transaction.chainId,
             hash: nextReceipt.hash,

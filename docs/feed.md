@@ -12,7 +12,7 @@ Every chain uses a twelve-block confirmation depth, including chain ID `31337`. 
 
 ## Work budget
 
-One feed synchronization invocation permits exactly one bounded indexer range. Connecting a wallet performs one invocation. After a post receipt arrives, a separate confirmation monitor reads only chain ID and head height every twelve seconds, for at most 30 minutes and 240 attempts. It triggers one feed invocation when the inclusion block reaches the twelve-block depth. If history remains, the interface exposes a **Load next block range** button; it does not automatically loop toward the head on page load.
+One feed synchronization invocation permits exactly one bounded indexer range. Connecting a wallet performs one invocation. After a post receipt arrives, a separate confirmation monitor reads chain ID and head height every twelve seconds, for at most 30 minutes and 240 attempts. At the target depth it verifies the transaction's current receipt and canonical block hash; a transaction re-included at a later height waits for twelve blocks from that new inclusion. It triggers one feed invocation only after that canonical evidence is safe. If history remains, the interface exposes a **Load next block range** button; it does not automatically loop toward the head on page load.
 
 Each invocation follows one compare-and-swap cycle:
 

@@ -12,7 +12,12 @@ import {
   type PublishedPost,
 } from './protocol-events'
 import { inspectProtocol } from './protocol'
-import type { Eip1193Provider } from './ethereum'
+import {
+  beforeDeadline,
+  parseChainId,
+  WALLET_READ_TIMEOUT_MS,
+  type Eip1193Provider,
+} from './ethereum'
 
 const POST_FEED_PAGE_SIZE = 50
 const POST_FEED_START_BLOCK = 0n
@@ -46,6 +51,40 @@ export type PostFeedSynchronizer = (
 function assertActive(signal?: AbortSignal) {
   if (signal?.aborted)
     throw new Error('Post feed synchronization was cancelled.')
+}
+
+function contextCancelledError() {
+  return new Error('Post feed synchronization was cancelled.')
+}
+
+async function assertSelectedChain(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  signal: AbortSignal,
+) {
+  if (signal.aborted) throw contextCancelledError()
+  let handleAbort: (() => void) | undefined
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    handleAbort = () => reject(contextCancelledError())
+    signal.addEventListener('abort', handleAbort, { once: true })
+  })
+  try {
+    const value = await beforeDeadline(
+      () =>
+        Promise.race([
+          provider.request({ method: 'eth_chainId' }),
+          interrupted,
+        ]),
+      Date.now() + WALLET_READ_TIMEOUT_MS,
+      () => new Error('Post feed chain inspection timed out.'),
+    )
+    if (signal.aborted) throw contextCancelledError()
+    if (parseChainId(value) !== chainId) {
+      throw new Error('The post feed belongs to a different wallet chain.')
+    }
+  } finally {
+    if (handleAbort) signal.removeEventListener('abort', handleAbort)
+  }
 }
 
 function decodePostLogs(logs: readonly IndexedEventLog[]) {
@@ -85,71 +124,101 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
     startBlock: POST_FEED_START_BLOCK,
   })
   assertActive(options.signal)
-  const inspection = await inspectProtocol(provider)
-  assertActive(options.signal)
-  if (inspection.kind !== 'ready') {
-    throw new Error(
-      'Verified Lifeinvader v1 is required before this chain can provide a feed.',
-    )
+  const interruption = new AbortController()
+  let contextChanged = false
+  const interruptContext = () => {
+    contextChanged = true
+    interruption.abort()
   }
-  const cache = await openEventCache({
-    ...options.storage,
-    filter: PUBLISHED_POST_FILTER,
-  })
-  try {
+  const interruptRequest = () => interruption.abort()
+  provider.on?.('chainChanged', interruptContext)
+  provider.on?.('disconnect', interruptContext)
+  options.signal?.addEventListener('abort', interruptRequest, { once: true })
+  const assertContextActive = () => {
     assertActive(options.signal)
-    let before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
-    let cacheReset = before.reset
-    try {
-      decodePostLogs(before.logs)
-    } catch {
-      await cache.clear(seed)
-      before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
-      cacheReset = true
+    if (contextChanged) {
+      throw new Error('The wallet chain changed during feed verification.')
     }
-    const result = await syncEventLogs(
-      provider,
-      PUBLISHED_POST_FILTER,
-      before.cursor,
-      {
-        maxRanges: 1,
-        signal: options.signal,
-      },
-    )
-    assertActive(options.signal)
-    decodePostLogs(result.logs)
-    await cache.apply(before, result)
-    assertActive(options.signal)
-    const after = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
-    if (
-      after.generation !== before.generation ||
-      after.revision !== before.revision + 1n ||
-      !sameCursor(after.cursor, result.cursor)
-    ) {
+  }
+  try {
+    await assertSelectedChain(provider, chainId, interruption.signal)
+    assertContextActive()
+    const inspection = await inspectProtocol(provider)
+    assertContextActive()
+    await assertSelectedChain(provider, chainId, interruption.signal)
+    assertContextActive()
+    if (inspection.kind !== 'ready') {
       throw new Error(
-        'The post feed cache changed after synchronization. Retry the bounded range.',
+        'Verified Lifeinvader v1 is required before this chain can provide a feed.',
       )
     }
-    let posts: readonly PublishedPost[]
+    const cache = await openEventCache({
+      ...options.storage,
+      filter: PUBLISHED_POST_FILTER,
+    })
     try {
-      posts = decodePostLogs(after.logs)
-    } catch (error) {
-      await cache.clear(seed)
-      throw error
+      assertContextActive()
+      let before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+      let cacheReset = before.reset
+      try {
+        decodePostLogs(before.logs)
+      } catch {
+        await cache.clear(seed)
+        before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+        cacheReset = true
+      }
+      const result = await syncEventLogs(
+        provider,
+        PUBLISHED_POST_FILTER,
+        before.cursor,
+        {
+          maxRanges: 1,
+          signal: interruption.signal,
+        },
+      )
+      assertContextActive()
+      decodePostLogs(result.logs)
+      await cache.apply(before, result)
+      assertContextActive()
+      const after = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+      if (
+        after.generation !== before.generation ||
+        after.revision !== before.revision + 1n ||
+        !sameCursor(after.cursor, result.cursor)
+      ) {
+        throw new Error(
+          'The post feed cache changed after synchronization. Retry the bounded range.',
+        )
+      }
+      let posts: readonly PublishedPost[]
+      try {
+        posts = decodePostLogs(after.logs)
+      } catch (error) {
+        await cache.clear(seed)
+        throw error
+      }
+      return {
+        cacheReset: cacheReset || after.reset,
+        caughtUp: result.caughtUp,
+        head: result.head,
+        indexedThrough:
+          after.cursor.nextBlock > after.cursor.startBlock
+            ? after.cursor.nextBlock - 1n
+            : undefined,
+        posts,
+        safeHead: result.safeHead,
+        scannedRanges: result.scannedRanges,
+      }
+    } finally {
+      cache.close()
     }
-    return {
-      cacheReset: cacheReset || after.reset,
-      caughtUp: result.caughtUp,
-      head: result.head,
-      indexedThrough:
-        after.cursor.nextBlock > after.cursor.startBlock
-          ? after.cursor.nextBlock - 1n
-          : undefined,
-      posts,
-      safeHead: result.safeHead,
-      scannedRanges: result.scannedRanges,
-    }
+  } catch (error) {
+    assertContextActive()
+    throw error
   } finally {
-    cache.close()
+    interruption.abort()
+    options.signal?.removeEventListener('abort', interruptRequest)
+    provider.removeListener?.('chainChanged', interruptContext)
+    provider.removeListener?.('disconnect', interruptContext)
   }
 }

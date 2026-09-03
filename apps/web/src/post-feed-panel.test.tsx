@@ -125,6 +125,7 @@ describe('PostFeedPanel', () => {
     render(
       <PostFeedPanel
         includedPost={{
+          blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
           hash: TRANSACTION_HASH,
@@ -159,6 +160,7 @@ describe('PostFeedPanel', () => {
     const { rerender } = render(
       <PostFeedPanel
         includedPost={{
+          blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
           hash: TRANSACTION_HASH,
@@ -176,6 +178,7 @@ describe('PostFeedPanel', () => {
     rerender(
       <PostFeedPanel
         includedPost={{
+          blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
           hash: TRANSACTION_HASH,

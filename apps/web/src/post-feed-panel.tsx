@@ -161,7 +161,7 @@ export function PostFeedPanel({
     void waitForConfirmation(
       includedPost.provider,
       includedPost.chainId,
-      includedPost.blockNumber,
+      includedPost,
       { signal: controller.signal },
     )
       .then(() => {

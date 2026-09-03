@@ -215,7 +215,11 @@ describe('App', () => {
     expect(waitForSafePost).toHaveBeenCalledWith(
       provider,
       1n,
-      42n,
+      expect.objectContaining({
+        blockHash: RECEIPT_BLOCK_HASH,
+        blockNumber: 42n,
+        hash: TRANSACTION_HASH,
+      }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
     expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(2)

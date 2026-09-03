@@ -174,6 +174,7 @@ describe('post feed synchronization', () => {
   it('rejects an unverified contract without requesting its logs', async () => {
     const provider: Eip1193Provider = {
       request: vi.fn(async ({ method }) => {
+        if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_getCode') return '0x01'
         throw new Error(`Unexpected RPC method: ${method}`)
       }),
@@ -182,7 +183,55 @@ describe('post feed synchronization', () => {
     await expect(
       synchronizePostFeed(provider, 1n, { storage: storage() }),
     ).rejects.toThrow(/verified Lifeinvader v1/i)
-    expect(provider.request).toHaveBeenCalledTimes(1)
+    expect(provider.request).toHaveBeenCalledTimes(3)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('binds protocol inspection to the selected chain', async () => {
+    let chainReads = 0
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_chainId') {
+          chainReads += 1
+          return chainReads === 1 ? '0x1' : '0x2'
+        }
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/different wallet chain/i)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('observes chain changes from before bytecode inspection', async () => {
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const provider: Eip1193Provider = {
+      on: vi.fn((event, listener) => listeners.set(event, listener)),
+      removeListener: vi.fn((event) => listeners.delete(event)),
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') {
+          listeners.get('chainChanged')?.('0x2')
+          return PROTOCOL_RUNTIME_CODE
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/chain changed during feed verification/i)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(listeners.size).toBe(0)
   })
 
   it('rejects a post-apply page from a newer cache position', async () => {
