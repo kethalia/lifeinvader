@@ -32,6 +32,7 @@ type CursorRecord = {
   scope: string
 }
 type ScopeRecord = {
+  baselineKey: string
   filter: unknown
   generation: string
   lastLog?: unknown
@@ -42,6 +43,7 @@ type ScopeRecord = {
   scope: string
 }
 type ScopeState = {
+  baselineKey: string
   filter: NormalizedEventLogFilter
   generation: string
   lastLog?: EventCacheLogPosition
@@ -92,6 +94,7 @@ export type EventCacheScanBaseline = EventCachePosition & {
   digest: Hash
   last?: EventCacheLogPosition
   logCount: number
+  proof: Hash
 }
 export type EventCacheScanPage = EventCachePosition & {
   baseline?: EventCacheScanBaseline
@@ -348,6 +351,40 @@ function stateMatchesIntegrity(state: ScopeState, integrity: LogIntegrity) {
         sameLogPosition(state.lastLog, integrity.lastLog))
   )
 }
+function getScanBaselineProof(
+  baselineKey: string,
+  baseline: Omit<EventCacheScanBaseline, 'proof'>,
+) {
+  const { cursor } = baseline
+  return keccak256(
+    stringToHex(
+      JSON.stringify([
+        'lifeinvader.event-cache.scan-baseline.v1',
+        baselineKey,
+        baseline.generation,
+        baseline.revision.toString(16),
+        baseline.digest,
+        baseline.logCount.toString(16),
+        baseline.last
+          ? [
+              baseline.last.blockNumber.toString(16),
+              baseline.last.logIndex.toString(16),
+            ]
+          : null,
+        cursor.chainId.toString(16),
+        cursor.filterId,
+        cursor.startBlock.toString(16),
+        cursor.finalityDepth.toString(16),
+        cursor.nextBlock.toString(16),
+        cursor.rangeSize.toString(16),
+        cursor.checkpoints.map((checkpoint) => [
+          checkpoint.blockNumber.toString(16),
+          checkpoint.blockHash,
+        ]),
+      ]),
+    ),
+  )
+}
 function normalizeScanCursor(
   value: unknown,
   seedCursor: EventCursor,
@@ -426,6 +463,9 @@ function normalizeScanBaseline(
     },
     'scan baseline',
   )
+  if (!isLogDigest(source.proof)) {
+    throw cacheError('Invalid event cache scan baseline proof.')
+  }
   if (
     integrity.lastLog !== undefined &&
     (integrity.lastLog.blockNumber < seedCursor.startBlock ||
@@ -441,6 +481,7 @@ function normalizeScanBaseline(
     digest: integrity.digest,
     last: integrity.lastLog,
     logCount: integrity.logCount,
+    proof: source.proof,
   }
 }
 function assertRollbackTo(value: unknown, cursor: EventCursor) {
@@ -483,6 +524,7 @@ function asScopeRecord(
   if (
     record.schemaVersion !== CACHE_SCHEMA_VERSION ||
     record.scope !== scope ||
+    !isGeneration(record.baselineKey) ||
     !isGeneration(record.generation) ||
     typeof record.revision !== 'bigint' ||
     record.revision < 0n ||
@@ -505,6 +547,7 @@ function asScopeRecord(
       'scope',
     )
     return {
+      baselineKey: record.baselineKey,
       filter,
       generation: record.generation,
       lastLog: integrity.lastLog,
@@ -859,10 +902,12 @@ export class BrowserEventCache {
 
   #createScopeState(revision: bigint): ScopeState {
     const generation = defaultCreateGeneration()
-    if (!isGeneration(generation)) {
+    const baselineKey = defaultCreateGeneration()
+    if (!isGeneration(generation) || !isGeneration(baselineKey)) {
       throw cacheError('The event cache generated an invalid scope token.')
     }
     return {
+      baselineKey,
       filter: this.#filter,
       generation,
       logCount: 0,
@@ -873,6 +918,7 @@ export class BrowserEventCache {
 
   #putScopeState(scopeStore: IDBObjectStore, scope: string, state: ScopeState) {
     scopeStore.put({
+      baselineKey: state.baselineKey,
       filter: {
         address: state.filter.address,
         topics: state.filter.topics,
@@ -1297,6 +1343,14 @@ export class BrowserEventCache {
               throw cacheError('Invalid event cache scan continuation.')
             }
           } else if (baseline) {
+            const { proof, ...baselinePayload } = baseline
+            if (
+              getScanBaselineProof(state.baselineKey, baselinePayload) !== proof
+            ) {
+              throw cacheError(
+                'The event cache scan baseline was not issued by this cache.',
+              )
+            }
             if (
               state.generation !== baseline.generation ||
               baseline.revision > state.revision ||
@@ -1401,15 +1455,24 @@ export class BrowserEventCache {
           if (!hasMore && !stateMatchesIntegrity(state, integrity)) {
             throw new EventCacheCorruptionError()
           }
+          const completedBaseline = !hasMore
+            ? ({
+                cursor,
+                digest: state.logDigest,
+                generation: state.generation,
+                last: state.lastLog,
+                logCount: state.logCount,
+                revision: state.revision,
+              } satisfies Omit<EventCacheScanBaseline, 'proof'>)
+            : undefined
           page = {
-            baseline: !hasMore
+            baseline: completedBaseline
               ? {
-                  cursor,
-                  digest: state.logDigest,
-                  generation: state.generation,
-                  last: state.lastLog,
-                  logCount: state.logCount,
-                  revision: state.revision,
+                  ...completedBaseline,
+                  proof: getScanBaselineProof(
+                    state.baselineKey,
+                    completedBaseline,
+                  ),
                 }
               : undefined,
             complete: !hasMore,

@@ -880,7 +880,7 @@ describe('browser event cache', () => {
   })
 
   it('uses a completed canonical scan as an append-only delta baseline', async () => {
-    const { cache: opened } = await createCache()
+    const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
     const next = cursorAt(seed, 6n)
     await opened.apply(
@@ -889,6 +889,13 @@ describe('browser event cache', () => {
     )
     const complete = await opened.scan(seed)
     expect(complete.baseline).toBeDefined()
+    opened.close()
+    cache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
 
     const advanced = {
       ...next,
@@ -898,19 +905,63 @@ describe('browser event cache', () => {
       ],
       nextBlock: 8n,
     } satisfies EventCursor
-    await opened.apply(
-      await opened.readLatest(seed),
+    await cache.apply(
+      await cache.readLatest(seed),
       syncResult(advanced, [eventLog(6n)]),
     )
 
     await expect(
-      opened.scan(seed, { baseline: complete.baseline }),
+      cache.scan(seed, { baseline: complete.baseline }),
     ).resolves.toMatchObject({
       complete: true,
       cursor: advanced,
       logs: [eventLog(6n)],
       reset: false,
       revision: 2n,
+    })
+  })
+
+  it('rejects a continuation prefix masquerading as a completed baseline', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const current = {
+      ...seed,
+      checkpoints: [
+        { blockHash: blockHash(1n), blockNumber: 1n },
+        { blockHash: blockHash(3n), blockNumber: 3n },
+      ],
+      nextBlock: 4n,
+    } satisfies EventCursor
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(current, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+    const partial = await opened.scan(seed, { limit: 1 })
+    const complete = await opened.scan(seed)
+    expect(partial.next).toBeDefined()
+    expect(complete.baseline).toBeDefined()
+
+    await expect(
+      opened.scan(seed, {
+        baseline: {
+          cursor: {
+            ...current,
+            checkpoints: [current.checkpoints[0]!],
+            nextBlock: 2n,
+          },
+          digest: partial.next!.digest,
+          generation: complete.generation,
+          last: partial.next!.after,
+          logCount: partial.next!.logCount,
+          proof: complete.baseline!.proof,
+          revision: 0n,
+        },
+      }),
+    ).rejects.toThrow(/baseline was not issued by this cache/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: current,
+      reset: false,
+      revision: 1n,
     })
   })
 
