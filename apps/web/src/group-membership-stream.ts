@@ -255,6 +255,7 @@ export async function authenticateIssuedGroupMembershipProjectionAnchor(
   if (typeof authenticateCache !== 'function') {
     throw new Error('The group-membership cache authenticator is invalid.')
   }
+  assertActive(signal)
   const issued = issuedProjectionAnchors.get(anchor)!
   const interruption = new AbortController()
   let contextChanged = false
@@ -302,6 +303,25 @@ export async function authenticateIssuedGroupMembershipProjectionAnchor(
     }
     await authenticateCache()
     assertContextActive()
+    if (issued.checkpoint) {
+      await assertCanonicalCheckpoint(
+        issued.provider,
+        issued.checkpoint,
+        interruption.signal,
+      )
+      assertContextActive()
+    }
+    const finalHead = await readSelectedHead(
+      issued.provider,
+      issued.chainId,
+      interruption.signal,
+    )
+    assertContextActive()
+    if (finalHead < issued.head) {
+      throw new Error(
+        'The wallet head moved behind the group-membership projection anchor.',
+      )
+    }
     if (issued.checkpoint) {
       await assertCanonicalCheckpoint(
         issued.provider,

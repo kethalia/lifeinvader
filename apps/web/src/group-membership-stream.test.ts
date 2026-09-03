@@ -595,6 +595,63 @@ describe('group-membership projection anchors', () => {
     expect(authenticateCache).toHaveBeenCalledTimes(1)
   })
 
+  it('does no wallet or cache work for an already aborted authentication', async () => {
+    const base = providerFor()
+    const provider: Eip1193Provider = {
+      request: vi.fn((request) => base.request(request)),
+    }
+    const snapshot = await synchronizeGroupMembershipStream(
+      provider,
+      1n,
+      GROUP_A,
+      { storage: storage() },
+    )
+    const readsBeforeAuthentication = vi.mocked(provider.request).mock.calls
+      .length
+    const authenticateCache = vi.fn(async () => undefined)
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(
+      authenticateIssuedGroupMembershipProjectionAnchor(
+        snapshot.projectionAnchor!,
+        authenticateCache,
+        controller.signal,
+      ),
+    ).rejects.toThrow(/cancelled/i)
+    expect(provider.request).toHaveBeenCalledTimes(readsBeforeAuthentication)
+    expect(authenticateCache).not.toHaveBeenCalled()
+  })
+
+  it('rechecks confirmation depth after cache authentication', async () => {
+    let head = 20n
+    const base = providerFor()
+    const provider: Eip1193Provider = {
+      request: vi.fn((request) => {
+        if (request.method === 'eth_blockNumber')
+          return Promise.resolve(toHex(head))
+        return base.request(request)
+      }),
+    }
+    const snapshot = await synchronizeGroupMembershipStream(
+      provider,
+      1n,
+      GROUP_A,
+      { storage: storage() },
+    )
+    const authenticateCache = vi.fn(async () => {
+      head = 15n
+    })
+
+    await expect(
+      authenticateIssuedGroupMembershipProjectionAnchor(
+        snapshot.projectionAnchor!,
+        authenticateCache,
+      ),
+    ).rejects.toThrow(/head moved behind/i)
+    expect(authenticateCache).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects a replaced checkpoint before authenticating the cache', async () => {
     let branch = 'a'
     const provider: Eip1193Provider = {
