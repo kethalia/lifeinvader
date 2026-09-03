@@ -79,24 +79,13 @@ function syncResult(
     scannedRanges: 1,
   }
 }
-function createGenerationFactory() {
-  let nextGeneration = 0n
-  return () => {
-    nextGeneration += 1n
-    return nextGeneration.toString(16).padStart(64, '0')
-  }
-}
-async function createCache(
-  factory = new IDBFactory(),
-  createGeneration = createGenerationFactory(),
-) {
+async function createCache(factory = new IDBFactory()) {
   cache = await openEventCache({
-    createGeneration,
     databaseName: 'lifeinvader-event-cache-test',
     factory,
     keyRange: IDBKeyRange,
   })
-  return { cache, createGeneration, factory }
+  return { cache, factory }
 }
 async function putRawRecord(
   factory: IDBFactory,
@@ -104,7 +93,7 @@ async function putRawRecord(
   value: Record<string, unknown>,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 2)
+    const request = factory.open('lifeinvader-event-cache-test', 3)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -122,7 +111,7 @@ async function deleteRawRecord(
   key: IDBValidKey,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 2)
+    const request = factory.open('lifeinvader-event-cache-test', 3)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -133,6 +122,24 @@ async function deleteRawRecord(
     transaction.onabort = () => reject(transaction.error)
   })
   database.close()
+}
+async function countRawScopeLogs(factory: IDBFactory, scope: string) {
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = factory.open('lifeinvader-event-cache-test', 3)
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+  const count = await new Promise<number>((resolve, reject) => {
+    const transaction = database.transaction('logs', 'readonly')
+    const request = transaction
+      .objectStore('logs')
+      .index('scope')
+      .count(IDBKeyRange.only(scope))
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+  database.close()
+  return count
 }
 
 describe('browser event cache', () => {
@@ -156,7 +163,6 @@ describe('browser event cache', () => {
 
     opened.cache.close()
     cache = await openEventCache({
-      createGeneration: opened.createGeneration,
       databaseName: 'lifeinvader-event-cache-test',
       factory,
       keyRange: IDBKeyRange,
@@ -271,7 +277,7 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'logs', {
       log: { ...log, data: '0x1' },
       position,
-      schemaVersion: 2,
+      schemaVersion: 3,
       scope: getEventCacheScope(seed),
     })
     expect(await opened.readLatest(seed)).toEqual({
@@ -284,7 +290,7 @@ describe('browser event cache', () => {
   })
 
   it('makes corruption recovery atomic with a concurrent repair', async () => {
-    const { cache: opened, createGeneration, factory } = await createCache()
+    const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
     const original = cursorAt(seed, 4n)
     await opened.apply(
@@ -296,12 +302,11 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'logs', {
       log: { ...corruptLog, data: '0x1' },
       position: `${'0'.repeat(63)}2:${'0'.repeat(16)}:${'0'.repeat(16)}`,
-      schemaVersion: 2,
+      schemaVersion: 3,
       scope: getEventCacheScope(seed),
     })
 
     const otherTab = await openEventCache({
-      createGeneration,
       databaseName: 'lifeinvader-event-cache-test',
       factory,
       keyRange: IDBKeyRange,
@@ -397,7 +402,7 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'scopes', {
       generation: 'corrupt',
       revision: 9n,
-      schemaVersion: 2,
+      schemaVersion: 3,
       scope: getEventCacheScope(seed),
     })
 
@@ -412,6 +417,162 @@ describe('browser event cache', () => {
     await expect(
       opened.apply(stale, syncResult(cursorAt(seed, 1n), [eventLog(0n)])),
     ).rejects.toThrow(/changed during synchronization/i)
+  })
+
+  it('resets an impossible cursor stored at revision zero', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await putRawRecord(factory, 'cursors', {
+      cursor: cursorAt(seed, 2n),
+      schemaVersion: 3,
+      scope: getEventCacheScope(seed),
+    })
+
+    expect(await opened.readLatest(seed)).toEqual({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 1n,
+    })
+  })
+
+  it('resets an impossible revision-zero cursor before applying', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await putRawRecord(factory, 'cursors', {
+      cursor: cursorAt(seed, 2n),
+      schemaVersion: 3,
+      scope: getEventCacheScope(seed),
+    })
+
+    await expect(
+      opened.apply(initial, syncResult(cursorAt(seed, 1n), [eventLog(0n)])),
+    ).rejects.toThrow(/corrupt/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      revision: 1n,
+    })
+  })
+
+  it('resets cached logs from conflicting block branches', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const conflict = eventLog(1n, { branch: 'b', logIndex: 1 })
+    await putRawRecord(factory, 'logs', {
+      log: conflict,
+      position: `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(15)}1`,
+      schemaVersion: 3,
+      scope: getEventCacheScope(seed),
+    })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('resets a cached log that conflicts with its cursor checkpoint', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 2n), []))
+    const conflict = eventLog(1n, { branch: 'b' })
+    await putRawRecord(factory, 'logs', {
+      log: conflict,
+      position: `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(16)}`,
+      schemaVersion: 3,
+      scope: getEventCacheScope(seed),
+    })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('finds and resets a log with a non-string position key', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    const scope = getEventCacheScope(seed)
+    await putRawRecord(factory, 'logs', {
+      log: eventLog(0n),
+      position: 7,
+      schemaVersion: 3,
+      scope,
+    })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 1n,
+    })
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
+  })
+
+  it('clears every position key type through the scope index', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const scope = getEventCacheScope(seed)
+    await opened.clear(seed)
+    await putRawRecord(factory, 'logs', {
+      log: eventLog(0n),
+      position: 7,
+      schemaVersion: 3,
+      scope,
+    })
+    expect(await countRawScopeLogs(factory, scope)).toBe(1)
+
+    await opened.clear(seed)
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
+  })
+
+  it('resets a malformed position encountered during rollback', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const active = await opened.readLatest(seed)
+    const scope = getEventCacheScope(seed)
+    await putRawRecord(factory, 'logs', {
+      log: eventLog(2n),
+      position: 7,
+      schemaVersion: 3,
+      scope,
+    })
+
+    await expect(
+      opened.apply(
+        active,
+        syncResult(
+          cursorAt(seed, 4n, 'b'),
+          [eventLog(2n, { branch: 'b' })],
+          2n,
+        ),
+      ),
+    ).rejects.toThrow(/corrupt/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      revision: 2n,
+    })
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
   })
 
   it('limits reads without scanning the whole local history', async () => {
@@ -440,6 +601,21 @@ describe('browser event cache', () => {
     await expect(
       opened.apply(initial, syncResult(next, [eventLog(2n), eventLog(1n)])),
     ).rejects.toThrow(/canonically ordered/i)
+    await expect(
+      opened.apply(
+        initial,
+        syncResult(next, [
+          eventLog(1n),
+          eventLog(1n, { branch: 'b', logIndex: 1 }),
+        ]),
+      ),
+    ).rejects.toThrow(/block hashes/i)
+    await expect(
+      opened.apply(
+        initial,
+        syncResult(cursorAt(seed, 2n), [eventLog(1n, { branch: 'b' })]),
+      ),
+    ).rejects.toThrow(/block hashes/i)
     await expect(
       opened.apply(
         { ...initial, cursor: cursorAt(seed, 4n) },
