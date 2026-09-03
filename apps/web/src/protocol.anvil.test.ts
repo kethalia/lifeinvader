@@ -6,6 +6,7 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { synchronizeDirectMessageStream } from './direct-message-stream'
 import { synchronizeGroupDirectory } from './group-directory'
+import { synchronizeGroupMembershipStream } from './group-membership-stream'
 import { synchronizeGroupMessageStream } from './group-message-stream'
 import {
   parseAccounts,
@@ -320,6 +321,30 @@ describe('wallet transaction helpers on Anvil', () => {
         },
       ],
     })
+    const publicMembership = await synchronizeGroupMembershipStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      groupReceipt.groupId,
+      {
+        storage: {
+          databaseName: 'lifeinvader-anvil-group-memberships',
+          factory: new IDBFactory(),
+          keyRange: IDBKeyRange,
+        },
+      },
+    )
+    expect(publicMembership).toMatchObject({
+      caughtUp: true,
+      groupId: groupReceipt.groupId,
+      recentSignals: [
+        {
+          account,
+          groupId: groupReceipt.groupId,
+          joined: true,
+        },
+      ],
+    })
+    expect(publicMembership.projectionAnchor).toBeDefined()
     const publicGroup = await synchronizeGroupMessageStream(
       provider,
       LOCAL_CHAIN_ID,
