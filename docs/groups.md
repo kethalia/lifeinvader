@@ -60,6 +60,14 @@ invalid booleans, non-canonical topic padding or ABI data, empty or oversized
 content, and malformed dynamic values. Raw on-chain CID bytes are length-checked
 rather than treated as proof that content exists.
 
+The global group directory scans only `GroupCreated`. Each explicit invocation
+advances at most one bounded range, persists a chain-scoped reorganization-aware
+cursor, and returns at most the newest 100 retained definitions after validating
+the complete cache page. An incomplete directory is marked `caughtUp: false`;
+callers must not present that recent page as the complete set of groups. Cached
+corruption clears only that chain's directory scope, while another chain's scope
+is preserved.
+
 The selected-group message stream verifies the chosen chain and exact v1 runtime
 before touching logs. Each explicit invocation scans at most one bounded range
 with the exact group filter, persists a reorganization-aware cursor in disposable
@@ -72,8 +80,9 @@ chain after cache work. It cannot claim catch-up unless its checkpoint anchors t
 twice-sampled safe head. Partial catch-up remains identifiable to the caller, and
 no history is read merely because a wallet connected or a component rendered.
 The Anvil integration covers create, join, send, and confirmed exact-group
-readback. Later slices will add bounded group discovery, membership projections,
-and the React interface without a hosted indexer, application server, or database.
+readback as well as discovery of the immutable group definition. Later slices
+will add membership projections and the React interface without a hosted
+indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
