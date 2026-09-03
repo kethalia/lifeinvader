@@ -24,6 +24,7 @@ const MAX_PAGE_SIZE = 200
 const MAX_BATCH_LOGS = 5_000
 const MAX_SCAN_LOGS = MAX_BATCH_LOGS + MAX_PAGE_SIZE
 const MAX_SCAN_SESSIONS = 16
+const MAX_BASELINE_AUTHENTICATIONS = 16
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 
 type CursorRecord = {
@@ -107,12 +108,31 @@ export type EventCacheScanOptions = {
   baseline?: EventCacheScanBaseline
   continuation?: EventCacheScanCursor
   limit?: number
+  resetOnCorruption?: boolean
+}
+export type EventCacheBaselineAuthentication = {
+  baseline: EventCacheScanBaseline
+  filter: EventLogFilter
+  seed: EventCursor
 }
 export type OpenEventCacheOptions = {
   databaseName?: string
   factory?: IDBFactory
   filter: EventLogFilter
   keyRange?: typeof IDBKeyRange
+}
+
+type NormalizedBaselineAuthentication = {
+  baseline: EventCacheScanBaseline
+  filter: NormalizedEventLogFilter
+  scope: string
+  seed: EventCursor
+}
+type BaselineAuthenticationRead = {
+  cursorRecord?: unknown
+  firstLogRecord?: unknown
+  lastLogRecord?: unknown
+  scopeRecord?: unknown
 }
 
 class EventCacheCorruptionError extends Error {}
@@ -621,6 +641,115 @@ export function getEventCacheScope(value: unknown) {
   ].join(':')
 }
 
+function normalizeBaselineAuthentications(
+  value: unknown,
+): readonly NormalizedBaselineAuthentication[] {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > MAX_BASELINE_AUTHENTICATIONS
+  ) {
+    throw cacheError('Invalid event cache baseline authentications.')
+  }
+  const scopes = new Set<string>()
+  return value.map((entryValue) => {
+    if (
+      typeof entryValue !== 'object' ||
+      entryValue === null ||
+      Array.isArray(entryValue)
+    ) {
+      throw cacheError('Invalid event cache baseline authentication.')
+    }
+    const entry = entryValue as Partial<EventCacheBaselineAuthentication>
+    const filter = normalizeEventLogFilter(entry.filter)
+    const seed = validateEventCursor(entry.seed)
+    if (seed.filterId !== filter.id || !isSeedCursor(seed)) {
+      throw cacheError(
+        'The event cache baseline authentication belongs to another scope.',
+      )
+    }
+    const baseline = normalizeScanBaseline(entry.baseline, seed)
+    const scope = getEventCacheScope(seed)
+    if (scopes.has(scope)) {
+      throw cacheError('Duplicate event cache baseline authentication scope.')
+    }
+    scopes.add(scope)
+    return { baseline, filter, scope, seed }
+  })
+}
+
+function assertBaselineAuthenticated(
+  entry: NormalizedBaselineAuthentication,
+  read: BaselineAuthenticationRead,
+) {
+  try {
+    if (read.scopeRecord === undefined) throw new EventCacheCorruptionError()
+    const state = asScopeRecord(read.scopeRecord, entry.scope, entry.filter)
+    if (
+      state.revision === 0n
+        ? read.cursorRecord !== undefined
+        : read.cursorRecord === undefined
+    ) {
+      throw new EventCacheCorruptionError()
+    }
+    const cursor =
+      read.cursorRecord === undefined
+        ? entry.seed
+        : asCursorRecord(read.cursorRecord, entry.scope)
+    const { proof, ...baselinePayload } = entry.baseline
+    if (
+      state.generation !== entry.baseline.generation ||
+      state.revision !== entry.baseline.revision ||
+      !sameCursor(cursor, entry.baseline.cursor) ||
+      getScanBaselineProof(state.baselineKey, baselinePayload) !== proof
+    ) {
+      throw new EventCacheCorruptionError()
+    }
+    const integrity: LogIntegrity = {
+      digest: entry.baseline.digest,
+      lastLog: entry.baseline.last,
+      logCount: entry.baseline.logCount,
+    }
+    if (!stateMatchesIntegrity(state, integrity)) {
+      throw new EventCacheCorruptionError()
+    }
+    const hasLogs = read.firstLogRecord !== undefined
+    if (
+      hasLogs !== (read.lastLogRecord !== undefined) ||
+      hasLogs !== integrity.logCount > 0
+    ) {
+      throw new EventCacheCorruptionError()
+    }
+    if (!hasLogs) return
+    const first = asStoredLogRecord(read.firstLogRecord, entry.scope)
+    const last = asStoredLogRecord(read.lastLogRecord, entry.scope)
+    const firstIntegrity = advanceLogIntegrity(
+      { digest: EMPTY_LOG_DIGEST, logCount: 0 },
+      first.log,
+    )
+    if (
+      !storedRecordMatchesIntegrity(first, firstIntegrity) ||
+      !storedRecordMatchesIntegrity(last, integrity) ||
+      (integrity.logCount === 1
+        ? compareLogs(first.log, last.log) !== 0
+        : compareLogs(first.log, last.log) >= 0)
+    ) {
+      throw new EventCacheCorruptionError()
+    }
+    const edgeLogs =
+      integrity.logCount === 1 ? [first.log] : [first.log, last.log]
+    if (
+      first.log.blockNumber < cursor.startBlock ||
+      last.log.blockNumber >= cursor.nextBlock ||
+      getLogStreamProblem(edgeLogs, cursor, state.filter)
+    ) {
+      throw new EventCacheCorruptionError()
+    }
+  } catch {
+    throw cacheError('The event cache baseline snapshot changed or is corrupt.')
+  }
+}
+
 export class BrowserEventCache {
   readonly #database: IDBDatabase
   readonly #filter: NormalizedEventLogFilter
@@ -662,6 +791,11 @@ export class BrowserEventCache {
       if (oldest !== undefined) this.#scanContinuations.delete(oldest)
     }
     this.#scanContinuations.set(snapshot.session, snapshot)
+  }
+
+  async authenticateBaselines(value: unknown): Promise<void> {
+    const entries = normalizeBaselineAuthentications(value)
+    return this.#authenticateBaselinesTransaction(entries)
   }
 
   async clear(seedValue: unknown) {
@@ -768,6 +902,10 @@ export class BrowserEventCache {
     const options = optionsValue as EventCacheScanOptions
     const limit = options.limit ?? DEFAULT_PAGE_SIZE
     assertPageSize(limit)
+    const resetOnCorruption = options.resetOnCorruption ?? true
+    if (typeof resetOnCorruption !== 'boolean') {
+      throw cacheError('Invalid event cache corruption reset option.')
+    }
     let continuation: EventCacheScanCursor | undefined
     let baseline: EventCacheScanBaseline | undefined
     let scanSession: string
@@ -803,6 +941,7 @@ export class BrowserEventCache {
       continuation,
       baseline,
       scanSession,
+      resetOnCorruption,
     )
     if (page.next) this.#rememberScanContinuation(seedCursor, page.next)
     return page
@@ -898,6 +1037,98 @@ export class BrowserEventCache {
       cursor.continue()
     }
     request.onerror = () => undefined
+  }
+
+  #authenticateBaselinesTransaction(
+    entries: readonly NormalizedBaselineAuthentication[],
+  ) {
+    return new Promise<void>((resolve, reject) => {
+      const transaction = this.#database.transaction(
+        [SCOPE_STORE, CURSOR_STORE, LOG_STORE],
+        'readonly',
+      )
+      const reads = entries.map(() => ({}) as BaselineAuthenticationRead)
+      let failure: Error | undefined
+      let pending = entries.length * 4
+      let validated = false
+      const scopeStore = transaction.objectStore(SCOPE_STORE)
+      const cursorStore = transaction.objectStore(CURSOR_STORE)
+      const logIndex = transaction.objectStore(LOG_STORE).index(LOG_SCOPE_INDEX)
+      const fail = (error: unknown) => {
+        if (failure) return
+        failure = asError(
+          error,
+          'The event cache baselines could not be authenticated.',
+        )
+        try {
+          transaction.abort()
+        } catch {
+          reject(failure)
+        }
+      }
+      const requestFinished = () => {
+        pending -= 1
+        if (pending !== 0 || failure) return
+        try {
+          entries.forEach((entry, index) =>
+            assertBaselineAuthenticated(entry, reads[index]!),
+          )
+          validated = true
+        } catch (error) {
+          fail(error)
+        }
+      }
+      entries.forEach((entry, index) => {
+        const read = reads[index]!
+        const scopeRequest = scopeStore.get(entry.scope)
+        scopeRequest.onsuccess = () => {
+          read.scopeRecord = scopeRequest.result
+          requestFinished()
+        }
+        scopeRequest.onerror = () => fail(scopeRequest.error)
+        const cursorRequest = cursorStore.get(entry.scope)
+        cursorRequest.onsuccess = () => {
+          read.cursorRecord = cursorRequest.result
+          requestFinished()
+        }
+        cursorRequest.onerror = () => fail(cursorRequest.error)
+        const firstRequest = logIndex.openCursor(
+          this.#keyRange.only(entry.scope),
+          'next',
+        )
+        firstRequest.onsuccess = () => {
+          read.firstLogRecord = firstRequest.result?.value
+          requestFinished()
+        }
+        firstRequest.onerror = () => fail(firstRequest.error)
+        const lastRequest = logIndex.openCursor(
+          this.#keyRange.only(entry.scope),
+          'prev',
+        )
+        lastRequest.onsuccess = () => {
+          read.lastLogRecord = lastRequest.result?.value
+          requestFinished()
+        }
+        lastRequest.onerror = () => fail(lastRequest.error)
+      })
+      transaction.oncomplete = () => {
+        if (validated) resolve()
+        else
+          reject(
+            failure ??
+              cacheError('The event cache baselines were not authenticated.'),
+          )
+      }
+      transaction.onabort = () =>
+        reject(
+          failure ??
+            asError(
+              transaction.error,
+              'The event cache baselines could not be authenticated.',
+            ),
+        )
+      transaction.onerror = () => undefined
+    })
   }
 
   #createScopeState(revision: bigint): ScopeState {
@@ -1178,6 +1409,7 @@ export class BrowserEventCache {
     continuation: EventCacheScanCursor | undefined,
     baseline: EventCacheScanBaseline | undefined,
     scanSession: string,
+    resetOnCorruption: boolean,
   ) {
     return new Promise<EventCacheScanPage>((resolve, reject) => {
       const transaction = this.#database.transaction(
@@ -1498,6 +1730,14 @@ export class BrowserEventCache {
         } catch (error) {
           if (!(error instanceof EventCacheCorruptionError)) {
             fail(error)
+            return
+          }
+          if (!resetOnCorruption) {
+            fail(
+              cacheError(
+                'The browser event cache is corrupt and was not reset. Synchronize again.',
+              ),
+            )
             return
           }
           try {

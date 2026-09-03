@@ -921,6 +921,73 @@ describe('browser event cache', () => {
     })
   })
 
+  it('authenticates multiple completed scopes in one database snapshot', async () => {
+    const factory = new IDBFactory()
+    const firstSeed = seedCursor()
+    const firstCache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
+    await firstCache.apply(
+      await firstCache.readLatest(firstSeed),
+      syncResult(cursorAt(firstSeed, 4n), [eventLog(1n)]),
+    )
+    const firstBaseline = (await firstCache.scan(firstSeed)).baseline
+    firstCache.close()
+    expect(firstBaseline).toBeDefined()
+
+    const secondFilter = {
+      address: PROTOCOL_ADDRESS,
+      topics: [OTHER_TOPIC],
+    } as const
+    const secondSeed = seedCursor(secondFilter)
+    cache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: secondFilter,
+      keyRange: IDBKeyRange,
+    })
+    const secondLog = { ...eventLog(2n), topics: [OTHER_TOPIC] }
+    await cache.apply(
+      await cache.readLatest(secondSeed),
+      syncResult(cursorAt(secondSeed, 4n), [secondLog]),
+    )
+    const secondBaseline = (await cache.scan(secondSeed)).baseline
+    expect(secondBaseline).toBeDefined()
+    const authentications = [
+      { baseline: firstBaseline!, filter: FILTER, seed: firstSeed },
+      {
+        baseline: secondBaseline!,
+        filter: secondFilter,
+        seed: secondSeed,
+      },
+    ]
+
+    await expect(cache.authenticateBaselines(authentications)).resolves.toBe(
+      undefined,
+    )
+    await expect(
+      cache.authenticateBaselines([authentications[0], authentications[0]]),
+    ).rejects.toThrow(/duplicate.*scope/i)
+
+    const mutator = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
+    try {
+      await mutator.clear(firstSeed)
+    } finally {
+      mutator.close()
+    }
+    await expect(cache.authenticateBaselines(authentications)).rejects.toThrow(
+      /baseline snapshot changed or is corrupt/i,
+    )
+  })
+
   it('rejects a continuation prefix masquerading as a completed baseline', async () => {
     const { cache: opened } = await createCache()
     const seed = seedCursor()
@@ -1082,6 +1149,33 @@ describe('browser event cache', () => {
     })
   })
 
+  it('can defer corrupt scan cleanup outside a bounded reader', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 5n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const scope = getEventCacheScope(seed)
+    await deleteRawRecord(factory, 'logs', [scope, logIdentity(eventLog(2n))])
+
+    await expect(
+      opened.scan(seed, { resetOnCorruption: false }),
+    ).rejects.toThrow(/corrupt and was not reset/i)
+    expect(await countRawScopeLogs(factory, scope)).toBe(2)
+    await expect(opened.readLatest(seed)).resolves.toMatchObject({
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
+  })
+
   it('resets a noncanonical position key outside the scan range', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
@@ -1181,6 +1275,9 @@ describe('browser event cache', () => {
     await expect(opened.scan(seed, null as unknown as never)).rejects.toThrow(
       /scan options/i,
     )
+    await expect(
+      opened.scan(seed, { resetOnCorruption: 'yes' } as never),
+    ).rejects.toThrow(/corruption reset option/i)
   })
 
   it('rejects out-of-range and noncanonical batches before opening a write', async () => {
