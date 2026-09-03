@@ -3,7 +3,7 @@
 Lifeinvader derives every view from EVM logs without a hosted indexer. The browser indexer is split into two layers:
 
 1. A transport-independent synchronization engine reads bounded canonical ranges.
-2. A disposable on-device cache will apply the engine's additions and rollback instructions atomically.
+2. A [disposable on-device cache](./cache.md) applies the engine's additions and rollback instructions atomically.
 
 The first layer is implemented in `apps/web/src/event-indexer.ts`. It accepts any EIP-1193-shaped read transport, so a later UI can use a user-selected HTTP RPC without coupling reads to an injected wallet.
 

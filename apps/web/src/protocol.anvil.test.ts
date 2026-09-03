@@ -3,13 +3,13 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { keccak256, toHex } from 'viem'
 import {
   parseAccounts,
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
 import { createEventCursor, syncEventLogs } from './event-indexer'
+import { decodePublishedPost, PUBLISHED_POST_FILTER } from './protocol-events'
 import {
   deployProtocol,
   inspectProtocol,
@@ -127,10 +127,7 @@ describe('wallet transaction helpers on Anvil', () => {
       provider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
-    const topic = keccak256(
-      toHex('PostPublished(uint256,address,string,bytes)'),
-    )
-    const filter = { address: PROTOCOL_ADDRESS, topics: [topic] } as const
+    const filter = PUBLISHED_POST_FILTER
     const indexed = await syncEventLogs(
       provider,
       filter,
@@ -146,10 +143,17 @@ describe('wallet transaction helpers on Anvil', () => {
     expect(indexed.caughtUp).toBe(true)
     expect(indexed.logs).toHaveLength(1)
     const firstLog = indexed.logs[0]
+    if (!firstLog) throw new Error('Expected the locally published post log.')
     expect(firstLog).toMatchObject({
       address: PROTOCOL_ADDRESS,
       blockNumber: postReceipt.blockNumber,
-      topics: [topic, expect.any(String), expect.any(String)],
+      topics: [filter.topics[0], expect.any(String), expect.any(String)],
+    })
+    expect(decodePublishedPost(firstLog)).toMatchObject({
+      author: account,
+      body: 'Local chain, globally embarrassing.',
+      mediaCid: '0x',
+      postId: 1n,
     })
   })
 })

@@ -174,7 +174,10 @@ function parsePositiveInteger(
   }
   return parsed
 }
-function assertQuantity(value: bigint, field: string) {
+function assertQuantity(
+  value: unknown,
+  field: string,
+): asserts value is bigint {
   if (typeof value !== 'bigint' || value < 0n || value > MAX_EVM_QUANTITY) {
     throw new Error(`Invalid ${field}.`)
   }
@@ -209,35 +212,33 @@ function normalizeFilter(filter: EventLogFilter): NormalizedFilter {
   const serialized = JSON.stringify([address.toLowerCase(), topics])
   return { address, id: keccak256(stringToHex(serialized)), topics }
 }
-function normalizeCheckpoint(value: EventCheckpoint): EventCheckpoint {
+function normalizeCheckpoint(value: unknown): EventCheckpoint {
   if (typeof value !== 'object' || value === null) {
     throw new Error('Invalid event cursor checkpoint.')
   }
-  assertQuantity(value.blockNumber, 'event checkpoint block number')
+  const checkpoint = value as Record<string, unknown>
+  assertQuantity(checkpoint.blockNumber, 'event checkpoint block number')
   return {
-    blockHash: parseHash(value.blockHash, 'event checkpoint block hash'),
-    blockNumber: value.blockNumber,
+    blockHash: parseHash(checkpoint.blockHash, 'event checkpoint block hash'),
+    blockNumber: checkpoint.blockNumber,
   }
 }
-function normalizeCursor(
-  cursor: EventCursor,
-  filter: NormalizedFilter,
-): EventCursor {
-  if (typeof cursor !== 'object' || cursor === null) {
+export function validateEventCursor(value: unknown): EventCursor {
+  if (typeof value !== 'object' || value === null) {
     throw new Error('Invalid event cursor.')
   }
+  const cursor = value as Record<string, unknown>
   assertQuantity(cursor.chainId, 'event cursor chain identifier')
   assertQuantity(cursor.finalityDepth, 'event cursor finality depth')
   assertQuantity(cursor.startBlock, 'event cursor start block')
   assertQuantity(cursor.nextBlock, 'event cursor next block')
   const filterId = parseHash(cursor.filterId, 'event cursor filter identifier')
-  if (filterId !== filter.id) {
-    throw new Error('The event cursor belongs to a different filter.')
-  }
+  const rangeSize = cursor.rangeSize
   if (
-    !Number.isSafeInteger(cursor.rangeSize) ||
-    cursor.rangeSize < 1 ||
-    cursor.rangeSize > HARD_MAX_BLOCK_RANGE
+    typeof rangeSize !== 'number' ||
+    !Number.isSafeInteger(rangeSize) ||
+    rangeSize < 1 ||
+    rangeSize > HARD_MAX_BLOCK_RANGE
   ) {
     throw new Error('Invalid event cursor range size.')
   }
@@ -266,7 +267,22 @@ function normalizeCursor(
   if (cursor.nextBlock !== expectedNext) {
     throw new Error('Invalid event cursor next block.')
   }
-  return { ...cursor, checkpoints, filterId }
+  return {
+    chainId: cursor.chainId,
+    checkpoints,
+    finalityDepth: cursor.finalityDepth,
+    filterId,
+    nextBlock: cursor.nextBlock,
+    rangeSize,
+    startBlock: cursor.startBlock,
+  }
+}
+function normalizeCursor(cursor: EventCursor, filter: NormalizedFilter) {
+  const normalized = validateEventCursor(cursor)
+  if (normalized.filterId !== filter.id) {
+    throw new Error('The event cursor belongs to a different filter.')
+  }
+  return normalized
 }
 function toQuantity(value: bigint) {
   return `0x${value.toString(16)}`
@@ -379,6 +395,45 @@ function parseLogs(
     uniqueLogs.set(key, log)
   }
   return [...uniqueLogs.values()].toSorted(compareLogs)
+}
+function validateNormalizedIndex(value: unknown, field: string) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Invalid indexed event ${field}.`)
+  }
+  return value
+}
+export function validateIndexedEventLog(value: unknown): IndexedEventLog {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid indexed event log.')
+  }
+  const log = value as Record<string, unknown>
+  if (
+    typeof log.address !== 'string' ||
+    log.address.length !== 42 ||
+    !isAddress(log.address)
+  ) {
+    throw new Error('Invalid indexed event address.')
+  }
+  if (!Array.isArray(log.topics) || log.topics.length > 4) {
+    throw new Error('Invalid indexed event topics.')
+  }
+  assertQuantity(log.blockNumber, 'indexed event block number')
+  return {
+    address: getAddress(log.address),
+    blockHash: parseHash(log.blockHash, 'indexed event block hash'),
+    blockNumber: log.blockNumber,
+    data: parseData(log.data),
+    logIndex: validateNormalizedIndex(log.logIndex, 'log index'),
+    topics: log.topics.map(parseTopic),
+    transactionHash: parseHash(
+      log.transactionHash,
+      'indexed event transaction hash',
+    ),
+    transactionIndex: validateNormalizedIndex(
+      log.transactionIndex,
+      'transaction index',
+    ),
+  }
 }
 function getLogBlockFingerprints(logs: readonly IndexedEventLog[]) {
   const fingerprints: EventCheckpoint[] = []
