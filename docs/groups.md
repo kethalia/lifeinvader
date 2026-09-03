@@ -135,10 +135,19 @@ projection, so partial state cannot be mistaken for authenticated state. Deep
 cache corruption resets only the affected chain/group scope and requires an
 explicit rebuild.
 
+The public group browser renders this boundary without eager reads. Users can
+advance the confirmed directory one range at a time, select a visible group or
+enter a known positive group ID, then separately advance membership RPC and
+projection work. Partial membership never appears in the member list. After
+authentication, current members are shown in deterministic 25-address pages and
+the connected account's public membership status is derived from the same
+projection. Group metadata CIDs are labeled as commitments rather than promises
+of availability.
+
 The Anvil integration covers create, join, send, confirmed exact-group message
 and membership readback, and discovery of the immutable group definition. Later
-slices will render the read model in the group interface without a hosted
-indexer, application server, or database.
+slices will add group transactions and confirmed messages to the interface
+without a hosted indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
