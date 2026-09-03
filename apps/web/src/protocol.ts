@@ -84,6 +84,30 @@ export const POST_PUBLISHED_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const REPOST_PUBLISHED_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'postId', type: 'uint256' },
+      { indexed: true, name: 'account', type: 'address' },
+    ],
+    name: 'RepostPublished',
+    type: 'event',
+  },
+] as const
+export const LIKE_SET_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'contentKind', type: 'uint8' },
+      { indexed: true, name: 'contentId', type: 'uint256' },
+      { indexed: true, name: 'account', type: 'address' },
+      { indexed: false, name: 'liked', type: 'bool' },
+    ],
+    name: 'LikeSet',
+    type: 'event',
+  },
+] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
 export const REPOST_PUBLISHED_TOPIC =
@@ -93,7 +117,7 @@ export const LIKE_SET_TOPIC =
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
 const MAX_UINT256 = (1n << 256n) - 1n
-const POST_CONTENT_KIND = 0
+export const POST_CONTENT_KIND = 0
 export type ProtocolInspection =
   | { kind: 'ready' }
   | { kind: 'deployable' }
