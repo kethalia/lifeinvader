@@ -153,12 +153,14 @@ function normalizeProfile(value: unknown): ProfileSet {
   if (!isRecord(value)) throw projectionError('snapshot profile')
   if (
     typeof value.displayName !== 'string' ||
+    value.displayName.length > MAX_PROFILE_DISPLAY_NAME_BYTES ||
     getUtf8ByteLength(value.displayName) > MAX_PROFILE_DISPLAY_NAME_BYTES
   ) {
     throw projectionError('snapshot display name')
   }
   if (
     typeof value.bio !== 'string' ||
+    value.bio.length > MAX_PROFILE_BIO_BYTES ||
     getUtf8ByteLength(value.bio) > MAX_PROFILE_BIO_BYTES
   ) {
     throw projectionError('snapshot bio')
@@ -215,6 +217,25 @@ function assertProfileBeforeBoundary(
   }
 }
 
+function assertTransactionHashesBelongToOneBlock(
+  profiles: readonly ProfileSet[],
+  label: string,
+) {
+  const blocksByTransactionHash = new Map<Hash, bigint>()
+  for (const profile of profiles) {
+    const transactionBlock = blocksByTransactionHash.get(
+      profile.transactionHash,
+    )
+    if (
+      transactionBlock !== undefined &&
+      transactionBlock !== profile.blockNumber
+    ) {
+      throw projectionError(`${label} transaction block`)
+    }
+    blocksByTransactionHash.set(profile.transactionHash, profile.blockNumber)
+  }
+}
+
 function assertConsistentProfileMetadata(profiles: readonly ProfileSet[]) {
   const blockHashes = new Map<bigint, Hash>()
   const positions = new Set<string>()
@@ -233,6 +254,7 @@ function assertConsistentProfileMetadata(profiles: readonly ProfileSet[]) {
     }
     blockHashes.set(profile.blockNumber, profile.blockHash)
   }
+  assertTransactionHashesBelongToOneBlock(ordered, 'snapshot')
   const logs = ordered.map((profile): IndexedEventLog => ({
     address: PROTOCOL_ADDRESS,
     blockHash: profile.blockHash,
@@ -276,9 +298,8 @@ function normalizeSnapshot(value: unknown): ProfileProjectionSnapshot {
   }
   if (last && confirmedThrough) {
     if (
-      last.blockNumber > confirmedThrough.blockNumber ||
-      (last.blockNumber === confirmedThrough.blockNumber &&
-        last.blockHash !== confirmedThrough.blockHash)
+      last.blockNumber === confirmedThrough.blockNumber &&
+      last.blockHash !== confirmedThrough.blockHash
     ) {
       throw projectionError('snapshot confirmation progress')
     }
@@ -398,6 +419,7 @@ function decodePage(
       throw projectionError('event')
     }
   })
+  assertTransactionHashesBelongToOneBlock(events, 'page')
   return {
     events,
     last: logs.length > 0 ? getPosition(logs.at(-1)!) : undefined,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   encodeAbiParameters,
   getAddress,
@@ -153,6 +153,13 @@ describe('profile projection', () => {
       blockNumber: 6n,
       displayName: 'A three',
     })
+    expect(restored.snapshot.confirmedThrough).toEqual(confirmedThrough)
+    expect(() =>
+      ProfileProjection.fromSnapshot(restored.snapshot),
+    ).not.toThrow()
+    expect(() =>
+      getProfileProjectionSnapshotDigest(restored.snapshot),
+    ).not.toThrow()
   })
 
   it('canonicalizes tracked and retained account order for snapshots', () => {
@@ -279,6 +286,16 @@ describe('profile projection', () => {
           valid.profiles[0]!,
           {
             ...valid.profiles[1]!,
+            transactionHash: valid.profiles[0]!.transactionHash,
+          },
+        ],
+      },
+      {
+        ...valid,
+        profiles: [
+          valid.profiles[0]!,
+          {
+            ...valid.profiles[1]!,
             blockHash: hash('wrong shared block fork'),
             blockNumber: valid.profiles[0]!.blockNumber,
             logIndex: 1,
@@ -319,13 +336,6 @@ describe('profile projection', () => {
       {
         ...valid,
         confirmedThrough: {
-          blockHash: hash('block:1'),
-          blockNumber: 1n,
-        },
-      },
-      {
-        ...valid,
-        confirmedThrough: {
           blockHash: hash('wrong confirmed fork'),
           blockNumber: valid.last!.blockNumber,
         },
@@ -340,6 +350,37 @@ describe('profile projection', () => {
     expect(() => getProfileProjectionSnapshotDigest(null)).toThrow(
       /invalid profile projection snapshot/i,
     )
+  })
+
+  it('bounds persisted strings before attempting UTF-8 encoding', () => {
+    const projection = new ProfileProjection([ACCOUNT_A])
+    projection.applyLogs([profileLog(1n)])
+    const valid = projection.snapshot
+    const displayName = 'x'.repeat(65)
+    const bio = 'x'.repeat(1_025)
+    const encode = vi.spyOn(TextEncoder.prototype, 'encode')
+    try {
+      expect(() =>
+        ProfileProjection.fromSnapshot({
+          ...valid,
+          profiles: [{ ...valid.profiles[0]!, displayName }],
+        }),
+      ).toThrow(/snapshot display name/i)
+      expect(encode.mock.calls.some(([value]) => value === displayName)).toBe(
+        false,
+      )
+
+      encode.mockClear()
+      expect(() =>
+        ProfileProjection.fromSnapshot({
+          ...valid,
+          profiles: [{ ...valid.profiles[0]!, bio }],
+        }),
+      ).toThrow(/snapshot bio/i)
+      expect(encode.mock.calls.some(([value]) => value === bio)).toBe(false)
+    } finally {
+      encode.mockRestore()
+    }
   })
 
   it('applies pages atomically and enforces complete-block ordering', () => {
@@ -395,6 +436,16 @@ describe('profile projection', () => {
         }),
       ]),
     ).toThrow(/transaction metadata/i)
+    const reusedTransactionHash = hash('reused transaction')
+    expect(() =>
+      projection.applyLogs([
+        profileLog(1n, { transactionHash: reusedTransactionHash }),
+        profileLog(2n, {
+          account: ACCOUNT_B,
+          transactionHash: reusedTransactionHash,
+        }),
+      ]),
+    ).toThrow(/page transaction block/i)
     expect(() =>
       projection.applyLogs(
         Array.from({ length: MAX_PROFILE_PROJECTION_PAGE_LOGS + 1 }, () =>
