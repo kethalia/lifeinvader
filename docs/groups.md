@@ -104,9 +104,11 @@ members, while its resumable snapshot binds the selected group, total signal
 count, exact log tail, confirmation checkpoint, and canonical active-member
 records. Snapshot digests are deterministic, member reads are address-ordered and
 capped at 200 records per page, and malformed or cross-group input is rejected
-atomically. This remains public social metadata, never access control. A later
-runner will authenticate the snapshot against the exact cache generation before
-publishing it to React.
+atomically. Reference-counted active identity indexes keep each history-apply
+step proportional to its bounded input page instead of the total group size.
+This remains public social metadata, never access control. A later runner will
+authenticate the snapshot against the exact cache generation before publishing
+it to React.
 
 The Anvil integration covers create, join, send, confirmed exact-group message
 and membership readback, and discovery of the immutable group definition. Later

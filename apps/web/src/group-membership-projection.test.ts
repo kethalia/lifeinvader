@@ -306,6 +306,26 @@ describe('group membership projection', () => {
     expect(projection.snapshot).toEqual(before)
   })
 
+  it('applies a one-log delta over 5,000 retained members', () => {
+    const projection = new GroupMembershipProjection(GROUP_ID)
+    projection.applyLogs(
+      Array.from({ length: 5_000 }, (_, index) =>
+        membershipLog(account(index + 1), true, BigInt(index + 1)),
+      ),
+    )
+
+    projection.applyLogs([membershipLog(account(5_001), true, 5_001n)])
+
+    expect(projection.progress).toMatchObject({
+      memberCount: 5_001n,
+      signalCount: 5_001n,
+    })
+    expect(projection.getMember(account(5_001))).toMatchObject({
+      blockNumber: 5_001n,
+      joined: true,
+    })
+  })
+
   it('requires later pages to start in a later complete block', () => {
     const projection = new GroupMembershipProjection(GROUP_ID)
     projection.applyLogs([membershipLog(ACCOUNT_A, true, 2n)])

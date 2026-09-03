@@ -64,6 +64,11 @@ type DecodedMembershipPage = {
   last?: GroupMembershipProjectionPosition
 }
 
+type RetainedIdentity = {
+  blockNumber: bigint
+  references: number
+}
+
 function projectionError(message: string) {
   return new Error(`Invalid group membership projection ${message}.`)
 }
@@ -471,6 +476,29 @@ function getBoundary(
   return last
 }
 
+function retainIdentity(
+  identities: Map<Hash, RetainedIdentity>,
+  hash: Hash,
+  blockNumber: bigint,
+) {
+  const retained = identities.get(hash)
+  if (retained) {
+    if (retained.blockNumber !== blockNumber) {
+      throw projectionError('internal retained identity')
+    }
+    retained.references += 1
+    return
+  }
+  identities.set(hash, { blockNumber, references: 1 })
+}
+
+function releaseIdentity(identities: Map<Hash, RetainedIdentity>, hash: Hash) {
+  const retained = identities.get(hash)
+  if (!retained) throw projectionError('internal retained identity')
+  if (retained.references === 1) identities.delete(hash)
+  else retained.references -= 1
+}
+
 function normalizeReadOptions(value: unknown) {
   if (!isRecord(value)) throw projectionError('read options')
   const options = value as GroupMembershipProjectionReadOptions
@@ -490,8 +518,10 @@ function normalizeReadOptions(value: unknown) {
 }
 
 export class GroupMembershipProjection {
+  readonly #memberBlocksByHash = new Map<Hash, RetainedIdentity>()
   readonly #groupId: bigint
   readonly #members = new Map<string, GroupMembershipSet>()
+  readonly #memberTransactionsByHash = new Map<Hash, RetainedIdentity>()
   #confirmedThrough?: EventCheckpoint
   #last?: GroupMembershipProjectionPosition
   #signalCount = 0n
@@ -504,7 +534,7 @@ export class GroupMembershipProjection {
     const snapshot = normalizeSnapshot(value)
     const projection = new GroupMembershipProjection(snapshot.groupId)
     for (const member of snapshot.members) {
-      projection.#members.set(member.account.toLowerCase(), copyMember(member))
+      projection.#retainMember(member)
     }
     projection.#confirmedThrough = snapshot.confirmedThrough
       ? copyCheckpoint(snapshot.confirmedThrough)
@@ -554,41 +584,10 @@ export class GroupMembershipProjection {
     if (nextSignalCount > MAX_UINT256) {
       throw projectionError('signal count')
     }
-    const historyEvents = [...this.#members.values(), ...page.events]
-    assertConsistentMembershipMetadata(historyEvents, 'history')
-    assertBlockIdentities(
-      [
-        ...historyEvents,
-        ...(this.#last ? [this.#last] : []),
-        ...(this.#confirmedThrough ? [this.#confirmedThrough] : []),
-      ],
-      'history',
-    )
-    const updates = new Map<string, GroupMembershipSet>()
+    this.#assertCompatiblePage(page.events)
     for (const event of page.events) {
-      updates.set(event.account.toLowerCase(), event)
-    }
-    const retainedMembers = new Map(this.#members)
-    for (const [key, event] of updates) {
-      if (event.joined) retainedMembers.set(key, copyMember(event))
-      else retainedMembers.delete(key)
-    }
-    const nextLast = page.last ?? this.#last
-    assertConsistentMembershipMetadata(
-      [...retainedMembers.values()],
-      'retained',
-    )
-    assertBlockIdentities(
-      [
-        ...retainedMembers.values(),
-        ...(nextLast ? [nextLast] : []),
-        ...(this.#confirmedThrough ? [this.#confirmedThrough] : []),
-      ],
-      'retained',
-    )
-    this.#members.clear()
-    for (const [key, member] of retainedMembers) {
-      this.#members.set(key, member)
+      this.#releaseMember(event.account)
+      if (event.joined) this.#retainMember(event)
     }
     this.#signalCount = nextSignalCount
     if (page.last) this.#last = page.last
@@ -652,9 +651,62 @@ export class GroupMembershipProjection {
   }
 
   reset() {
+    this.#memberBlocksByHash.clear()
     this.#members.clear()
+    this.#memberTransactionsByHash.clear()
     this.#confirmedThrough = undefined
     this.#last = undefined
     this.#signalCount = 0n
+  }
+
+  #assertCompatiblePage(events: readonly GroupMembershipSet[]) {
+    for (const event of events) {
+      const retainedBlock = this.#memberBlocksByHash.get(event.blockHash)
+      if (retainedBlock && retainedBlock.blockNumber !== event.blockNumber) {
+        throw projectionError('history block identity')
+      }
+      const retainedTransaction = this.#memberTransactionsByHash.get(
+        event.transactionHash,
+      )
+      if (
+        retainedTransaction &&
+        retainedTransaction.blockNumber !== event.blockNumber
+      ) {
+        throw projectionError('history transaction block')
+      }
+      for (const boundary of [this.#last, this.#confirmedThrough]) {
+        if (
+          boundary &&
+          boundary.blockHash === event.blockHash &&
+          boundary.blockNumber !== event.blockNumber
+        ) {
+          throw projectionError('history block identity')
+        }
+      }
+    }
+  }
+
+  #releaseMember(account: Address) {
+    const key = account.toLowerCase()
+    const member = this.#members.get(key)
+    if (!member) return
+    this.#members.delete(key)
+    releaseIdentity(this.#memberBlocksByHash, member.blockHash)
+    releaseIdentity(this.#memberTransactionsByHash, member.transactionHash)
+  }
+
+  #retainMember(value: GroupMembershipSet) {
+    const member = copyMember(value)
+    this.#members.set(member.account.toLowerCase(), member)
+    retainIdentity(
+      this.#memberBlocksByHash,
+      member.blockHash,
+      member.blockNumber,
+    )
+    retainIdentity(
+      this.#memberTransactionsByHash,
+      member.transactionHash,
+      member.blockNumber,
+    )
   }
 }
