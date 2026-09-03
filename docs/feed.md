@@ -26,6 +26,6 @@ Changing provider or chain aborts active synchronization and confirmation monito
 
 ## Presentation boundary
 
-Posts are ordered newest first by canonical `(blockNumber, logIndex)` cache order. The interface shows author, post identifier, block number, transaction hash, text, and any raw on-chain media CID bytes. It does not currently fetch media from a gateway, paginate beyond the newest 50 cached posts, or derive comments and reactions. Those are separate reviewable slices.
+Posts are ordered newest first by canonical `(blockNumber, logIndex)` cache order. The interface shows author, post identifier, block number, transaction hash, text, and supported media commitments as canonical CIDv1 text. Invalid or unsupported on-chain CID bytes are visibly isolated instead of poisoning the feed. The client does not currently fetch media from a gateway, paginate beyond the newest 50 cached posts, or derive comments and reactions. Those are separate reviewable slices.
 
 The UI never labels cached data as authoritative. Cache corruption causes the disposable scope to rebuild; EVM logs remain the source of truth.

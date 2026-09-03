@@ -41,7 +41,7 @@ pnpm build
 
 Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`.
 
-The current client discovers injected wallets, verifies or permissionlessly deploys the predetermined protocol, publishes text posts, and reconstructs a confirmed global feed through bounded wallet-RPC reads. Feed behavior and its deliberate work budget are documented in [`docs/feed.md`](./docs/feed.md).
+The current client discovers injected wallets, verifies or permissionlessly deploys the predetermined protocol, publishes text and optional canonical IPFS CID commitments, and reconstructs a confirmed global feed through bounded wallet-RPC reads. Feed behavior and its deliberate work budget are documented in [`docs/feed.md`](./docs/feed.md); the distinction between a CID and paid persistence is documented in [`docs/media.md`](./docs/media.md).
 
 ## Protocol address
 

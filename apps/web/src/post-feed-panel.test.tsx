@@ -7,7 +7,9 @@ import {
   waitFor,
 } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Hex } from 'viem'
 import type { Eip1193Provider } from './ethereum'
+import { parseMediaCid } from './media-cid'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSnapshot } from './post-feed'
 import type { PostFeedConfirmationWaiter } from './post-feed-confirmation'
@@ -18,14 +20,14 @@ const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
 
-function post(body: string, postId = 1n): PublishedPost {
+function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
   return {
     author: ACCOUNT,
     blockHash: BLOCK_HASH,
     blockNumber: postId + 10n,
     body,
     logIndex: Number(postId),
-    mediaCid: '0x',
+    mediaCid,
     postId,
     transactionHash: TRANSACTION_HASH,
     transactionIndex: Number(postId),
@@ -111,6 +113,34 @@ describe('PostFeedPanel', () => {
     expect(synchronize).toHaveBeenCalledTimes(2)
   })
 
+  it('shows canonical media commitments without trusting malformed bytes', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const mediaCid = parseMediaCid(
+      'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
+    )!
+    const synchronize = vi
+      .fn()
+      .mockResolvedValue(
+        snapshot([
+          post('', 1n, mediaCid.bytes),
+          post('Bad attachment bytes.', 2n, '0x0102'),
+        ]),
+      )
+
+    render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    expect(await screen.findByText(mediaCid.text)).toBeTruthy()
+    expect(screen.getByText(/IPFS media commitment · dag-pb/i)).toBeTruthy()
+    expect(screen.getByText(/availability is not guaranteed/i)).toBeTruthy()
+    expect(screen.getByText(/invalid media CID bytes/i)).toBeTruthy()
+    expect(screen.getByText('0x0102')).toBeTruthy()
+  })
+
   it('refreshes automatically only after an included post reaches feed depth', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const confirmation = deferred<void>()
@@ -128,7 +158,11 @@ describe('PostFeedPanel', () => {
           blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
-          expectedPost: { author: ACCOUNT, body: 'Now safely confirmed.' },
+          expectedPost: {
+            author: ACCOUNT,
+            body: 'Now safely confirmed.',
+            mediaCid: '0x',
+          },
           hash: TRANSACTION_HASH,
           provider,
         }}
@@ -164,7 +198,11 @@ describe('PostFeedPanel', () => {
           blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
-          expectedPost: { author: ACCOUNT, body: 'Pending post.' },
+          expectedPost: {
+            author: ACCOUNT,
+            body: 'Pending post.',
+            mediaCid: '0x',
+          },
           hash: TRANSACTION_HASH,
           provider,
         }}
@@ -183,7 +221,11 @@ describe('PostFeedPanel', () => {
           blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
-          expectedPost: { author: ACCOUNT, body: 'Pending post.' },
+          expectedPost: {
+            author: ACCOUNT,
+            body: 'Pending post.',
+            mediaCid: '0x',
+          },
           hash: TRANSACTION_HASH,
           provider,
         }}

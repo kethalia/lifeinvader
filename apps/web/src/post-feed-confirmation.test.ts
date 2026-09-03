@@ -15,6 +15,7 @@ const REINCLUDED_BLOCK_HASH = `0x${'22'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'33'.repeat(32)}` as const
 const ACCOUNT = '0x000000000000000000000000000000000000a11c' as Address
 const BODY = 'Public after every reorg.'
+const EMPTY_MEDIA_CID = '0x' as const
 
 function postLogs() {
   return [
@@ -52,7 +53,7 @@ function inclusion(blockNumber = 8n, blockHash = BLOCK_HASH) {
   return {
     blockHash,
     blockNumber,
-    expectedPost: { author: ACCOUNT, body: BODY },
+    expectedPost: { author: ACCOUNT, body: BODY, mediaCid: EMPTY_MEDIA_CID },
     hash: TRANSACTION_HASH,
   }
 }

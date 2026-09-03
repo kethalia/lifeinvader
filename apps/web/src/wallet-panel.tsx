@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import type { Address } from 'viem'
+import type { Address, Hex } from 'viem'
 import {
   beforeDeadline,
   describeRpcError,
@@ -27,6 +27,7 @@ import {
 import { useWalletProviders } from './wallet-providers'
 import type { WalletSessionController } from './wallet-session'
 import type { IncludedPost } from './post-feed-confirmation'
+import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -53,6 +54,7 @@ type SubmittedTransaction = {
   chainId: bigint
   hash: TransactionReceipt['hash']
   postBody: string
+  postMediaCid: Hex
   provider: Eip1193Provider
   status: 'pending' | 'unknown' | 'failed'
 }
@@ -114,6 +116,15 @@ export function WalletPanel({
   const [submittedTransaction, setSubmittedTransaction] =
     useState<SubmittedTransaction>()
   const [body, setBody] = useState('')
+  const [mediaCidInput, setMediaCidInput] = useState('')
+  let parsedMediaCid: ReturnType<typeof parseMediaCid>
+  let mediaCidError: string | undefined
+  try {
+    parsedMediaCid = parseMediaCid(mediaCidInput)
+  } catch (error) {
+    mediaCidError =
+      error instanceof Error ? error.message : 'The media CID is invalid.'
+  }
   const inspectionSequence = useRef(0)
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
@@ -190,6 +201,8 @@ export function WalletPanel({
             action,
             chainId: session.chainId,
             postBody: action === 'post' ? body : '',
+            postMediaCid:
+              action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
             provider: session.provider,
           }
         : undefined
@@ -218,6 +231,7 @@ export function WalletPanel({
             expectedPost: {
               author: submittedContext.account,
               body: submittedContext.postBody,
+              mediaCid: submittedContext.postMediaCid,
             },
             hash: nextReceipt.hash,
             provider: submittedContext.provider,
@@ -262,16 +276,23 @@ export function WalletPanel({
     const provider = session.provider
     const account = session.account
     const chainId = session.chainId
-    if (!provider || !account || chainId === undefined) return
+    if (
+      !provider ||
+      !account ||
+      chainId === undefined ||
+      mediaCidError !== undefined
+    )
+      return
     void runAction('post', async (onSubmitted) => {
       const nextReceipt = await publishPost(
         provider,
         account,
         chainId,
-        body,
+        { body, mediaCid: parsedMediaCid?.bytes ?? '0x' },
         onSubmitted,
       )
       setBody('')
+      setMediaCidInput('')
       return nextReceipt
     })
   }
@@ -303,7 +324,11 @@ export function WalletPanel({
             assertUnchanged: guard.assertUnchanged,
             expectedPost:
               transaction.action === 'post'
-                ? { author: transaction.account, body: transaction.postBody }
+                ? {
+                    author: transaction.account,
+                    body: transaction.postBody,
+                    mediaCid: transaction.postMediaCid,
+                  }
                 : undefined,
             expectProtocol: transaction.action === 'deploy',
             selectedChainId: transaction.chainId,
@@ -313,6 +338,7 @@ export function WalletPanel({
         setSubmittedTransaction(undefined)
         if (transaction.action === 'post') {
           setBody('')
+          setMediaCidInput('')
           onPostConfirmed({
             blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
@@ -320,6 +346,7 @@ export function WalletPanel({
             expectedPost: {
               author: transaction.account,
               body: transaction.postBody,
+              mediaCid: transaction.postMediaCid,
             },
             hash: nextReceipt.hash,
             provider: transaction.provider,
@@ -486,6 +513,31 @@ export function WalletPanel({
                 onChange={(event) => setBody(event.target.value)}
                 placeholder="What should survive every rebrand?"
               />
+              <label htmlFor="post-media-cid">
+                IPFS media CID (already uploaded, optional)
+              </label>
+              <input
+                id="post-media-cid"
+                aria-describedby="post-media-cid-help"
+                aria-invalid={mediaCidError ? true : undefined}
+                disabled={busyAction === 'post' || transactionWriteLocked}
+                maxLength={MAX_MEDIA_CID_TEXT_LENGTH}
+                onChange={(event) => setMediaCidInput(event.target.value)}
+                placeholder="bafy… or Qm…"
+                type="text"
+                value={mediaCidInput}
+              />
+              <p
+                className={
+                  mediaCidError ? 'input-help error-message' : 'input-help'
+                }
+                id="post-media-cid-help"
+              >
+                {mediaCidError ??
+                  (parsedMediaCid
+                    ? `Will commit canonical CIDv1 bytes (${parsedMediaCid.codec}).`
+                    : 'This records an address only. It does not upload or guarantee storage.')}
+              </p>
               <div className="compose-actions">
                 <span
                   className={
@@ -502,7 +554,8 @@ export function WalletPanel({
                   disabled={
                     busyAction !== undefined ||
                     transactionWriteLocked ||
-                    bodyBytes === 0 ||
+                    (bodyBytes === 0 && parsedMediaCid === undefined) ||
+                    mediaCidError !== undefined ||
                     bodyBytes > MAX_POST_BODY_BYTES
                   }
                 >

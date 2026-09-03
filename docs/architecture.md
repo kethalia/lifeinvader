@@ -34,9 +34,9 @@ The global post feed is chain-derived and allows one bounded range per invocatio
 
 ## Media
 
-Posts may reference an IPFS root CID and an optional verifiable storage receipt. The core contract will not collect a media fee that it cannot turn into storage. Supported storage adapters should route user funds directly to storage providers or proof-linked payment contracts.
+Posts may reference an IPFS root CID. The current client validates a deliberately narrow CID profile and commits canonical CIDv1 bytes, but does not fetch or upload the addressed content. The core contract does not collect a media fee that it cannot turn into storage. Future optional storage adapters should route user funds directly to storage providers or proof-linked payment contracts.
 
-Media upload is not atomic with an EVM event: bytes must reach an IPFS or storage-provider node before a useful CID can be published. The interface must distinguish content addressing from proven persistence.
+Media upload is not atomic with an EVM event: bytes must reach an IPFS or storage-provider node before a useful CID can be published. The interface must distinguish content addressing from proven persistence. The implemented rules and future payment boundary are specified in [`media.md`](./media.md).
 
 ## Local validation
 
