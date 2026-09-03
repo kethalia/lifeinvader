@@ -422,7 +422,7 @@ describe('profile projection', () => {
     ).not.toThrow()
   })
 
-  it('validates merged retained metadata before applying a later page', () => {
+  it('validates every page event against retained transaction history', () => {
     const projection = new ProfileProjection([ACCOUNT_A, ACCOUNT_B])
     const reusedTransactionHash = hash('cross-page transaction')
     projection.applyLogs([
@@ -436,13 +436,17 @@ describe('profile projection', () => {
           account: ACCOUNT_B,
           transactionHash: reusedTransactionHash,
         }),
+        profileLog(3n, {
+          account: ACCOUNT_B,
+          displayName: 'Supersedes the invalid event',
+        }),
       ]),
-    ).toThrow(/retained transaction block/i)
+    ).toThrow(/history transaction block/i)
     expect(projection.snapshot).toEqual(snapshot)
   })
 
-  it('does not reuse a retained block hash at another height', () => {
-    const projection = new ProfileProjection([ACCOUNT_A])
+  it('validates untracked page events against retained block history', () => {
+    const projection = new ProfileProjection([ACCOUNT_A, ACCOUNT_B])
     projection.applyLogs([profileLog(1n)])
     const snapshot = projection.snapshot
 
@@ -452,8 +456,12 @@ describe('profile projection', () => {
           account: ACCOUNT_C,
           blockHash: hash('block:1'),
         }),
+        profileLog(3n, {
+          account: ACCOUNT_B,
+          displayName: 'Normal page tail',
+        }),
       ]),
-    ).toThrow(/retained block identity/i)
+    ).toThrow(/history block identity/i)
     expect(projection.snapshot).toEqual(snapshot)
   })
 

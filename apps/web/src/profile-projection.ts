@@ -562,6 +562,16 @@ export class ProfileProjection {
       value,
       getBoundary(this.#last, this.#confirmedThrough),
     )
+    const historyProfiles = [...this.#profiles.values(), ...page.events]
+    assertConsistentProfileMetadata(historyProfiles, 'history')
+    assertBlockIdentities(
+      [
+        ...historyProfiles,
+        ...(this.#last ? [this.#last] : []),
+        ...(this.#confirmedThrough ? [this.#confirmedThrough] : []),
+      ],
+      'history',
+    )
     const updates = new Map<string, ProfileSet>()
     for (const profile of page.events) {
       const key = profile.account.toLowerCase()
