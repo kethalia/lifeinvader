@@ -268,6 +268,39 @@ describe('post reaction projection', () => {
     expect(restored.progress.likes!.blockNumber).toBe(2n)
   })
 
+  it('records joint confirmed coverage when one stream has no events', () => {
+    const projection = new PostReactionProjection()
+    projection.applyLikeLogs([likeLog(1n), likeLog(2n)])
+    expect(() =>
+      projection.confirmThrough({
+        blockHash: hash('block:1'),
+        blockNumber: 1n,
+      }),
+    ).toThrow(/confirmation progress/i)
+
+    const confirmedThrough = {
+      blockHash: hash('block:5'),
+      blockNumber: 5n,
+    } as const
+    projection.confirmThrough(confirmedThrough)
+    const snapshot = projection.snapshot
+    expect(snapshot.confirmedThrough).toEqual(confirmedThrough)
+    expect(snapshot.blockHashes).toEqual([])
+    expect(() =>
+      projection.confirmThrough({
+        blockHash: hash('another block:5'),
+        blockNumber: 5n,
+      }),
+    ).toThrow(/confirmation boundary/i)
+
+    const restored = PostReactionProjection.fromSnapshot(snapshot)
+    expect(() => restored.applyRepostLogs([repostLog(4n)])).toThrow(
+      /page boundary/i,
+    )
+    restored.applyRepostLogs([repostLog(6n)])
+    expect(restored.getSummary(7n).repostCount).toBe(1n)
+  })
+
   it('rejects malformed or internally inconsistent snapshots', () => {
     const projection = new PostReactionProjection()
     projection.applyLikeLogs([likeLog(1n)])
@@ -307,6 +340,17 @@ describe('post reaction projection', () => {
           ...valid.blockHashes,
           { blockHash: hash('completed block'), blockNumber: 1n },
         ],
+      },
+      {
+        ...valid,
+        confirmedThrough: { blockHash: '0x01', blockNumber: 5n },
+      },
+      {
+        ...valid,
+        confirmedThrough: {
+          blockHash: hash('wrong confirmed hash'),
+          blockNumber: valid.progress.reposts!.blockNumber,
+        },
       },
       {
         ...valid,

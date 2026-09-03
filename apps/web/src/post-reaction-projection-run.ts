@@ -524,6 +524,13 @@ export class PostReactionProjectionRun {
     if (currentPhase !== 'authenticate') {
       throw projectionRunError('phase')
     }
+    if (this.#anchor.safeHead !== undefined) {
+      const checkpoint = this.#anchor.likes.cursor.checkpoints.at(-1)
+      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
+        throw projectionRunError('confirmed projection boundary')
+      }
+      this.#projection.confirmThrough(checkpoint)
+    }
     cache.close()
     this.#likeCache = undefined
     this.#phase = 'complete'

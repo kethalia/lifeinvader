@@ -58,6 +58,7 @@ export type PostReactionProjectionBlockFingerprint = {
 export type PostReactionProjectionSnapshot = {
   activeLikes: readonly PostReactionProjectionActiveLike[]
   blockHashes: readonly PostReactionProjectionBlockFingerprint[]
+  confirmedThrough?: PostReactionProjectionBlockFingerprint
   progress: PostReactionProjectionProgress
   repostCounts: readonly PostReactionProjectionRepostCount[]
   schemaVersion: typeof POST_REACTION_PROJECTION_SNAPSHOT_VERSION
@@ -96,13 +97,24 @@ function copyPosition(position: PostReactionProjectionPosition) {
   return { ...position }
 }
 
+function copyBlockFingerprint(
+  fingerprint: PostReactionProjectionBlockFingerprint,
+) {
+  return { ...fingerprint }
+}
+
 function assertCompatibleProjectionPage(
   page: DecodedPage<unknown>,
   retainedBlockHashes: ReadonlyMap<bigint, Hash>,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
 ) {
   for (const [blockNumber, blockHash] of page.blockHashes) {
     const retainedHash = retainedBlockHashes.get(blockNumber)
-    if (retainedHash !== undefined && retainedHash !== blockHash) {
+    if (
+      (retainedHash !== undefined && retainedHash !== blockHash) ||
+      (confirmedThrough?.blockNumber === blockNumber &&
+        confirmedThrough.blockHash !== blockHash)
+    ) {
       throw projectionError('stream progress block hash')
     }
   }
@@ -143,7 +155,7 @@ function normalizePosition(
 
 function decodePage<Event>(
   value: unknown,
-  previous: PostReactionProjectionPosition | undefined,
+  previous: { blockNumber: bigint } | undefined,
   decode: (log: IndexedEventLog) => Event | undefined,
   label: string,
 ): DecodedPage<Event> {
@@ -328,9 +340,44 @@ function normalizeBlockHashes(
     .toSorted(compareBlockFingerprints)
 }
 
-function getFrontierStart(progress: PostReactionProjectionProgress) {
-  const likeBlock = progress.likes?.blockNumber
-  const repostBlock = progress.reposts?.blockNumber
+function normalizeBlockFingerprint(
+  value: unknown,
+  label: string,
+): PostReactionProjectionBlockFingerprint | undefined {
+  if (value === undefined) return undefined
+  const [fingerprint] = normalizeBlockHashes([value])
+  if (!fingerprint) throw projectionError(`${label} block fingerprint`)
+  return fingerprint
+}
+
+function getStreamBoundary(
+  position: PostReactionProjectionPosition | undefined,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  if (!confirmedThrough) return position
+  if (!position || confirmedThrough.blockNumber >= position.blockNumber) {
+    return confirmedThrough
+  }
+  return position
+}
+
+function getProjectionBoundaries(
+  progress: PostReactionProjectionProgress,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  return {
+    likes: getStreamBoundary(progress.likes, confirmedThrough),
+    reposts: getStreamBoundary(progress.reposts, confirmedThrough),
+  }
+}
+
+function getFrontierStart(
+  progress: PostReactionProjectionProgress,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  const boundaries = getProjectionBoundaries(progress, confirmedThrough)
+  const likeBlock = boundaries.likes?.blockNumber
+  const repostBlock = boundaries.reposts?.blockNumber
   if (likeBlock === undefined || repostBlock === undefined) return undefined
   return likeBlock < repostBlock ? likeBlock : repostBlock
 }
@@ -347,6 +394,10 @@ function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
   }
   const activeLikes = normalizeActiveLikes(value.activeLikes)
   const blockHashes = normalizeBlockHashes(value.blockHashes)
+  const confirmedThrough = normalizeBlockFingerprint(
+    value.confirmedThrough,
+    'confirmed through',
+  )
   const repostCounts = normalizeRepostCounts(value.repostCounts)
   if (activeLikes.length > 0 && !progress.likes) {
     throw projectionError('active likes snapshot progress')
@@ -360,9 +411,20 @@ function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
   const fingerprints = new Map(
     blockHashes.map(({ blockHash, blockNumber }) => [blockNumber, blockHash]),
   )
-  const likeBlock = progress.likes?.blockNumber
-  const repostBlock = progress.reposts?.blockNumber
-  const frontierStart = getFrontierStart(progress)
+  for (const position of [progress.likes, progress.reposts]) {
+    if (
+      position &&
+      confirmedThrough &&
+      position.blockNumber === confirmedThrough.blockNumber &&
+      position.blockHash !== confirmedThrough.blockHash
+    ) {
+      throw projectionError('snapshot confirmed block hash')
+    }
+  }
+  const boundaries = getProjectionBoundaries(progress, confirmedThrough)
+  const likeBlock = boundaries.likes?.blockNumber
+  const repostBlock = boundaries.reposts?.blockNumber
+  const frontierStart = getFrontierStart(progress, confirmedThrough)
   const frontierEnd =
     likeBlock === undefined
       ? repostBlock
@@ -381,11 +443,11 @@ function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
   }
   const frontierPosition =
     likeBlock === undefined
-      ? progress.reposts
+      ? boundaries.reposts
       : repostBlock === undefined || likeBlock > repostBlock
-        ? progress.likes
+        ? boundaries.likes
         : repostBlock > likeBlock
-          ? progress.reposts
+          ? boundaries.reposts
           : undefined
   if (
     frontierPosition &&
@@ -405,6 +467,7 @@ function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
   return {
     activeLikes,
     blockHashes,
+    ...(confirmedThrough ? { confirmedThrough } : {}),
     progress,
     repostCounts,
     schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
@@ -414,6 +477,12 @@ function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
 function serializeSnapshot(snapshot: PostReactionProjectionSnapshot) {
   return JSON.stringify([
     'lifeinvader.post-reaction-projection.snapshot.v1',
+    snapshot.confirmedThrough
+      ? [
+          snapshot.confirmedThrough.blockNumber.toString(16),
+          snapshot.confirmedThrough.blockHash,
+        ]
+      : null,
     snapshot.blockHashes.map(({ blockHash, blockNumber }) => [
       blockNumber.toString(16),
       blockHash,
@@ -452,6 +521,7 @@ export class PostReactionProjection {
   readonly #blockHashes = new Map<bigint, Hash>()
   readonly #likeCounts = new Map<string, bigint>()
   readonly #repostCounts = new Map<string, bigint>()
+  #confirmedThrough?: PostReactionProjectionBlockFingerprint
   #lastLike?: PostReactionProjectionPosition
   #lastRepost?: PostReactionProjectionPosition
 
@@ -472,6 +542,7 @@ export class PostReactionProjection {
     for (const { count, postId } of snapshot.repostCounts) {
       projection.#repostCounts.set(getPostKey(postId), count)
     }
+    projection.#confirmedThrough = snapshot.confirmedThrough
     projection.#lastLike = snapshot.progress.likes
     projection.#lastRepost = snapshot.progress.reposts
     return projection
@@ -494,7 +565,10 @@ export class PostReactionProjection {
     }))
     repostCounts.sort(compareRepostCounts)
     const progress = this.progress
-    const frontierStart = getFrontierStart(progress)
+    const confirmedThrough = this.#confirmedThrough
+      ? copyBlockFingerprint(this.#confirmedThrough)
+      : undefined
+    const frontierStart = getFrontierStart(progress, confirmedThrough)
     if (frontierStart !== undefined) {
       for (const blockNumber of this.#blockHashes.keys()) {
         if (blockNumber <= frontierStart) this.#blockHashes.delete(blockNumber)
@@ -506,6 +580,7 @@ export class PostReactionProjection {
     return {
       activeLikes,
       blockHashes,
+      ...(confirmedThrough ? { confirmedThrough } : {}),
       progress,
       repostCounts,
       schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
@@ -517,14 +592,46 @@ export class PostReactionProjection {
     this.#blockHashes.clear()
     this.#likeCounts.clear()
     this.#repostCounts.clear()
+    this.#confirmedThrough = undefined
     this.#lastLike = undefined
     this.#lastRepost = undefined
+  }
+
+  confirmThrough(value: unknown) {
+    const confirmedThrough = normalizeBlockFingerprint(value, 'confirmation')
+    if (!confirmedThrough) throw projectionError('confirmation')
+    if (
+      this.#confirmedThrough &&
+      (confirmedThrough.blockNumber < this.#confirmedThrough.blockNumber ||
+        (confirmedThrough.blockNumber === this.#confirmedThrough.blockNumber &&
+          confirmedThrough.blockHash !== this.#confirmedThrough.blockHash))
+    ) {
+      throw projectionError('confirmation boundary')
+    }
+    for (const position of [this.#lastLike, this.#lastRepost]) {
+      if (
+        position &&
+        (position.blockNumber > confirmedThrough.blockNumber ||
+          (position.blockNumber === confirmedThrough.blockNumber &&
+            position.blockHash !== confirmedThrough.blockHash))
+      ) {
+        throw projectionError('confirmation progress')
+      }
+    }
+    const retainedHash = this.#blockHashes.get(confirmedThrough.blockNumber)
+    if (
+      retainedHash !== undefined &&
+      retainedHash !== confirmedThrough.blockHash
+    ) {
+      throw projectionError('confirmation block hash')
+    }
+    this.#confirmedThrough = confirmedThrough
   }
 
   applyLikeLogs(value: unknown) {
     const page = decodePage<PostLikeSet>(
       value,
-      this.#lastLike,
+      getStreamBoundary(this.#lastLike, this.#confirmedThrough),
       decodePostLikeSet,
       'like',
     )
@@ -545,7 +652,11 @@ export class PostReactionProjection {
       activeChanges.set(likeKey, event.liked)
       countChanges.set(postKey, count)
     }
-    assertCompatibleProjectionPage(page, this.#blockHashes)
+    assertCompatibleProjectionPage(
+      page,
+      this.#blockHashes,
+      this.#confirmedThrough,
+    )
     for (const [likeKey, liked] of activeChanges) {
       if (liked) this.#activeLikes.add(likeKey)
       else this.#activeLikes.delete(likeKey)
@@ -563,7 +674,7 @@ export class PostReactionProjection {
   applyRepostLogs(value: unknown) {
     const page = decodePage<PublishedRepost>(
       value,
-      this.#lastRepost,
+      getStreamBoundary(this.#lastRepost, this.#confirmedThrough),
       decodePublishedRepost,
       'repost',
     )
@@ -574,7 +685,11 @@ export class PostReactionProjection {
         countChanges.get(postKey) ?? this.#repostCounts.get(postKey) ?? 0n
       countChanges.set(postKey, count + 1n)
     }
-    assertCompatibleProjectionPage(page, this.#blockHashes)
+    assertCompatibleProjectionPage(
+      page,
+      this.#blockHashes,
+      this.#confirmedThrough,
+    )
     for (const [postKey, count] of countChanges) {
       this.#repostCounts.set(postKey, count)
     }

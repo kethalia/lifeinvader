@@ -20,6 +20,7 @@ import {
   openPostReactionProjectionRun,
   type OpenPostReactionProjectionRunOptions,
 } from './post-reaction-projection-run'
+import { PostReactionProjection } from './post-reaction-projection'
 import {
   POST_REACTION_EVENT_START_BLOCK,
   type PostReactionProjectionAnchor,
@@ -268,6 +269,11 @@ describe('post reaction projection run', () => {
     expect(run.projectionSnapshot.repostCounts).toEqual([
       { count: 2n, postId: 7n },
     ])
+    expect(run.projectionSnapshot.confirmedThrough).toEqual({
+      blockHash: blockHash(SAFE_HEAD),
+      blockNumber: SAFE_HEAD,
+    })
+    expect(run.projectionSnapshot.blockHashes).toEqual([])
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
     expect(run.getSummary(7n).repostCount).toBe(2n)
@@ -296,6 +302,32 @@ describe('post reaction projection run', () => {
       likeCount: 0n,
       repostCount: 0n,
     })
+    expect(run.projectionSnapshot.confirmedThrough).toEqual({
+      blockHash: blockHash(SAFE_HEAD),
+      blockNumber: SAFE_HEAD,
+    })
+  })
+
+  it('preserves a confirmed boundary when only one stream has events', async () => {
+    const prepared = await prepareProjection([likeLog(1n), likeLog(2n)], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+
+    await run.advance()
+    await run.advance()
+    await run.advance()
+    const snapshot = run.projectionSnapshot
+    expect(snapshot.blockHashes).toEqual([])
+    expect(snapshot.confirmedThrough).toEqual({
+      blockHash: blockHash(SAFE_HEAD),
+      blockNumber: SAFE_HEAD,
+    })
+    const restored = PostReactionProjection.fromSnapshot(snapshot)
+    expect(() => restored.applyRepostLogs([repostLog(SAFE_HEAD)])).toThrow(
+      /page boundary/i,
+    )
   })
 
   it('returns defensive progress and reusable authenticated baselines', async () => {
