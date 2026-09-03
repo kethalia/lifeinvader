@@ -30,7 +30,7 @@ import {
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 
 type ProjectionStream = 'likes' | 'reposts'
-type ActiveProjectionRunPhase = ProjectionStream
+type ActiveProjectionRunPhase = ProjectionStream | 'authenticate-likes'
 
 export type PostReactionProjectionRunPhase =
   ActiveProjectionRunPhase | 'complete' | 'failed' | 'closed'
@@ -238,6 +238,30 @@ function copyBaseline(baseline: EventCacheScanBaseline) {
   }
 }
 
+function sameLogPosition(
+  first: EventCacheScanBaseline['last'],
+  second: EventCacheScanBaseline['last'],
+) {
+  return first === undefined
+    ? second === undefined
+    : second !== undefined &&
+        first.blockNumber === second.blockNumber &&
+        first.logIndex === second.logIndex
+}
+
+function sameBaseline(
+  first: EventCacheScanBaseline,
+  second: EventCacheScanBaseline,
+) {
+  return (
+    sameCachePosition(first, second) &&
+    first.digest === second.digest &&
+    first.logCount === second.logCount &&
+    first.proof === second.proof &&
+    sameLogPosition(first.last, second.last)
+  )
+}
+
 function copyProgress(
   progress: MutableStreamProgress,
 ): PostReactionProjectionRunStreamProgress {
@@ -370,7 +394,21 @@ export class PostReactionProjectionRun {
     if (this.#phase === 'closed') {
       throw new Error('The post reaction projection run is closed.')
     }
-    const stream = this.#phase
+    const phase = this.#phase
+    if (phase === 'authenticate-likes') {
+      this.#advancing = true
+      try {
+        await this.#authenticateLikes()
+        return this.snapshot
+      } catch (error) {
+        const failure = asError(error)
+        if (this.#readPhase() !== 'closed') this.#fail(failure)
+        throw failure
+      } finally {
+        this.#advancing = false
+      }
+    }
+    const stream = phase
     const cache = stream === 'likes' ? this.#likeCache : this.#repostCache
     const continuation =
       stream === 'likes' ? this.#likeContinuation : this.#repostContinuation
@@ -450,8 +488,6 @@ export class PostReactionProjectionRun {
     if (stream === 'likes') {
       this.#likeBaseline = copyBaseline(baseline)
       this.#likeContinuation = undefined
-      this.#likeCache?.close()
-      this.#likeCache = undefined
       this.#phase = 'reposts'
       return
     }
@@ -459,6 +495,39 @@ export class PostReactionProjectionRun {
     this.#repostContinuation = undefined
     this.#repostCache?.close()
     this.#repostCache = undefined
+    this.#phase = 'authenticate-likes'
+  }
+
+  async #authenticateLikes() {
+    const cache = this.#likeCache
+    const baseline = this.#likeBaseline
+    if (!cache || !baseline || !this.#repostBaseline) {
+      throw projectionRunError('like authentication state')
+    }
+    const page = await cache.scan(getSeed(this.#anchor.likes), {
+      baseline,
+      limit: this.#pageSize,
+    })
+    const currentPhase = this.#readPhase()
+    if (currentPhase === 'closed') {
+      throw new Error('The post reaction projection run is closed.')
+    }
+    if (currentPhase !== 'authenticate-likes') {
+      throw projectionRunError('phase')
+    }
+    if (
+      page.reset ||
+      !page.complete ||
+      page.logs.length !== 0 ||
+      page.next ||
+      !page.baseline ||
+      !sameCachePosition(page, this.#anchor.likes) ||
+      !sameBaseline(page.baseline, baseline)
+    ) {
+      throw projectionRunError('like baseline changed')
+    }
+    cache.close()
+    this.#likeCache = undefined
     this.#phase = 'complete'
   }
 

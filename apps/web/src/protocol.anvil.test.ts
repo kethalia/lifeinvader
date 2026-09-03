@@ -222,6 +222,7 @@ describe('wallet transaction helpers on Anvil', () => {
     )
     await projection.advance()
     await projection.advance()
+    await projection.advance()
     expect(projection.getSummary(1n, account)).toEqual({
       likeCount: 0n,
       likedByAccount: false,
