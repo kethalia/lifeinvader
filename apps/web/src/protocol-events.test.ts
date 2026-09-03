@@ -757,8 +757,24 @@ describe('GroupCreated decoding', () => {
       logIndex: 2,
       metadataCid: '0x01701220',
       name: 'Bagholders Anonymous',
+      nameBytes: stringToHex('Bagholders Anonymous'),
+      nameEncoding: 'utf8',
       transactionHash: keccak256(stringToHex('transaction')),
       transactionIndex: 1,
+    })
+  })
+
+  it('preserves a protocol-valid non-UTF-8 name with a hex fallback', () => {
+    const data = encodeAbiParameters(
+      [{ type: 'bytes' }, { type: 'bytes' }],
+      ['0xfffe', '0x01701220'],
+    )
+
+    expect(decodePublishedGroup(groupCreatedLog({ data }))).toMatchObject({
+      metadataCid: '0x01701220',
+      name: '0xfffe',
+      nameBytes: '0xfffe',
+      nameEncoding: 'hex',
     })
   })
 

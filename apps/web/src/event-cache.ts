@@ -78,6 +78,7 @@ export type EventCachePosition = {
   revision: bigint
 }
 export type EventCachePage = EventCachePosition & {
+  logCount: number
   logs: readonly IndexedEventLog[]
   reset: boolean
 }
@@ -1169,20 +1170,26 @@ export class BrowserEventCache {
     scope: string,
     onFailure: (error: unknown) => void,
   ) {
-    const request = logStore
-      .index(LOG_SCOPE_INDEX)
-      .openKeyCursor(this.#keyRange.only(scope))
-    let deleted = 0
+    const request = logStore.delete(
+      this.#keyRange.bound([scope, ''], [scope, '\uffff']),
+    )
     request.onsuccess = () => {
-      const cursor = request.result
-      if (!cursor) return
-      if (deleted >= this.#maintenanceLogLimit) {
-        onFailure(maintenanceLimitError('repair', this.#maintenanceLogLimit))
-        return
+      const cleanup = logStore
+        .index(LOG_SCOPE_INDEX)
+        .openKeyCursor(this.#keyRange.only(scope))
+      let deleted = 0
+      cleanup.onsuccess = () => {
+        const cursor = cleanup.result
+        if (!cursor) return
+        if (deleted >= this.#maintenanceLogLimit) {
+          onFailure(maintenanceLimitError('repair', this.#maintenanceLogLimit))
+          return
+        }
+        logStore.delete(cursor.primaryKey)
+        deleted += 1
+        cursor.continue()
       }
-      logStore.delete(cursor.primaryKey)
-      deleted += 1
-      cursor.continue()
+      cleanup.onerror = () => onFailure(cleanup.error)
     }
     request.onerror = () => onFailure(request.error)
   }
@@ -1506,6 +1513,7 @@ export class BrowserEventCache {
           page = {
             cursor,
             generation: state.generation,
+            logCount: state.logCount,
             logs: logs.slice(0, limit),
             reset: false,
             revision: state.revision,
@@ -1528,6 +1536,7 @@ export class BrowserEventCache {
             page = {
               cursor: seedCursor,
               generation: nextState.generation,
+              logCount: 0,
               logs: [],
               reset: true,
               revision: nextState.revision,
@@ -2141,8 +2150,10 @@ export class BrowserEventCache {
       let scopeRecord: unknown
       let cursorRecord: unknown
       let latestLogRecord: unknown
+      let storedLogCount = 0
       let scopeDone = false
       let cursorDone = false
+      let countDone = rollbackTo === undefined
       let hasLogs = false
       let logsDone = false
       let finalized = false
@@ -2160,7 +2171,9 @@ export class BrowserEventCache {
       const cursorStore = transaction.objectStore(CURSOR_STORE)
       const logStore = transaction.objectStore(LOG_STORE)
       const finalize = () => {
-        if (finalized || !scopeDone || !cursorDone || !logsDone) return
+        if (finalized || !scopeDone || !cursorDone || !countDone || !logsDone) {
+          return
+        }
         finalized = true
         let state: ScopeState | undefined
         const resetFromCorruption = () => {
@@ -2227,6 +2240,12 @@ export class BrowserEventCache {
           if (hasLogs !== currentState.logCount > 0) {
             throw new EventCacheCorruptionError()
           }
+          if (
+            rollbackTo !== undefined &&
+            storedLogCount !== currentState.logCount
+          ) {
+            throw new EventCacheCorruptionError()
+          }
           if (hasLogs) {
             const latest = asStoredLogRecord(latestLogRecord, scope)
             if (
@@ -2251,22 +2270,17 @@ export class BrowserEventCache {
             throw cacheError('The event cache changed during synchronization.')
           }
           if (rollbackTo !== undefined) {
-            if (currentState.logCount > this.#maintenanceLogLimit) {
-              throw maintenanceLimitError('rollback', this.#maintenanceLogLimit)
-            }
-            let blockLogs: IndexedEventLog[] = []
-            let integrity: LogIntegrity = {
-              digest: EMPTY_LOG_DIGEST,
-              logCount: 0,
-            }
-            let retainedIntegrity = integrity
-            let previousLog: IndexedEventLog | undefined
-            let visited = 0
-            const validateBlock = () => {
+            let newer: StoredLogRecord | undefined
+            const removedLogs: IndexedEventLog[] = []
+            let deleted = 0
+            const validateRollbackLogs = (retained?: StoredLogRecord) => {
+              const ascending = removedLogs.toReversed()
+              const boundaryLogs = retained
+                ? [retained.log, ...ascending]
+                : ascending
               if (
-                blockLogs.length > MAX_BATCH_LOGS ||
                 getLogStreamProblem(
-                  blockLogs,
+                  boundaryLogs,
                   storedCursor,
                   currentState.filter,
                 )
@@ -2276,56 +2290,78 @@ export class BrowserEventCache {
             }
             const rollbackRequest = logStore
               .index(LOG_SCOPE_INDEX)
-              .openCursor(this.#keyRange.only(scope))
+              .openCursor(this.#keyRange.only(scope), 'prev')
             rollbackRequest.onsuccess = () => {
               const rollbackCursor = rollbackRequest.result
               try {
                 if (!rollbackCursor) {
-                  validateBlock()
-                  if (!stateMatchesIntegrity(currentState, integrity)) {
+                  validateRollbackLogs()
+                  if (newer) {
+                    const oldestIntegrity = advanceLogIntegrity(
+                      { digest: EMPTY_LOG_DIGEST, logCount: 0 },
+                      newer.log,
+                    )
+                    if (!storedRecordMatchesIntegrity(newer, oldestIntegrity)) {
+                      throw new EventCacheCorruptionError()
+                    }
+                  } else if (currentState.logCount !== 0) {
                     throw new EventCacheCorruptionError()
                   }
-                  commitUpdate(currentState, retainedIntegrity)
+                  commitUpdate(currentState, {
+                    digest: EMPTY_LOG_DIGEST,
+                    logCount: 0,
+                  })
                   return
                 }
-                if (visited >= this.#maintenanceLogLimit) {
-                  throw maintenanceLimitError(
-                    'rollback',
-                    this.#maintenanceLogLimit,
-                  )
-                }
-                visited += 1
                 const record = asStoredLogRecord(rollbackCursor.value, scope)
                 const log = record.log
                 if (
                   log.blockNumber < storedCursor.startBlock ||
                   log.blockNumber >= storedCursor.nextBlock ||
-                  (previousLog !== undefined &&
-                    compareLogs(previousLog, log) >= 0)
+                  (newer !== undefined && compareLogs(log, newer.log) >= 0)
                 ) {
                   throw new EventCacheCorruptionError()
                 }
-                if (
-                  previousLog !== undefined &&
-                  previousLog.blockNumber !== log.blockNumber
+                if (newer) {
+                  const newerIntegrity = advanceLogIntegrity(
+                    {
+                      digest: record.digest,
+                      lastLog: getPublicLogPosition(log),
+                      logCount: record.ordinal,
+                    },
+                    newer.log,
+                  )
+                  if (!storedRecordMatchesIntegrity(newer, newerIntegrity)) {
+                    throw new EventCacheCorruptionError()
+                  }
+                } else if (
+                  !storedRecordMatchesIntegrity(record, {
+                    digest: currentState.logDigest,
+                    lastLog: currentState.lastLog,
+                    logCount: currentState.logCount,
+                  })
                 ) {
-                  validateBlock()
-                  blockLogs = []
-                }
-                integrity = advanceLogIntegrity(integrity, log)
-                if (!storedRecordMatchesIntegrity(record, integrity)) {
                   throw new EventCacheCorruptionError()
                 }
-                blockLogs.push(log)
-                if (blockLogs.length > MAX_BATCH_LOGS) {
-                  throw new EventCacheCorruptionError()
+                if (log.blockNumber < rollbackTo) {
+                  validateRollbackLogs(record)
+                  commitUpdate(currentState, {
+                    digest: record.digest,
+                    lastLog: getPublicLogPosition(log),
+                    logCount: record.ordinal,
+                  })
+                  return
                 }
-                previousLog = log
-                if (log.blockNumber >= rollbackTo) {
-                  logStore.delete(rollbackCursor.primaryKey)
-                } else {
-                  retainedIntegrity = integrity
+                if (deleted >= this.#maintenanceLogLimit) {
+                  throw maintenanceLimitError(
+                    'rollback',
+                    this.#maintenanceLogLimit,
+                  )
                 }
+                logStore.delete(rollbackCursor.primaryKey)
+                deleted += 1
+                removedLogs.push(log)
+                newer = record
                 rollbackCursor.continue()
               } catch (error) {
                 if (error instanceof EventCacheCorruptionError) {
@@ -2365,6 +2401,17 @@ export class BrowserEventCache {
         finalize()
       }
       cursorRequest.onerror = () => fail(cursorRequest.error)
+      if (rollbackTo !== undefined) {
+        const countRequest = logStore
+          .index(LOG_SCOPE_INDEX)
+          .count(this.#keyRange.only(scope))
+        countRequest.onsuccess = () => {
+          storedLogCount = countRequest.result
+          countDone = true
+          finalize()
+        }
+        countRequest.onerror = () => fail(countRequest.error)
+      }
       const logRequest = logStore
         .index(LOG_SCOPE_INDEX)
         .openCursor(this.#keyRange.only(scope), 'prev')

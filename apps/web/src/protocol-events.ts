@@ -1,7 +1,9 @@
 import {
+  decodeAbiParameters,
   decodeEventLog,
   encodeAbiParameters,
   getAddress,
+  hexToBytes,
   padHex,
   size,
   toHex,
@@ -15,7 +17,6 @@ import {
   COMMENT_PUBLISHED_TOPIC,
   DIRECT_MESSAGE_SENT_EVENT_ABI,
   DIRECT_MESSAGE_SENT_TOPIC,
-  GROUP_CREATED_EVENT_ABI,
   GROUP_CREATED_TOPIC,
   GROUP_MEMBERSHIP_SET_EVENT_ABI,
   GROUP_MEMBERSHIP_SET_TOPIC,
@@ -58,8 +59,8 @@ const DIRECT_MESSAGE_DATA_PARAMETERS = [
   { type: 'bytes' },
 ] as const
 
-const GROUP_CREATED_DATA_PARAMETERS = [
-  { type: 'string' },
+const GROUP_CREATED_BYTES_PARAMETERS = [
+  { type: 'bytes' },
   { type: 'bytes' },
 ] as const
 
@@ -231,8 +232,23 @@ export type PublishedGroup = {
   logIndex: number
   metadataCid: Hex
   name: string
+  nameBytes: Hex
+  nameEncoding: 'hex' | 'utf8'
   transactionHash: Hash
   transactionIndex: number
+}
+
+function decodeGroupName(nameBytes: Hex) {
+  try {
+    return {
+      name: new TextDecoder('utf-8', { fatal: true }).decode(
+        hexToBytes(nameBytes),
+      ),
+      nameEncoding: 'utf8' as const,
+    }
+  } catch {
+    return { name: nameBytes, nameEncoding: 'hex' as const }
+  }
 }
 
 export type GroupMembershipSet = {
@@ -613,15 +629,14 @@ export function decodePublishedGroup(
   }
   if (log.topics.length !== 3) throw invalidGroupCreatedEvent()
   try {
-    const decoded = decodeEventLog({
-      abi: GROUP_CREATED_EVENT_ABI,
-      data: log.data,
-      strict: true,
-      topics: log.topics as [Hex, ...Hex[]],
-    })
-    const { creator, groupId, metadataCid, name } = decoded.args
-    const normalizedCreator = getAddress(creator)
-    const nameLength = getUtf8ByteLength(name)
+    const [nameBytes, metadataCid] = decodeAbiParameters(
+      GROUP_CREATED_BYTES_PARAMETERS,
+      log.data,
+    )
+    const groupId = BigInt(log.topics[1]!)
+    const normalizedCreator = getAddress(`0x${log.topics[2]!.slice(-40)}`)
+    const { name, nameEncoding } = decodeGroupName(nameBytes)
+    const nameLength = size(nameBytes)
     if (
       groupId === 0n ||
       normalizedCreator.toLowerCase() === ZERO_ADDRESS ||
@@ -629,8 +644,8 @@ export function decodePublishedGroup(
       nameLength > MAX_GROUP_NAME_BYTES ||
       size(metadataCid) > MAX_MEDIA_CID_BYTES ||
       log.data.toLowerCase() !==
-        encodeAbiParameters(GROUP_CREATED_DATA_PARAMETERS, [
-          name,
+        encodeAbiParameters(GROUP_CREATED_BYTES_PARAMETERS, [
+          nameBytes,
           metadataCid,
         ]).toLowerCase() ||
       log.topics[1]?.toLowerCase() !== getGroupIdTopic(groupId).toLowerCase() ||
@@ -647,6 +662,8 @@ export function decodePublishedGroup(
       logIndex: log.logIndex,
       metadataCid,
       name,
+      nameBytes,
+      nameEncoding,
       transactionHash: log.transactionHash,
       transactionIndex: log.transactionIndex,
     }
