@@ -11,6 +11,7 @@ import {
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
+import { openPostCommentProjectionRun } from './post-comment-projection-run'
 import { synchronizePostCommentStream } from './post-comment-stream'
 import { PostReactionProjection } from './post-reaction-projection'
 import { openPostReactionProjectionRun } from './post-reaction-projection-run'
@@ -205,15 +206,17 @@ describe('wallet transaction helpers on Anvil', () => {
       mediaCid: MEDIA_CID.bytes,
       postId: 1n,
     })
-    await expect(
-      synchronizePostCommentStream(provider, LOCAL_CHAIN_ID, {
-        storage: {
-          databaseName: 'lifeinvader-anvil-post-comments',
-          factory: new IDBFactory(),
-          keyRange: IDBKeyRange,
-        },
-      }),
-    ).resolves.toMatchObject({
+    const commentStorage = {
+      databaseName: 'lifeinvader-anvil-post-comments',
+      factory: new IDBFactory(),
+      keyRange: IDBKeyRange,
+    }
+    const comments = await synchronizePostCommentStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      { storage: commentStorage },
+    )
+    expect(comments).toMatchObject({
       caughtUp: true,
       projectionAnchor: { chainId: LOCAL_CHAIN_ID },
       recentComments: [
@@ -226,6 +229,26 @@ describe('wallet transaction helpers on Anvil', () => {
         },
       ],
     })
+    expect(comments.projectionAnchor).toBeDefined()
+    if (!comments.projectionAnchor) {
+      throw new Error('Caught-up comments did not issue a projection anchor.')
+    }
+    const commentProjection = await openPostCommentProjectionRun(
+      comments.projectionAnchor,
+      [1n],
+      commentStorage,
+    )
+    await commentProjection.advance()
+    await commentProjection.advance()
+    expect(commentProjection.readComments(1n).comments).toMatchObject([
+      {
+        author: account,
+        body: 'Nothing here is private.',
+        commentId: 1n,
+        mediaCid: '0x',
+        postId: 1n,
+      },
+    ])
     const reactionStorage = {
       databaseName: 'lifeinvader-anvil-post-reactions',
       factory: new IDBFactory(),
