@@ -132,6 +132,19 @@ describe('protocol configuration', () => {
     )
     expect(request).toHaveBeenCalledTimes(1)
   })
+  it('cancels a stalled contract-code inspection immediately', async () => {
+    const controller = new AbortController()
+    const request = vi.fn(
+      () =>
+        new Promise<unknown>(() => {
+          queueMicrotask(() => controller.abort())
+        }),
+    )
+    await expect(
+      inspectProtocol(providerFrom(request), 60_000, controller.signal),
+    ).rejects.toThrow(/inspection was cancelled/i)
+    expect(request).toHaveBeenCalledTimes(1)
+  })
 })
 describe('post transactions', () => {
   it('measures the same UTF-8 bytes the contract limits', () => {
@@ -360,14 +373,21 @@ describe('post transactions', () => {
     ).rejects.toThrow(TRANSACTION_HASH)
   })
   it('bounds repeated null receipts without discarding the hash', async () => {
+    vi.useFakeTimers()
     const request = vi.fn(async () => null)
-    await expect(
-      waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH, {
-        pollIntervalMs: 10,
-        timeoutMs: 5,
-      }),
-    ).rejects.toThrow(TRANSACTION_HASH)
-    expect(request).toHaveBeenCalledTimes(1)
+    try {
+      const unavailable = expect(
+        waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH, {
+          pollIntervalMs: 10,
+          timeoutMs: 5,
+        }),
+      ).rejects.toThrow(TRANSACTION_HASH)
+      await vi.advanceTimersByTimeAsync(5)
+      await unavailable
+      expect(request).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('times out a receipt request that never settles', async () => {
     const request = vi.fn(() => new Promise<unknown>(() => undefined))

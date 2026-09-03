@@ -13,19 +13,33 @@ export async function beforeDeadline<T>(
   operation: () => Promise<T>,
   deadline: number,
   timeoutError: () => Error,
+  signal?: AbortSignal,
+  cancellationError: () => Error = () => new Error('Operation was cancelled.'),
 ): Promise<T> {
   const remainingMs = deadline - Date.now()
   if (remainingMs <= 0) throw timeoutError()
+  if (signal?.aborted) throw cancellationError()
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let handleAbort: (() => void) | undefined
   try {
-    return await Promise.race([
-      operation(),
+    const pending: Promise<T>[] = [
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => reject(timeoutError()), remainingMs)
       }),
-    ])
+    ]
+    if (signal) {
+      pending.push(
+        new Promise<never>((_resolve, reject) => {
+          handleAbort = () => reject(cancellationError())
+          signal.addEventListener('abort', handleAbort, { once: true })
+        }),
+      )
+    }
+    pending.push(operation())
+    return await Promise.race(pending)
   } finally {
     clearTimeout(timeout)
+    if (handleAbort) signal?.removeEventListener('abort', handleAbort)
   }
 }
 export function isEip1193Provider(value: unknown): value is Eip1193Provider {

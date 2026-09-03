@@ -11,6 +11,7 @@ import {
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
+import { synchronizePostReactionStream } from './post-reaction-stream'
 import { parseMediaCid } from './media-cid'
 import {
   deployProtocol,
@@ -188,6 +189,28 @@ describe('wallet transaction helpers on Anvil', () => {
       body: '',
       mediaCid: MEDIA_CID.bytes,
       postId: 1n,
+    })
+    const reactions = await synchronizePostReactionStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      {
+        storage: {
+          databaseName: 'lifeinvader-anvil-post-reactions',
+          factory: new IDBFactory(),
+          keyRange: IDBKeyRange,
+        },
+      },
+    )
+    expect(reactions.likes).toMatchObject({
+      caughtUp: true,
+      recentSignals: [
+        { account, liked: false, postId: 1n },
+        { account, liked: true, postId: 1n },
+      ],
+    })
+    expect(reactions.reposts).toMatchObject({
+      caughtUp: true,
+      recentReposts: [{ account, postId: 1n }],
     })
   })
 })

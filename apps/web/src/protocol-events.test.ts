@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   encodeAbiParameters,
+  getAddress,
   keccak256,
   padHex,
   stringToHex,
@@ -9,11 +10,25 @@ import {
   type Hex,
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
-import { decodePublishedPost } from './protocol-events'
-import { POST_PUBLISHED_TOPIC, PROTOCOL_ADDRESS } from './protocol'
+import {
+  decodePostLikeSet,
+  decodePublishedPost,
+  decodePublishedRepost,
+  POST_CONTENT_KIND_TOPIC,
+  POST_LIKE_SET_FILTER,
+  PUBLISHED_REPOST_FILTER,
+} from './protocol-events'
+import {
+  LIKE_SET_TOPIC,
+  POST_PUBLISHED_TOPIC,
+  PROTOCOL_ADDRESS,
+  REPOST_PUBLISHED_TOPIC,
+} from './protocol'
 
 const AUTHOR = '0x000000000000000000000000000000000000b0b0' as Address
+const ACCOUNT = '0x000000000000000000000000000000000000c0c0' as Address
 const DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
+const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
 
 function postLog(
   options: {
@@ -41,6 +56,53 @@ function postLog(
     ],
     transactionHash: keccak256(stringToHex('transaction')),
     transactionIndex: 1,
+  }
+}
+
+function likeLog(
+  options: {
+    accountTopic?: Hex
+    contentKindTopic?: Hex
+    data?: Hex
+    liked?: boolean
+    postId?: bigint
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const postId = options.postId ?? 7n
+  return {
+    ...postLog(),
+    data:
+      options.data ??
+      encodeAbiParameters(LIKE_DATA_PARAMETERS, [options.liked ?? true]),
+    topics: options.topics ?? [
+      options.topic ?? LIKE_SET_TOPIC,
+      options.contentKindTopic ?? POST_CONTENT_KIND_TOPIC,
+      padHex(toHex(postId), { size: 32 }),
+      options.accountTopic ?? padHex(ACCOUNT, { size: 32 }),
+    ],
+  }
+}
+
+function repostLog(
+  options: {
+    accountTopic?: Hex
+    data?: Hex
+    postId?: bigint
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const postId = options.postId ?? 7n
+  return {
+    ...postLog(),
+    data: options.data ?? '0x',
+    topics: options.topics ?? [
+      options.topic ?? REPOST_PUBLISHED_TOPIC,
+      padHex(toHex(postId), { size: 32 }),
+      options.accountTopic ?? padHex(ACCOUNT, { size: 32 }),
+    ],
   }
 }
 
@@ -97,5 +159,124 @@ describe('PostPublished decoding', () => {
     ],
   ])('rejects %s', (_description, log) => {
     expect(() => decodePublishedPost(log)).toThrow(/invalid PostPublished/i)
+  })
+})
+
+describe('post reaction filters', () => {
+  it('isolates post likes from comment likes in the RPC filter', () => {
+    expect(POST_LIKE_SET_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [LIKE_SET_TOPIC, `0x${'00'.repeat(32)}`],
+    })
+  })
+
+  it('keeps reposts in an independent RPC filter', () => {
+    expect(PUBLISHED_REPOST_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [REPOST_PUBLISHED_TOPIC],
+    })
+  })
+})
+
+describe('post LikeSet decoding', () => {
+  it.each([true, false])('decodes a canonical liked=%s signal', (liked) => {
+    expect(decodePostLikeSet(likeLog({ liked }))).toEqual({
+      account: getAddress(ACCOUNT),
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      liked,
+      logIndex: 2,
+      postId: 7n,
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', likeLog({ topic: REPOST_PUBLISHED_TOPIC })],
+    [
+      'a comment-like signal',
+      likeLog({ contentKindTopic: padHex(toHex(1), { size: 32 }) }),
+    ],
+    [
+      'the same signature from another contract',
+      { ...likeLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodePostLikeSet(log)).toBeUndefined()
+  })
+
+  it.each([
+    [
+      'missing indexed topics',
+      likeLog({ topics: [LIKE_SET_TOPIC, POST_CONTENT_KIND_TOPIC] }),
+    ],
+    [
+      'surplus indexed topics',
+      likeLog({
+        topics: [...likeLog().topics, keccak256(stringToHex('surplus'))],
+      }),
+    ],
+    ['zero post identifier', likeLog({ postId: 0n })],
+    ['missing boolean data', likeLog({ data: '0x' })],
+    ['surplus boolean data', likeLog({ data: `0x${'00'.repeat(64)}` as Hex })],
+    [
+      'non-canonical boolean data',
+      likeLog({ data: padHex(toHex(2), { size: 32 }) }),
+    ],
+    [
+      'non-canonical account padding',
+      likeLog({ accountTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['odd-length ABI data', likeLog({ data: '0x0' })],
+    ['malformed account topic', likeLog({ accountTopic: '0x01' })],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodePostLikeSet(log)).toThrow(/invalid post LikeSet/i)
+  })
+})
+
+describe('RepostPublished decoding', () => {
+  it('decodes a canonical repost identity', () => {
+    expect(decodePublishedRepost(repostLog())).toEqual({
+      account: getAddress(ACCOUNT),
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      logIndex: 2,
+      postId: 7n,
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', repostLog({ topic: LIKE_SET_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...repostLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodePublishedRepost(log)).toBeUndefined()
+  })
+
+  it.each([
+    ['missing indexed topics', repostLog({ topics: [REPOST_PUBLISHED_TOPIC] })],
+    [
+      'surplus indexed topics',
+      repostLog({
+        topics: [...repostLog().topics, keccak256(stringToHex('surplus'))],
+      }),
+    ],
+    ['zero post identifier', repostLog({ postId: 0n })],
+    [
+      'unexpected ABI data',
+      repostLog({ data: padHex(toHex(1), { size: 32 }) }),
+    ],
+    [
+      'non-canonical account padding',
+      repostLog({ accountTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed account topic', repostLog({ accountTopic: '0x01' })],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodePublishedRepost(log)).toThrow(/invalid RepostPublished/i)
   })
 })

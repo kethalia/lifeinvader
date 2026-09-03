@@ -20,6 +20,8 @@ The current UI reports transaction inclusion but does not claim a like state, co
 
 ## Read-model boundary
 
-Reaction reads will use a separate bounded, reorg-aware event stream and disposable cache scope. They must not be mixed into the post cache's newest-50 page: a busy reaction stream could otherwise crowd every post out of the feed.
+Reaction reads use two separate bounded, reorg-aware event streams and disposable cache scopes. The post-like filter fixes indexed `contentKind` to `Post`, so comment traffic never enters that stream; reposts use their own filter. Neither is mixed into the post cache's newest-50 page, where reaction volume could otherwise crowd every post out of the feed.
 
-Likewise, issuing one historical `eth_getLogs` query per visible post would multiply RPC load. A later reducer should consume bounded global `LikeSet` and `RepostPublished` ranges, retain only validated canonical state, and expose honest synchronization progress. Counts are complete only after that independent stream catches up to its confirmed head.
+Each synchronization invocation scans at most one adaptive block range per filter, for at most two bounded `eth_getLogs` calls in total, and resumes from independent browser-cache cursors. It verifies the exact protocol bytecode before reading, validates every decoded event before advancing either cursor, and rechecks both confirmed checkpoints against one final wallet-chain head after both filters finish. Chain changes and caller cancellation interrupt in-flight context reads, including contract-code inspection.
+
+The stream API exposes up to 200 recent validated signals from each cache plus independent progress. It intentionally does not expose counts: a recent page is not complete history. A later reorg-safe reducer will consume the cached global streams and may call a total complete only after the corresponding cursor reaches its confirmed head.

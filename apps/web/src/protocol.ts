@@ -84,6 +84,30 @@ export const POST_PUBLISHED_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const REPOST_PUBLISHED_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'postId', type: 'uint256' },
+      { indexed: true, name: 'account', type: 'address' },
+    ],
+    name: 'RepostPublished',
+    type: 'event',
+  },
+] as const
+export const LIKE_SET_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'contentKind', type: 'uint8' },
+      { indexed: true, name: 'contentId', type: 'uint256' },
+      { indexed: true, name: 'account', type: 'address' },
+      { indexed: false, name: 'liked', type: 'bool' },
+    ],
+    name: 'LikeSet',
+    type: 'event',
+  },
+] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
 export const REPOST_PUBLISHED_TOPIC =
@@ -93,7 +117,7 @@ export const LIKE_SET_TOPIC =
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
 const MAX_UINT256 = (1n << 256n) - 1n
-const POST_CONTENT_KIND = 0
+export const POST_CONTENT_KIND = 0
 export type ProtocolInspection =
   | { kind: 'ready' }
   | { kind: 'deployable' }
@@ -201,11 +225,20 @@ async function getCode(
   address: Address,
   deadline: number,
   blockTag = 'latest',
+  signal?: AbortSignal,
 ): Promise<Hex> {
   const request = () =>
     provider.request({ method: 'eth_getCode', params: [address, blockTag] })
   const timeout = () => new Error('Contract code inspection timed out.')
-  return parseCode(await beforeDeadline(request, deadline, timeout))
+  return parseCode(
+    await beforeDeadline(
+      request,
+      deadline,
+      timeout,
+      signal,
+      () => new Error('Contract code inspection was cancelled.'),
+    ),
+  )
 }
 
 export class TransactionSubmissionUnknownError extends Error {
@@ -242,15 +275,28 @@ export function assertProtocolConfiguration() {
 export async function inspectProtocol(
   provider: Eip1193Provider,
   timeoutMs = WALLET_READ_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<ProtocolInspection> {
   const deadline = Date.now() + timeoutMs
-  const protocolCode = await getCode(provider, PROTOCOL_ADDRESS, deadline)
+  const protocolCode = await getCode(
+    provider,
+    PROTOCOL_ADDRESS,
+    deadline,
+    'latest',
+    signal,
+  )
   if (protocolCode !== '0x') {
     return keccak256(protocolCode) === PROTOCOL_CODE_HASH
       ? { kind: 'ready' }
       : { kind: 'address-conflict' }
   }
-  const factoryCode = await getCode(provider, FACTORY_ADDRESS, deadline)
+  const factoryCode = await getCode(
+    provider,
+    FACTORY_ADDRESS,
+    deadline,
+    'latest',
+    signal,
+  )
   if (factoryCode === '0x') return { kind: 'missing-factory' }
   if (keccak256(factoryCode) !== FACTORY_CODE_HASH)
     return { kind: 'unsafe-factory' }
