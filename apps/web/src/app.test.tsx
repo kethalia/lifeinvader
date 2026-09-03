@@ -61,7 +61,7 @@ describe('App', () => {
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
   })
 
-  it('refreshes when another actor deploys after inspection', async () => {
+  it('refreshes after concurrent deployment and rejected post preflights', async () => {
     let protocolChecks = 0
     const provider = {
       request: vi.fn(
@@ -74,7 +74,9 @@ describe('App', () => {
             expect([PROTOCOL_ADDRESS, FACTORY_ADDRESS]).toContain(address)
             if (address === FACTORY_ADDRESS) return FACTORY_RUNTIME_CODE
             protocolChecks += 1
-            return protocolChecks === 1 ? '0x' : PROTOCOL_RUNTIME_CODE
+            return protocolChecks === 1 || protocolChecks >= 4
+              ? '0x'
+              : PROTOCOL_RUNTIME_CODE
           }
           throw new Error(`Unexpected method: ${method}`)
         },
@@ -95,6 +97,14 @@ describe('App', () => {
     expect(
       await screen.findByText(/verified Lifeinvader v1 code is ready/i),
     ).toBeTruthy()
+    fireEvent.change(screen.getByLabelText(/permanent public statement/i), {
+      target: { value: 'About to be reorged.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect(
+      await screen.findByRole('button', { name: /deploy protocol here/i }),
+    ).toBeTruthy()
+    expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
 
     stop()
   })
@@ -283,7 +293,7 @@ describe('App', () => {
       screen
         .getByRole('button', { name: /connect pending wallet/i })
         .hasAttribute('disabled'),
-    ).toBe(false)
+    ).toBe(true)
 
     fireEvent.click(
       screen.getByRole('button', { name: /check receipt again/i }),

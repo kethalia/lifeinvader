@@ -75,9 +75,21 @@ export function useWalletSession() {
       provider: wallet.provider,
       status: 'connecting',
     })
+    const handleApprovalDisconnect = () => {
+      if (requestId !== requestSequence.current) return
+      requestSequence.current += 1
+      setSession({
+        error: 'The wallet disconnected.',
+        name: wallet.name,
+        provider: wallet.provider,
+        status: 'disconnected',
+      })
+    }
+    wallet.provider.on?.('disconnect', handleApprovalDisconnect)
 
     try {
       await wallet.provider.request({ method: 'eth_requestAccounts' })
+      if (requestId !== requestSequence.current) return
       const { account, chainId } = await readConnection(wallet.provider)
       if (!account)
         throw new Error('Select an account in the wallet to continue.')
@@ -97,6 +109,8 @@ export function useWalletSession() {
         provider: wallet.provider,
         status: 'disconnected',
       })
+    } finally {
+      wallet.provider.removeListener?.('disconnect', handleApprovalDisconnect)
     }
   }, [])
 

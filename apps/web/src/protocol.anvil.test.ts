@@ -1,12 +1,9 @@
 // @vitest-environment node
 /// <reference types="node" />
-
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
-
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { keccak256, toHex } from 'viem'
-
 import {
   parseAccounts,
   type Eip1193Provider,
@@ -19,16 +16,13 @@ import {
   PROTOCOL_ADDRESS,
   publishPost,
 } from './protocol'
-
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
   result?: unknown
 }
-
 let anvil: ChildProcess | undefined
 let provider: Eip1193Provider
 let stderr = ''
-
 async function reservePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer()
@@ -40,15 +34,12 @@ async function reservePort(): Promise<number> {
         reject(new Error('Could not reserve a local TCP port.'))
         return
       }
-
       server.close((error) => (error ? reject(error) : resolve(address.port)))
     })
   })
 }
-
 function makeHttpProvider(url: string): Eip1193Provider {
   let requestId = 0
-
   return {
     async request({ method, params }: ProviderRequest) {
       const response = await fetch(url, {
@@ -63,7 +54,6 @@ function makeHttpProvider(url: string): Eip1193Provider {
       })
       if (!response.ok)
         throw new Error(`Local RPC returned HTTP ${response.status}.`)
-
       const payload = (await response.json()) as JsonRpcResponse
       if (payload.error) {
         const error = new Error(
@@ -76,26 +66,21 @@ function makeHttpProvider(url: string): Eip1193Provider {
     },
   }
 }
-
 async function waitForAnvil() {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     if (anvil?.exitCode !== null) {
       throw new Error(`Anvil exited during startup. ${stderr}`)
     }
-
     try {
       if ((await provider.request({ method: 'eth_chainId' })) === '0x7a69')
         return
     } catch {
       // Anvil has not bound its loopback socket yet.
     }
-
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-
   throw new Error(`Anvil did not become ready. ${stderr}`)
 }
-
 beforeAll(async () => {
   const port = await reservePort()
   provider = makeHttpProvider(`http://127.0.0.1:${port}`)
@@ -109,17 +94,14 @@ beforeAll(async () => {
   })
   await waitForAnvil()
 }, 10_000)
-
 afterAll(async () => {
   if (!anvil || anvil.exitCode !== null) return
-
   await new Promise<void>((resolve) => {
     anvil?.once('exit', () => resolve())
     anvil?.kill('SIGTERM')
     setTimeout(resolve, 2_000)
   })
 })
-
 describe('wallet transaction helpers on Anvil', () => {
   it('deploys v1 through the canonical factory and publishes an event', async () => {
     const accounts = parseAccounts(
@@ -128,7 +110,6 @@ describe('wallet transaction helpers on Anvil', () => {
     const account = accounts[0]
     expect(account).toBeDefined()
     if (!account) return
-
     await expect(inspectProtocol(provider)).resolves.toEqual({
       kind: 'deployable',
     })
@@ -136,7 +117,6 @@ describe('wallet transaction helpers on Anvil', () => {
       deployProtocol(provider, account, LOCAL_CHAIN_ID),
     ).resolves.toMatchObject({ blockNumber: 1n })
     await expect(inspectProtocol(provider)).resolves.toEqual({ kind: 'ready' })
-
     const postReceipt = await publishPost(
       provider,
       account,
@@ -145,7 +125,6 @@ describe('wallet transaction helpers on Anvil', () => {
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
     const postBlock = `0x${postReceipt.blockNumber.toString(16)}`
-
     const logs = await provider.request({
       method: 'eth_getLogs',
       params: [

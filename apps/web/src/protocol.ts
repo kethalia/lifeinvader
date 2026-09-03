@@ -336,9 +336,11 @@ async function createTransactionGuard(
     }
   }
   provider.on?.('chainChanged', handleChainChanged)
+  provider.on?.('disconnect', handleChainChanged)
   provider.on?.('accountsChanged', handleAccountsChanged)
   const release = () => {
     provider.removeListener?.('chainChanged', handleChainChanged)
+    provider.removeListener?.('disconnect', handleChainChanged)
     provider.removeListener?.('accountsChanged', handleAccountsChanged)
   }
   const assertChain = async () => {

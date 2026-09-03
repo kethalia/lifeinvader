@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import type { Address } from 'viem'
 
 import {
   beforeDeadline,
   describeRpcError,
+  parseAccounts,
   parseChainId,
   WALLET_READ_TIMEOUT_MS,
+  type Eip1193Provider,
 } from './ethereum'
 import {
   deployProtocol,
@@ -49,9 +52,11 @@ function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
 }
 
 type SubmittedTransaction = {
+  account: Address
   action: 'deploy' | 'post'
-  chainId?: bigint
+  chainId: bigint
   hash: TransactionReceipt['hash']
+  provider: Eip1193Provider
   status: 'pending' | 'unknown' | 'failed'
 }
 
@@ -181,7 +186,18 @@ export function WalletPanel() {
     ) => Promise<TransactionReceipt | void>,
   ) => {
     let submittedHash: TransactionReceipt['hash'] | undefined
-    const submittedChainId = session.chainId
+    const submittedContext =
+      action !== 'chain' &&
+      session.account &&
+      session.chainId !== undefined &&
+      session.provider
+        ? {
+            account: session.account,
+            action,
+            chainId: session.chainId,
+            provider: session.provider,
+          }
+        : undefined
     setBusyAction(action)
     setActionError(undefined)
     setReceipt(undefined)
@@ -189,11 +205,10 @@ export function WalletPanel() {
 
     try {
       const nextReceipt = await operation((hash) => {
-        if (action === 'chain') return
+        if (!submittedContext) return
         submittedHash = hash
         setSubmittedTransaction({
-          action,
-          chainId: submittedChainId,
+          ...submittedContext,
           hash,
           status: 'pending',
         })
@@ -204,14 +219,14 @@ export function WalletPanel() {
       }
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
-      if (submittedHash && action !== 'chain') {
+      if (submittedHash && submittedContext) {
         setSubmittedTransaction({
-          action,
-          chainId: submittedChainId,
+          ...submittedContext,
           hash: submittedHash,
           status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
         })
       }
+      if (action === 'post' && !submittedHash) await refreshInspection()
       setActionError(describeRpcError(error, 'The wallet action failed.'))
     } finally {
       setBusyAction(undefined)
@@ -258,9 +273,9 @@ export function WalletPanel() {
   }
 
   const handleRetryReceipt = () => {
-    const provider = session.provider
     const transaction = submittedTransaction
-    if (!provider || transaction?.status !== 'unknown') return
+    if (transaction?.status !== 'unknown') return
+    const provider = transaction.provider
 
     void (async () => {
       setBusyAction('receipt')
@@ -269,26 +284,41 @@ export function WalletPanel() {
       setSubmittedTransaction({ ...transaction, status: 'pending' })
 
       try {
-        const assertCurrentChain = async () => {
-          if (transaction.chainId === undefined) {
-            throw new Error(
-              'The original chain is unknown. Check the transaction in your wallet.',
-            )
-          }
-          const selectedChainId = parseChainId(
-            await provider.request({ method: 'eth_chainId' }),
+        if (session.provider !== provider) {
+          throw new Error(
+            'Reconnect the wallet that submitted this transaction to check its receipt.',
           )
+        }
+        const assertOriginalContext = async () => {
+          const [chainValue, accountsValue] = await Promise.all([
+            provider.request({ method: 'eth_chainId' }),
+            provider.request({ method: 'eth_accounts' }),
+          ])
+          const selectedChainId = parseChainId(chainValue)
           if (selectedChainId !== transaction.chainId) {
             throw new Error(
               `Switch the wallet back to chain ${transaction.chainId.toString()} to check this receipt.`,
             )
           }
+          const selectedAccount = parseAccounts(accountsValue)[0]
+          if (
+            selectedAccount?.toLowerCase() !== transaction.account.toLowerCase()
+          ) {
+            throw new Error(
+              'Select the account that submitted this transaction to check its receipt.',
+            )
+          }
         }
+        await assertOriginalContext()
+        if (transaction.chainId === LOCAL_CHAIN_ID)
+          await verifyLocalChain(provider)
         const nextReceipt = await waitForTransactionReceipt(
           provider,
           transaction.hash,
-          { assertCurrentChain },
+          { assertCurrentChain: assertOriginalContext },
         )
+        if (transaction.chainId === LOCAL_CHAIN_ID)
+          await verifyLocalChain(provider)
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
         if (transaction.action === 'post') setBody('')
@@ -311,7 +341,6 @@ export function WalletPanel() {
   const connected =
     session.status === 'connected' &&
     Boolean(session.account && session.provider)
-  const transactionPending = submittedTransaction?.status === 'pending'
   const transactionWriteLocked =
     submittedTransaction !== undefined &&
     submittedTransaction.status !== 'failed'
@@ -347,7 +376,7 @@ export function WalletPanel() {
                   disabled={
                     session.status === 'connecting' ||
                     busyAction !== undefined ||
-                    transactionPending
+                    transactionWriteLocked
                   }
                   onClick={() => void connect(wallet)}
                 >
@@ -400,7 +429,7 @@ export function WalletPanel() {
                   type="button"
                   disabled={
                     busyAction !== undefined ||
-                    transactionPending ||
+                    transactionWriteLocked ||
                     localChainState === 'checking' ||
                     localChainState === 'verified'
                   }
@@ -419,7 +448,9 @@ export function WalletPanel() {
                 {inspectionError && localChainState !== 'mismatch' ? (
                   <button
                     type="button"
-                    disabled={busyAction !== undefined || transactionPending}
+                    disabled={
+                      busyAction !== undefined || transactionWriteLocked
+                    }
                     onClick={() => void refreshInspection()}
                   >
                     Retry verification
