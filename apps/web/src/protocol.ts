@@ -30,6 +30,7 @@ export const DEPLOYMENT_SALT =
 export const INIT_CODE_HASH =
   '0xa9bdddbbb0824a6b64f118b0eeb6b2c6051394933c5593ace3ee9495f4cc805e'
 export const MAX_POST_BODY_BYTES = 4_096
+export const MAX_MEDIA_CID_BYTES = 128
 export const LOCAL_CHAIN_ID = 31_337n
 export const LOCAL_RPC_URL = 'http://127.0.0.1:8545'
 export const LIFEINVADER_INIT_CODE =
@@ -46,7 +47,20 @@ const PUBLISH_POST_ABI = [
     outputs: [{ name: 'postId', type: 'uint256' }],
   },
 ] as const
-const POST_PUBLISHED_TOPIC =
+export const POST_PUBLISHED_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'postId', type: 'uint256' },
+      { indexed: true, name: 'author', type: 'address' },
+      { indexed: false, name: 'body', type: 'string' },
+      { indexed: false, name: 'mediaCid', type: 'bytes' },
+    ],
+    name: 'PostPublished',
+    type: 'event',
+  },
+] as const
+export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 export type ProtocolInspection =

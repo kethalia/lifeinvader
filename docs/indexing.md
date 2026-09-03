@@ -3,7 +3,7 @@
 Lifeinvader derives every view from EVM logs without a hosted indexer. The browser indexer is split into two layers:
 
 1. A transport-independent synchronization engine reads bounded canonical ranges.
-2. A disposable on-device cache will apply the engine's additions and rollback instructions atomically.
+2. A [disposable on-device cache](./cache.md) applies the engine's additions and rollback instructions atomically.
 
 The first layer is implemented in `apps/web/src/event-indexer.ts`. It accepts any EIP-1193-shaped read transport, so a later UI can use a user-selected HTTP RPC without coupling reads to an injected wallet.
 
@@ -57,11 +57,13 @@ Only the latest 64 checkpoints are retained. Their newest canonical hash commits
 
 ## Untrusted RPC data
 
-RPC responses are treated as external input. Quantities must use canonical bounded hexadecimal encoding. Hashes, addresses, data, topics, block membership, transaction indexes, log indexes, removal state, filter membership, and duplicate positions are validated locally. Logs are sorted by:
+RPC responses are treated as external input. Quantities must use canonical bounded hexadecimal encoding. Hashes, addresses, data, topics, block membership, transaction indexes, log indexes, removal state, filter membership, and duplicate positions are validated locally. A positional wildcard still requires that topic position to exist. Logs are sorted by the block-wide canonical event order:
 
 ```text
-(blockNumber, transactionIndex, logIndex)
+(blockNumber, logIndex)
 ```
+
+Within a block, transaction indexes must be monotonic with that order. One transaction index must map to one transaction hash and one hash must map back to one index. Transaction positions are retained as validated metadata but never control reducer order.
 
 Malformed or mismatched responses fail the invocation without mutating the input cursor. The cache layer must likewise treat persisted cursor and log records as disposable and versioned.
 

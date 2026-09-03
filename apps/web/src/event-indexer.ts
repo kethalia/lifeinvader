@@ -77,7 +77,7 @@ export type EventSyncResult = {
   safeHead?: bigint
   scannedRanges: number
 }
-type NormalizedFilter = {
+export type NormalizedEventLogFilter = {
   address: Address
   id: Hash
   topics: readonly EventTopicFilter[]
@@ -174,7 +174,10 @@ function parsePositiveInteger(
   }
   return parsed
 }
-function assertQuantity(value: bigint, field: string) {
+function assertQuantity(
+  value: unknown,
+  field: string,
+): asserts value is bigint {
   if (typeof value !== 'bigint' || value < 0n || value > MAX_EVM_QUANTITY) {
     throw new Error(`Invalid ${field}.`)
   }
@@ -182,10 +185,13 @@ function assertQuantity(value: bigint, field: string) {
 function parseTopic(value: unknown): Hex {
   return parseHash(value, 'log topic') as Hex
 }
-function normalizeFilter(filter: EventLogFilter): NormalizedFilter {
-  if (typeof filter !== 'object' || filter === null) {
+export function normalizeEventLogFilter(
+  value: unknown,
+): NormalizedEventLogFilter {
+  if (typeof value !== 'object' || value === null) {
     throw new Error('Invalid event filter.')
   }
+  const filter = value as Record<string, unknown>
   if (
     typeof filter.address !== 'string' ||
     filter.address.length !== 42 ||
@@ -209,35 +215,33 @@ function normalizeFilter(filter: EventLogFilter): NormalizedFilter {
   const serialized = JSON.stringify([address.toLowerCase(), topics])
   return { address, id: keccak256(stringToHex(serialized)), topics }
 }
-function normalizeCheckpoint(value: EventCheckpoint): EventCheckpoint {
+function normalizeCheckpoint(value: unknown): EventCheckpoint {
   if (typeof value !== 'object' || value === null) {
     throw new Error('Invalid event cursor checkpoint.')
   }
-  assertQuantity(value.blockNumber, 'event checkpoint block number')
+  const checkpoint = value as Record<string, unknown>
+  assertQuantity(checkpoint.blockNumber, 'event checkpoint block number')
   return {
-    blockHash: parseHash(value.blockHash, 'event checkpoint block hash'),
-    blockNumber: value.blockNumber,
+    blockHash: parseHash(checkpoint.blockHash, 'event checkpoint block hash'),
+    blockNumber: checkpoint.blockNumber,
   }
 }
-function normalizeCursor(
-  cursor: EventCursor,
-  filter: NormalizedFilter,
-): EventCursor {
-  if (typeof cursor !== 'object' || cursor === null) {
+export function validateEventCursor(value: unknown): EventCursor {
+  if (typeof value !== 'object' || value === null) {
     throw new Error('Invalid event cursor.')
   }
+  const cursor = value as Record<string, unknown>
   assertQuantity(cursor.chainId, 'event cursor chain identifier')
   assertQuantity(cursor.finalityDepth, 'event cursor finality depth')
   assertQuantity(cursor.startBlock, 'event cursor start block')
   assertQuantity(cursor.nextBlock, 'event cursor next block')
   const filterId = parseHash(cursor.filterId, 'event cursor filter identifier')
-  if (filterId !== filter.id) {
-    throw new Error('The event cursor belongs to a different filter.')
-  }
+  const rangeSize = cursor.rangeSize
   if (
-    !Number.isSafeInteger(cursor.rangeSize) ||
-    cursor.rangeSize < 1 ||
-    cursor.rangeSize > HARD_MAX_BLOCK_RANGE
+    typeof rangeSize !== 'number' ||
+    !Number.isSafeInteger(rangeSize) ||
+    rangeSize < 1 ||
+    rangeSize > HARD_MAX_BLOCK_RANGE
   ) {
     throw new Error('Invalid event cursor range size.')
   }
@@ -266,7 +270,25 @@ function normalizeCursor(
   if (cursor.nextBlock !== expectedNext) {
     throw new Error('Invalid event cursor next block.')
   }
-  return { ...cursor, checkpoints, filterId }
+  return {
+    chainId: cursor.chainId,
+    checkpoints,
+    finalityDepth: cursor.finalityDepth,
+    filterId,
+    nextBlock: cursor.nextBlock,
+    rangeSize,
+    startBlock: cursor.startBlock,
+  }
+}
+function normalizeCursor(
+  cursor: EventCursor,
+  filter: NormalizedEventLogFilter,
+) {
+  const normalized = validateEventCursor(cursor)
+  if (normalized.filterId !== filter.id) {
+    throw new Error('The event cursor belongs to a different filter.')
+  }
+  return normalized
 }
 function toQuantity(value: bigint) {
   return `0x${value.toString(16)}`
@@ -295,7 +317,11 @@ async function readBlock(
   })
   return parseBlock(value, blockNumber)
 }
-function topicsMatch(actual: readonly Hex[], expected: NormalizedFilter) {
+function topicsMatch(
+  actual: readonly Hex[],
+  expected: NormalizedEventLogFilter,
+) {
+  if (actual.length < expected.topics.length) return false
   return expected.topics.every((topic, index) => {
     if (topic === null) return true
     const actualTopic = actual[index]
@@ -305,9 +331,18 @@ function topicsMatch(actual: readonly Hex[], expected: NormalizedFilter) {
       : topic === actualTopic
   })
 }
+export function indexedEventLogMatchesFilter(
+  log: IndexedEventLog,
+  filter: NormalizedEventLogFilter,
+) {
+  return (
+    log.address.toLowerCase() === filter.address.toLowerCase() &&
+    topicsMatch(log.topics, filter)
+  )
+}
 function parseLog(
   value: unknown,
-  filter: NormalizedFilter,
+  filter: NormalizedEventLogFilter,
   fromBlock: bigint,
   toBlock: bigint,
 ): IndexedEventLog {
@@ -354,14 +389,45 @@ function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
   if (first.blockNumber !== second.blockNumber) {
     return first.blockNumber < second.blockNumber ? -1 : 1
   }
-  if (first.transactionIndex !== second.transactionIndex) {
-    return first.transactionIndex - second.transactionIndex
-  }
   return first.logIndex - second.logIndex
+}
+export function eventTransactionsAreConsistent(
+  logs: readonly IndexedEventLog[],
+) {
+  const hashesByIndex = new Map<string, Hash>()
+  const indexesByHash = new Map<string, number>()
+  for (let index = 0; index < logs.length; index += 1) {
+    const log = logs[index]!
+    const previous = logs[index - 1]
+    if (
+      previous?.blockNumber === log.blockNumber &&
+      previous.logIndex !== log.logIndex &&
+      previous.transactionIndex !== log.transactionIndex
+    ) {
+      const logIndexesAscending = previous.logIndex < log.logIndex
+      const transactionIndexesAscending =
+        previous.transactionIndex < log.transactionIndex
+      if (logIndexesAscending !== transactionIndexesAscending) return false
+    }
+    const block = log.blockNumber.toString()
+    const indexKey = `${block}:${log.transactionIndex}`
+    const hashKey = `${block}:${log.transactionHash}`
+    const knownHash = hashesByIndex.get(indexKey)
+    const knownIndex = indexesByHash.get(hashKey)
+    if (
+      (knownHash !== undefined && knownHash !== log.transactionHash) ||
+      (knownIndex !== undefined && knownIndex !== log.transactionIndex)
+    ) {
+      return false
+    }
+    hashesByIndex.set(indexKey, log.transactionHash)
+    indexesByHash.set(hashKey, log.transactionIndex)
+  }
+  return true
 }
 function parseLogs(
   value: readonly unknown[],
-  filter: NormalizedFilter,
+  filter: NormalizedEventLogFilter,
   fromBlock: bigint,
   toBlock: bigint,
 ) {
@@ -378,7 +444,50 @@ function parseLogs(
     blockHashes.set(log.blockNumber, log.blockHash)
     uniqueLogs.set(key, log)
   }
-  return [...uniqueLogs.values()].toSorted(compareLogs)
+  const logs = [...uniqueLogs.values()].toSorted(compareLogs)
+  if (!eventTransactionsAreConsistent(logs)) {
+    throw invalidRpc('event transaction metadata')
+  }
+  return logs
+}
+function validateNormalizedIndex(value: unknown, field: string) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Invalid indexed event ${field}.`)
+  }
+  return value
+}
+export function validateIndexedEventLog(value: unknown): IndexedEventLog {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid indexed event log.')
+  }
+  const log = value as Record<string, unknown>
+  if (
+    typeof log.address !== 'string' ||
+    log.address.length !== 42 ||
+    !isAddress(log.address)
+  ) {
+    throw new Error('Invalid indexed event address.')
+  }
+  if (!Array.isArray(log.topics) || log.topics.length > 4) {
+    throw new Error('Invalid indexed event topics.')
+  }
+  assertQuantity(log.blockNumber, 'indexed event block number')
+  return {
+    address: getAddress(log.address),
+    blockHash: parseHash(log.blockHash, 'indexed event block hash'),
+    blockNumber: log.blockNumber,
+    data: parseData(log.data),
+    logIndex: validateNormalizedIndex(log.logIndex, 'log index'),
+    topics: log.topics.map(parseTopic),
+    transactionHash: parseHash(
+      log.transactionHash,
+      'indexed event transaction hash',
+    ),
+    transactionIndex: validateNormalizedIndex(
+      log.transactionIndex,
+      'transaction index',
+    ),
+  }
 }
 function getLogBlockFingerprints(logs: readonly IndexedEventLog[]) {
   const fingerprints: EventCheckpoint[] = []
@@ -465,7 +574,7 @@ export function createEventCursor({
   assertQuantity(chainId, 'event cursor chain identifier')
   assertQuantity(finalityDepth, 'event cursor finality depth')
   assertQuantity(startBlock, 'event cursor start block')
-  const normalizedFilter = normalizeFilter(filter)
+  const normalizedFilter = normalizeEventLogFilter(filter)
   const parsedRangeSize = parsePositiveInteger(
     rangeSize,
     DEFAULT_BLOCK_RANGE,
@@ -483,7 +592,7 @@ export function createEventCursor({
   }
 }
 export function getEventFilterId(filter: EventLogFilter) {
-  return normalizeFilter(filter).id
+  return normalizeEventLogFilter(filter).id
 }
 export async function syncEventLogs(
   provider: Eip1193Provider,
@@ -491,7 +600,7 @@ export async function syncEventLogs(
   inputCursor: EventCursor,
   options: EventSyncOptions = {},
 ): Promise<EventSyncResult> {
-  const normalizedFilter = normalizeFilter(filter)
+  const normalizedFilter = normalizeEventLogFilter(filter)
   let cursor = normalizeCursor(inputCursor, normalizedFilter)
   const maxLogs = parsePositiveInteger(
     options.maxLogsPerRange,

@@ -28,7 +28,7 @@ Injected wallets are discovered through EIP-6963 and submit writes through their
 
 ## Browser indexing
 
-The browser indexer requests logs in bounded block ranges and emits canonical additions and rollback instructions. A disposable on-device cache will persist finalized checkpoints locally or discard and rebuild them. Screens request only the event families and indexed topics they need. A new device can always reconstruct its view from RPC without trusting a Lifeinvader service. The synchronization and rollback contract is specified in [`indexing.md`](./indexing.md).
+The browser indexer requests logs in bounded block ranges and emits canonical additions and rollback instructions. A versioned, disposable IndexedDB cache persists checkpoints and validated logs locally, or clears and rebuilds them when integrity checks fail. Screens request only the event families and indexed topics they need. A new device can always reconstruct its view from RPC without trusting a Lifeinvader service. The synchronization and rollback contract is specified in [`indexing.md`](./indexing.md), and the local transaction boundary is specified in [`cache.md`](./cache.md).
 
 The initial interface is allowed to contain fixture content while protocol and indexer work proceeds, but fixtures must be visibly identified and isolated from chain-derived models.
 
