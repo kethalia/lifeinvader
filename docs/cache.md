@@ -30,6 +30,8 @@ The position key is `(blockNumber, logIndex)`, because `logIndex` is the canonic
 
 Reads use a descending key cursor and return 50 records by default. Callers may request at most 200 records in one page. The cursor continues through the complete block crossing the page boundary, capped by the maximum accepted synchronization batch, and reads one record from the preceding block as an ordering sentinel. These validation records are not returned. There is no `getAll` or unbounded local history load.
 
+Reducers use a separate chronological scan. A request targets at most 200 oldest-first records, extends through the complete boundary block, and inspects one record from the following block as a sentinel. The boundary extension is hard-capped by the maximum 5,000-log synchronization batch, so a returned reducer page contains at most 5,199 records. A scan may start at an explicit block boundary for an append-only delta. Its continuation binds the exact cache generation, revision, cursor, start block, and last complete-block position; any cache update between pages rejects that continuation instead of mixing histories. Missing anchors, encountered malformed records, noncanonical key types, filter violations, and inconsistent block or transaction metadata reset the disposable scope. No scan calls `getAll` or loads an unbounded local history.
+
 ## Atomic synchronization
 
 Applying a synchronization result uses one read-write transaction across scope, cursor, and log stores:

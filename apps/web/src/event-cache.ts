@@ -21,6 +21,8 @@ const LOG_SCOPE_INDEX = 'scope'
 const DEFAULT_PAGE_SIZE = 50
 const MAX_PAGE_SIZE = 200
 const MAX_BATCH_LOGS = 5_000
+const MAX_SCAN_LOGS = MAX_BATCH_LOGS + MAX_PAGE_SIZE
+const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 
 type CursorRecord = {
   cursor: unknown
@@ -54,6 +56,25 @@ export type EventCachePosition = {
 export type EventCachePage = EventCachePosition & {
   logs: readonly IndexedEventLog[]
   reset: boolean
+}
+export type EventCacheLogPosition = {
+  blockNumber: bigint
+  logIndex: number
+}
+export type EventCacheScanCursor = EventCachePosition & {
+  after: EventCacheLogPosition
+  fromBlock: bigint
+}
+export type EventCacheScanPage = EventCachePosition & {
+  complete: boolean
+  logs: readonly IndexedEventLog[]
+  next?: EventCacheScanCursor
+  reset: boolean
+}
+export type EventCacheScanOptions = {
+  continuation?: EventCacheScanCursor
+  fromBlock?: bigint
+  limit?: number
 }
 export type OpenEventCacheOptions = {
   databaseName?: string
@@ -124,7 +145,9 @@ function fixedHex(value: bigint | number, width: number) {
   if (encoded.length > width) throw cacheError('Invalid event cache position.')
   return encoded.padStart(width, '0')
 }
-function getLogPosition(log: IndexedEventLog) {
+function getLogPosition(
+  log: Pick<IndexedEventLog, 'blockNumber' | 'logIndex'>,
+) {
   return `${fixedHex(log.blockNumber, 64)}:${fixedHex(log.logIndex, 16)}`
 }
 function getLogIdentity(log: IndexedEventLog) {
@@ -170,6 +193,68 @@ function assertPageSize(limit: number) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
     throw cacheError('Invalid event cache page size.')
   }
+}
+function assertScanBlock(
+  value: unknown,
+  field: string,
+): asserts value is bigint {
+  if (typeof value !== 'bigint' || value < 0n || value > MAX_EVM_QUANTITY) {
+    throw cacheError(`Invalid event cache ${field}.`)
+  }
+}
+function normalizeLogPosition(value: unknown): EventCacheLogPosition {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw cacheError('Invalid event cache scan position.')
+  }
+  const position = value as Partial<EventCacheLogPosition>
+  assertScanBlock(position.blockNumber, 'scan block number')
+  if (
+    typeof position.logIndex !== 'number' ||
+    !Number.isSafeInteger(position.logIndex) ||
+    position.logIndex < 0
+  ) {
+    throw cacheError('Invalid event cache scan log index.')
+  }
+  return {
+    blockNumber: position.blockNumber,
+    logIndex: position.logIndex,
+  }
+}
+function sameLogPosition(
+  first: EventCacheLogPosition,
+  second: EventCacheLogPosition,
+) {
+  return (
+    first.blockNumber === second.blockNumber &&
+    first.logIndex === second.logIndex
+  )
+}
+function getPublicLogPosition(log: IndexedEventLog): EventCacheLogPosition {
+  return { blockNumber: log.blockNumber, logIndex: log.logIndex }
+}
+function normalizeScanCursor(
+  value: unknown,
+  seedCursor: EventCursor,
+): EventCacheScanCursor {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw cacheError('Invalid event cache scan cursor.')
+  }
+  const source = value as Partial<EventCacheScanCursor>
+  const position = asCachePosition(value)
+  if (!sameCursorIdentity(position.cursor, seedCursor)) {
+    throw cacheError('The event cache scan cursor belongs to another scope.')
+  }
+  assertScanBlock(source.fromBlock, 'scan start block')
+  const after = normalizeLogPosition(source.after)
+  if (
+    source.fromBlock < seedCursor.startBlock ||
+    source.fromBlock > position.cursor.nextBlock ||
+    after.blockNumber < source.fromBlock ||
+    after.blockNumber >= position.cursor.nextBlock
+  ) {
+    throw cacheError('Invalid event cache scan boundary.')
+  }
+  return { ...position, after, fromBlock: source.fromBlock }
 }
 function assertRollbackTo(value: unknown, cursor: EventCursor) {
   if (value === undefined) return undefined
@@ -375,6 +460,52 @@ export class BrowserEventCache {
     assertPageSize(limit)
     const scope = getEventCacheScope(seedCursor)
     return this.#readLatestTransaction(seedCursor, scope, limit)
+  }
+
+  async scan(
+    seedValue: unknown,
+    optionsValue: EventCacheScanOptions = {},
+  ): Promise<EventCacheScanPage> {
+    const seedCursor = validateEventCursor(seedValue)
+    if (seedCursor.filterId !== this.#filter.id) {
+      throw cacheError('The event cache cursor belongs to another filter.')
+    }
+    if (!isSeedCursor(seedCursor)) {
+      throw cacheError('The event cache requires a fresh seed cursor.')
+    }
+    if (
+      typeof optionsValue !== 'object' ||
+      optionsValue === null ||
+      Array.isArray(optionsValue)
+    ) {
+      throw cacheError('Invalid event cache scan options.')
+    }
+    const options = optionsValue as EventCacheScanOptions
+    const limit = options.limit ?? DEFAULT_PAGE_SIZE
+    assertPageSize(limit)
+    let continuation: EventCacheScanCursor | undefined
+    let fromBlock: bigint
+    if (options.continuation !== undefined) {
+      if (options.fromBlock !== undefined) {
+        throw cacheError('The event cache scan has conflicting boundaries.')
+      }
+      continuation = normalizeScanCursor(options.continuation, seedCursor)
+      fromBlock = continuation.fromBlock
+    } else {
+      fromBlock = options.fromBlock ?? seedCursor.startBlock
+      assertScanBlock(fromBlock, 'scan start block')
+      if (fromBlock < seedCursor.startBlock) {
+        throw cacheError('Invalid event cache scan boundary.')
+      }
+    }
+    const scope = getEventCacheScope(seedCursor)
+    return this.#scanTransaction(
+      seedCursor,
+      scope,
+      fromBlock,
+      limit,
+      continuation,
+    )
   }
 
   async apply(
@@ -665,6 +796,327 @@ export class BrowserEventCache {
             asError(
               transaction.error,
               'The browser event cache could not read.',
+            ),
+        )
+      transaction.onerror = () => undefined
+    })
+  }
+
+  #scanTransaction(
+    seedCursor: EventCursor,
+    scope: string,
+    fromBlock: bigint,
+    limit: number,
+    continuation: EventCacheScanCursor | undefined,
+  ) {
+    return new Promise<EventCacheScanPage>((resolve, reject) => {
+      const transaction = this.#database.transaction(
+        [SCOPE_STORE, CURSOR_STORE, LOG_STORE],
+        'readwrite',
+      )
+      let failure: Error | undefined
+      let page: EventCacheScanPage | undefined
+      let scopeRecord: unknown
+      let cursorRecord: unknown
+      let anchorRecord: unknown
+      let scopeLogCount = 0
+      let canonicalLogCount = 0
+      const logRecords: unknown[] = []
+      let boundaryBlock: bigint | undefined
+      let currentBlock: bigint | undefined
+      let currentBlockLogCount = 0
+      let hasMore = false
+      let pageCorrupt = false
+      let scopeDone = false
+      let cursorDone = false
+      let anchorDone = continuation === undefined
+      let scopeCountDone = false
+      let canonicalCountDone = false
+      let logsDone = false
+      let finalized = false
+      const scopeStore = transaction.objectStore(SCOPE_STORE)
+      const cursorStore = transaction.objectStore(CURSOR_STORE)
+      const logStore = transaction.objectStore(LOG_STORE)
+      const fail = (error: unknown) => {
+        if (failure) return
+        finalized = true
+        failure = asError(error, 'The browser event cache could not scan.')
+        try {
+          transaction.abort()
+        } catch {
+          reject(failure)
+        }
+      }
+      const finalize = () => {
+        if (
+          finalized ||
+          !scopeDone ||
+          !cursorDone ||
+          !anchorDone ||
+          !scopeCountDone ||
+          !canonicalCountDone ||
+          !logsDone
+        ) {
+          return
+        }
+        finalized = true
+        let state: ScopeState | undefined
+        try {
+          const hasLogs = scopeLogCount > 0
+          if (scopeRecord !== undefined) {
+            state = asScopeRecord(scopeRecord, scope, this.#filter)
+          } else if (
+            cursorRecord !== undefined ||
+            hasLogs ||
+            continuation !== undefined
+          ) {
+            throw new EventCacheCorruptionError()
+          } else {
+            state = this.#createScopeState(0n)
+            this.#putScopeState(scopeStore, scope, state)
+          }
+          if (
+            state.revision === 0n
+              ? cursorRecord !== undefined || hasLogs
+              : cursorRecord === undefined
+          ) {
+            throw new EventCacheCorruptionError()
+          }
+          if (scopeLogCount !== canonicalLogCount) {
+            throw new EventCacheCorruptionError()
+          }
+          const cursor =
+            cursorRecord !== undefined
+              ? asCursorRecord(cursorRecord, scope)
+              : seedCursor
+          if (continuation) {
+            if (
+              state.generation !== continuation.generation ||
+              state.revision !== continuation.revision ||
+              !sameCursor(cursor, continuation.cursor)
+            ) {
+              throw cacheError(
+                'The event cache changed during chronological scanning.',
+              )
+            }
+          }
+          if (fromBlock > cursor.nextBlock) {
+            throw cacheError('Invalid event cache scan boundary.')
+          }
+          if (pageCorrupt) throw new EventCacheCorruptionError()
+          let anchor: IndexedEventLog | undefined
+          if (continuation) {
+            if (anchorRecord === undefined) {
+              throw new EventCacheCorruptionError()
+            }
+            anchor = asLogRecord(anchorRecord, scope)
+            if (
+              !sameLogPosition(
+                getPublicLogPosition(anchor),
+                continuation.after,
+              ) ||
+              anchor.blockNumber < fromBlock ||
+              anchor.blockNumber >= cursor.nextBlock ||
+              getLogStreamProblem([anchor], cursor, state.filter)
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+          }
+          const observedLogs = logRecords.map((record) =>
+            asLogRecord(record, scope),
+          )
+          for (let index = 0; index < observedLogs.length; index += 1) {
+            const log = observedLogs[index]!
+            if (
+              log.blockNumber < fromBlock ||
+              log.blockNumber >= cursor.nextBlock ||
+              (index > 0 && compareLogs(observedLogs[index - 1]!, log) >= 0)
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+          }
+          if (
+            anchor !== undefined &&
+            observedLogs[0] !== undefined &&
+            anchor.blockNumber >= observedLogs[0].blockNumber
+          ) {
+            throw cacheError('Invalid event cache scan continuation.')
+          }
+          if (getLogStreamProblem(observedLogs, cursor, state.filter)) {
+            throw new EventCacheCorruptionError()
+          }
+          const logs = hasMore ? observedLogs.slice(0, -1) : observedLogs
+          const last = logs.at(-1)
+          if (hasMore && !last) throw new EventCacheCorruptionError()
+          page = {
+            complete: !hasMore,
+            cursor,
+            generation: state.generation,
+            logs,
+            next:
+              hasMore && last
+                ? {
+                    after: getPublicLogPosition(last),
+                    cursor,
+                    fromBlock,
+                    generation: state.generation,
+                    revision: state.revision,
+                  }
+                : undefined,
+            reset: false,
+            revision: state.revision,
+          }
+        } catch (error) {
+          if (!(error instanceof EventCacheCorruptionError)) {
+            fail(error)
+            return
+          }
+          try {
+            const nextState = this.#resetScope(
+              scopeStore,
+              cursorStore,
+              logStore,
+              scope,
+              seedCursor,
+              state,
+            )
+            page = {
+              complete: true,
+              cursor: seedCursor,
+              generation: nextState.generation,
+              logs: [],
+              reset: true,
+              revision: nextState.revision,
+            }
+          } catch (resetError) {
+            fail(resetError)
+          }
+        }
+      }
+      const scopeRequest = scopeStore.get(scope)
+      scopeRequest.onsuccess = () => {
+        scopeRecord = scopeRequest.result
+        scopeDone = true
+        finalize()
+      }
+      scopeRequest.onerror = () => fail(scopeRequest.error)
+      const cursorRequest = cursorStore.get(scope)
+      cursorRequest.onsuccess = () => {
+        cursorRecord = cursorRequest.result
+        cursorDone = true
+        finalize()
+      }
+      cursorRequest.onerror = () => fail(cursorRequest.error)
+      if (continuation) {
+        const anchorRequest = logStore.get([
+          scope,
+          getLogPosition(continuation.after),
+        ])
+        anchorRequest.onsuccess = () => {
+          anchorRecord = anchorRequest.result
+          anchorDone = true
+          finalize()
+        }
+        anchorRequest.onerror = () => fail(anchorRequest.error)
+      }
+      const minimumPosition = `${fixedHex(seedCursor.startBlock, 64)}:${'0'.repeat(16)}`
+      const upperPosition = `${'f'.repeat(64)}:${'f'.repeat(16)}`
+      const canonicalKeyRange = this.#keyRange.bound(
+        [scope, minimumPosition],
+        [scope, upperPosition],
+      )
+      const scopeCountRequest = logStore
+        .index(LOG_SCOPE_INDEX)
+        .count(this.#keyRange.only(scope))
+      scopeCountRequest.onsuccess = () => {
+        scopeLogCount = scopeCountRequest.result
+        scopeCountDone = true
+        finalize()
+      }
+      scopeCountRequest.onerror = () => fail(scopeCountRequest.error)
+      const canonicalCountRequest = logStore.count(canonicalKeyRange)
+      canonicalCountRequest.onsuccess = () => {
+        canonicalLogCount = canonicalCountRequest.result
+        canonicalCountDone = true
+        finalize()
+      }
+      canonicalCountRequest.onerror = () => fail(canonicalCountRequest.error)
+      const lowerPosition = continuation
+        ? `${fixedHex(continuation.after.blockNumber, 64)}:${fixedHex(
+            continuation.after.logIndex,
+            16,
+          )}`
+        : `${fixedHex(fromBlock, 64)}:${fixedHex(0, 16)}`
+      const logRequest = logStore.openCursor(
+        this.#keyRange.bound(
+          [scope, lowerPosition],
+          [scope, upperPosition],
+          continuation !== undefined,
+        ),
+      )
+      logRequest.onsuccess = () => {
+        const logCursor = logRequest.result
+        if (!logCursor) {
+          logsDone = true
+          finalize()
+          return
+        }
+        let log: IndexedEventLog
+        try {
+          log = asLogRecord(logCursor.value, scope)
+        } catch (error) {
+          if (!(error instanceof EventCacheCorruptionError)) {
+            fail(error)
+            return
+          }
+          pageCorrupt = true
+          logsDone = true
+          finalize()
+          return
+        }
+        logRecords.push(logCursor.value)
+        if (log.blockNumber === currentBlock) {
+          currentBlockLogCount += 1
+        } else {
+          currentBlock = log.blockNumber
+          currentBlockLogCount = 1
+        }
+        if (currentBlockLogCount > MAX_BATCH_LOGS) {
+          pageCorrupt = true
+          logsDone = true
+          finalize()
+          return
+        }
+        if (boundaryBlock === undefined && logRecords.length >= limit) {
+          boundaryBlock = log.blockNumber
+        } else if (
+          boundaryBlock !== undefined &&
+          log.blockNumber !== boundaryBlock
+        ) {
+          hasMore = true
+          logsDone = true
+          finalize()
+          return
+        }
+        if (logRecords.length > MAX_SCAN_LOGS) {
+          pageCorrupt = true
+          logsDone = true
+          finalize()
+          return
+        }
+        logCursor.continue()
+      }
+      logRequest.onerror = () => fail(logRequest.error)
+      transaction.oncomplete = () => {
+        if (page) resolve(page)
+        else reject(cacheError('The browser event cache returned no scan.'))
+      }
+      transaction.onabort = () =>
+        reject(
+          failure ??
+            asError(
+              transaction.error,
+              'The browser event cache could not scan.',
             ),
         )
       transaction.onerror = () => undefined

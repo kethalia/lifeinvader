@@ -797,6 +797,242 @@ describe('browser event cache', () => {
     await expect(opened.readLatest(seed, 201)).rejects.toThrow(/page size/i)
   })
 
+  it('scans oldest-first in bounded pages without splitting a block', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 6n)
+    const logs = [
+      eventLog(1n),
+      eventLog(2n),
+      eventLog(2n, { logIndex: 1, transactionIndex: 1 }),
+      eventLog(2n, { logIndex: 2, transactionIndex: 2 }),
+      eventLog(3n),
+    ]
+    await opened.apply(await opened.readLatest(seed), syncResult(next, logs))
+
+    const first = await opened.scan(seed, { limit: 2 })
+    expect(first).toMatchObject({
+      complete: false,
+      cursor: next,
+      logs: logs.slice(0, 4),
+      reset: false,
+      revision: 1n,
+    })
+    expect(first.next).toMatchObject({
+      after: { blockNumber: 2n, logIndex: 2 },
+      cursor: next,
+      fromBlock: 0n,
+      generation: first.generation,
+      revision: 1n,
+    })
+
+    const second = await opened.scan(seed, {
+      continuation: first.next,
+      limit: 2,
+    })
+    expect(second).toEqual({
+      complete: true,
+      cursor: next,
+      generation: first.generation,
+      logs: [logs[4]],
+      next: undefined,
+      reset: false,
+      revision: 1n,
+    })
+  })
+
+  it('starts a chronological scan at an explicit block boundary', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 6n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(next, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+
+    await expect(opened.scan(seed, { fromBlock: 2n })).resolves.toMatchObject({
+      complete: true,
+      logs: [eventLog(2n), eventLog(3n)],
+    })
+    await expect(opened.scan(seed, { fromBlock: 6n })).resolves.toMatchObject({
+      complete: true,
+      logs: [],
+    })
+    await expect(opened.scan(seed, { fromBlock: 7n })).rejects.toThrow(
+      /scan boundary/i,
+    )
+  })
+
+  it('returns a whole large boundary block under a fixed hard cap', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const blockLogs = Array.from({ length: 201 }, (_value, index) =>
+      eventLog(1n, { logIndex: index, transactionIndex: index }),
+    )
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 3n), blockLogs),
+    )
+
+    const page = await opened.scan(seed, { limit: 1 })
+    expect(page.complete).toBe(true)
+    expect(page.logs).toEqual(blockLogs)
+  })
+
+  it('rejects a continuation after any cache revision change', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 4n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const first = await opened.scan(seed, { limit: 1 })
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 6n), [eventLog(4n)]),
+    )
+
+    await expect(
+      opened.scan(seed, { continuation: first.next }),
+    ).rejects.toThrow(/changed during chronological scanning/i)
+    expect((await opened.readLatest(seed)).revision).toBe(2n)
+  })
+
+  it('resets when a scan continuation anchor disappears', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(
+      initial,
+      syncResult(cursorAt(seed, 4n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const first = await opened.scan(seed, { limit: 1 })
+    await deleteRawRecord(factory, 'logs', [
+      getEventCacheScope(seed),
+      logIdentity(eventLog(1n)),
+    ])
+
+    await expect(
+      opened.scan(seed, { continuation: first.next }),
+    ).resolves.toMatchObject({
+      complete: true,
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('resets a noncanonical position key outside the scan range', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const hidden = eventLog(2n)
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(hidden),
+      log: hidden,
+      position: 7,
+      schemaVersion: 6,
+      scope: getEventCacheScope(seed),
+    })
+
+    await expect(opened.scan(seed, { fromBlock: 3n })).resolves.toMatchObject({
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+    expect(await countRawScopeLogs(factory, getEventCacheScope(seed))).toBe(0)
+  })
+
+  it('validates unread sentinels before issuing a continuation', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(
+      initial,
+      syncResult(cursorAt(seed, 5n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const corrupt = eventLog(2n)
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(corrupt),
+      log: { ...corrupt, data: '0x1' },
+      position: logIdentity(corrupt),
+      schemaVersion: 6,
+      scope: getEventCacheScope(seed),
+    })
+
+    await expect(opened.scan(seed, { limit: 1 })).resolves.toMatchObject({
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('rejects forged mid-block continuations without clearing valid data', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 4n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(next, [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(2n, { logIndex: 1, transactionIndex: 1 }),
+      ]),
+    )
+    const position = await opened.scan(seed)
+
+    await expect(
+      opened.scan(seed, {
+        continuation: {
+          after: { blockNumber: 2n, logIndex: 0 },
+          cursor: position.cursor,
+          fromBlock: 0n,
+          generation: position.generation,
+          revision: position.revision,
+        },
+      }),
+    ).rejects.toThrow(/invalid event cache scan continuation/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: next,
+      logs: [
+        eventLog(2n, { logIndex: 1, transactionIndex: 1 }),
+        eventLog(2n),
+        eventLog(1n),
+      ],
+      revision: 1n,
+    })
+  })
+
+  it('rejects invalid chronological scan inputs before returning data', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    await expect(opened.scan(seed, { limit: 201 })).rejects.toThrow(
+      /page size/i,
+    )
+    await expect(opened.scan(seed, { fromBlock: -1n })).rejects.toThrow(
+      /scan start block/i,
+    )
+    await expect(opened.scan(seed, null as unknown as never)).rejects.toThrow(
+      /scan options/i,
+    )
+  })
+
   it('rejects out-of-range and noncanonical batches before opening a write', async () => {
     const { cache: opened } = await createCache()
     const seed = seedCursor()
