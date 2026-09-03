@@ -23,6 +23,7 @@ const DEFAULT_PAGE_SIZE = 50
 const MAX_PAGE_SIZE = 200
 const MAX_BATCH_LOGS = 5_000
 const MAX_SCAN_LOGS = MAX_BATCH_LOGS + MAX_PAGE_SIZE
+const MAX_MAINTENANCE_LOGS = MAX_BATCH_LOGS
 const MAX_SCAN_SESSIONS = 16
 const MAX_BASELINE_AUTHENTICATIONS = 16
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
@@ -120,6 +121,7 @@ export type OpenEventCacheOptions = {
   factory?: IDBFactory
   filter: EventLogFilter
   keyRange?: typeof IDBKeyRange
+  maintenanceLogLimit?: number
 }
 
 type NormalizedBaselineAuthentication = {
@@ -249,6 +251,26 @@ function assertPageSize(limit: number) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
     throw cacheError('Invalid event cache page size.')
   }
+}
+function normalizeMaintenanceLogLimit(value: unknown) {
+  const limit = value ?? MAX_MAINTENANCE_LOGS
+  if (
+    typeof limit !== 'number' ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_MAINTENANCE_LOGS
+  ) {
+    throw cacheError('Invalid event cache maintenance log limit.')
+  }
+  return limit
+}
+function maintenanceLimitError(
+  operation: 'repair' | 'rollback',
+  limit: number,
+) {
+  return cacheError(
+    `The browser event cache ${operation} exceeded its ${limit.toString()}-log work limit. Clear this site's stored data before synchronizing again.`,
+  )
 }
 function assertScanBlock(
   value: unknown,
@@ -754,16 +776,20 @@ export class BrowserEventCache {
   readonly #database: IDBDatabase
   readonly #filter: NormalizedEventLogFilter
   readonly #keyRange: typeof IDBKeyRange
+  readonly #maintenanceLogLimit: number
   readonly #scanContinuations = new Map<string, EventCacheScanCursor>()
 
   constructor(
     database: IDBDatabase,
     keyRange: typeof IDBKeyRange,
     filter: NormalizedEventLogFilter,
+    maintenanceLogLimit = MAX_MAINTENANCE_LOGS,
   ) {
     this.#database = database
     this.#filter = filter
     this.#keyRange = keyRange
+    this.#maintenanceLogLimit =
+      normalizeMaintenanceLogLimit(maintenanceLogLimit)
   }
 
   close() {
@@ -816,6 +842,15 @@ export class BrowserEventCache {
       const scopeStore = transaction.objectStore(SCOPE_STORE)
       const cursorStore = transaction.objectStore(CURSOR_STORE)
       const logStore = transaction.objectStore(LOG_STORE)
+      const fail = (error: unknown) => {
+        if (failure) return
+        failure = asError(error, 'The browser event cache could not clear.')
+        try {
+          transaction.abort()
+        } catch {
+          reject(failure)
+        }
+      }
       const scopeRequest = scopeStore.get(scope)
       scopeRequest.onsuccess = () => {
         try {
@@ -834,19 +869,13 @@ export class BrowserEventCache {
             scope,
             seedCursor,
             state,
+            fail,
           )
         } catch (error) {
-          failure = asError(error, 'The browser event cache could not clear.')
-          transaction.abort()
+          fail(error)
         }
       }
-      scopeRequest.onerror = () => {
-        failure = asError(
-          scopeRequest.error,
-          'The browser event cache could not clear.',
-        )
-        transaction.abort()
-      }
+      scopeRequest.onerror = () => fail(scopeRequest.error)
       transaction.oncomplete = () => resolve()
       transaction.onabort = () =>
         reject(
@@ -1006,6 +1035,7 @@ export class BrowserEventCache {
     scope: string,
     seedCursor: EventCursor,
     state: ScopeState | undefined,
+    onFailure: (error: unknown) => void,
   ) {
     const nextState = state
       ? {
@@ -1016,7 +1046,7 @@ export class BrowserEventCache {
           revision: state.revision + 1n,
         }
       : this.#createScopeState(1n)
-    this.#deleteScopeLogs(logStore, scope)
+    this.#deleteScopeLogs(logStore, scope, onFailure)
     cursorStore.put({
       cursor: seedCursor,
       schemaVersion: CACHE_SCHEMA_VERSION,
@@ -1026,17 +1056,27 @@ export class BrowserEventCache {
     return nextState
   }
 
-  #deleteScopeLogs(logStore: IDBObjectStore, scope: string) {
+  #deleteScopeLogs(
+    logStore: IDBObjectStore,
+    scope: string,
+    onFailure: (error: unknown) => void,
+  ) {
     const request = logStore
       .index(LOG_SCOPE_INDEX)
       .openKeyCursor(this.#keyRange.only(scope))
+    let deleted = 0
     request.onsuccess = () => {
       const cursor = request.result
       if (!cursor) return
+      if (deleted >= this.#maintenanceLogLimit) {
+        onFailure(maintenanceLimitError('repair', this.#maintenanceLogLimit))
+        return
+      }
       logStore.delete(cursor.primaryKey)
+      deleted += 1
       cursor.continue()
     }
-    request.onerror = () => undefined
+    request.onerror = () => onFailure(request.error)
   }
 
   #authenticateBaselinesTransaction(
@@ -1307,6 +1347,7 @@ export class BrowserEventCache {
               scope,
               seedCursor,
               state,
+              fail,
             )
             page = {
               cursor: seedCursor,
@@ -1748,6 +1789,7 @@ export class BrowserEventCache {
               scope,
               seedCursor,
               state,
+              fail,
             )
             page = {
               complete: false,
@@ -1958,6 +2000,7 @@ export class BrowserEventCache {
               scope,
               getSeedCursor(expected.cursor),
               state,
+              fail,
             )
             reset = true
           } catch (resetError) {
@@ -2036,6 +2079,9 @@ export class BrowserEventCache {
             throw cacheError('The event cache changed during synchronization.')
           }
           if (rollbackTo !== undefined) {
+            if (currentState.logCount > this.#maintenanceLogLimit) {
+              throw maintenanceLimitError('rollback', this.#maintenanceLogLimit)
+            }
             let blockLogs: IndexedEventLog[] = []
             let integrity: LogIntegrity = {
               digest: EMPTY_LOG_DIGEST,
@@ -2043,6 +2089,7 @@ export class BrowserEventCache {
             }
             let retainedIntegrity = integrity
             let previousLog: IndexedEventLog | undefined
+            let visited = 0
             const validateBlock = () => {
               if (
                 blockLogs.length > MAX_BATCH_LOGS ||
@@ -2069,6 +2116,13 @@ export class BrowserEventCache {
                   commitUpdate(currentState, retainedIntegrity)
                   return
                 }
+                if (visited >= this.#maintenanceLogLimit) {
+                  throw maintenanceLimitError(
+                    'rollback',
+                    this.#maintenanceLogLimit,
+                  )
+                }
+                visited += 1
                 const record = asStoredLogRecord(rollbackCursor.value, scope)
                 const log = record.log
                 if (
@@ -2178,6 +2232,9 @@ export async function openEventCache(options: OpenEventCacheOptions) {
   const factory = options.factory ?? globalThis.indexedDB
   const keyRange = options.keyRange ?? globalThis.IDBKeyRange
   const databaseName = options.databaseName ?? DEFAULT_DATABASE_NAME
+  const maintenanceLogLimit = normalizeMaintenanceLogLimit(
+    options.maintenanceLogLimit,
+  )
   if (!factory || !keyRange) {
     throw cacheError('IndexedDB is unavailable in this browser.')
   }
@@ -2223,7 +2280,9 @@ export async function openEventCache(options: OpenEventCacheOptions) {
       }
       settled = true
       database.onversionchange = () => database.close()
-      resolve(new BrowserEventCache(database, keyRange, filter))
+      resolve(
+        new BrowserEventCache(database, keyRange, filter, maintenanceLogLimit),
+      )
     }
   })
 }

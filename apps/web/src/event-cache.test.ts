@@ -100,12 +100,14 @@ function syncResult(
 async function createCache(
   factory = new IDBFactory(),
   filter: EventLogFilter = FILTER,
+  maintenanceLogLimit?: number,
 ) {
   cache = await openEventCache({
     databaseName: 'lifeinvader-event-cache-test',
     factory,
     filter,
     keyRange: IDBKeyRange,
+    maintenanceLogLimit,
   })
   return { cache, factory }
 }
@@ -217,6 +219,52 @@ describe('browser event cache', () => {
       complete: true,
       logs: [eventLog(1n), eventLog(2n, { branch: 'b' })],
       reset: false,
+    })
+  })
+
+  it('aborts a rollback before it exceeds the configured local work budget', async () => {
+    const { cache: opened } = await createCache(new IDBFactory(), FILTER, 2)
+    const seed = seedCursor()
+    const original = cursorAt(seed, 4n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(original, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+    const active = await opened.readLatest(seed)
+
+    await expect(
+      opened.apply(
+        active,
+        syncResult(
+          cursorAt(seed, 4n, 'b'),
+          [eventLog(2n, { branch: 'b' })],
+          2n,
+        ),
+      ),
+    ).rejects.toThrow(/rollback exceeded its 2-log work limit/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: original,
+      logs: [eventLog(3n), eventLog(2n), eventLog(1n)],
+      revision: 1n,
+    })
+  })
+
+  it('aborts a cache reset before deletion exceeds the local work budget', async () => {
+    const { cache: opened } = await createCache(new IDBFactory(), FILTER, 2)
+    const seed = seedCursor()
+    const original = cursorAt(seed, 4n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(original, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+
+    await expect(opened.clear(seed)).rejects.toThrow(
+      /repair exceeded its 2-log work limit/i,
+    )
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: original,
+      logs: [eventLog(3n), eventLog(2n), eventLog(1n)],
+      revision: 1n,
     })
   })
 
@@ -1278,6 +1326,18 @@ describe('browser event cache', () => {
     await expect(
       opened.scan(seed, { resetOnCorruption: 'yes' } as never),
     ).rejects.toThrow(/corruption reset option/i)
+  })
+
+  it('rejects a maintenance budget above the fixed cache ceiling', async () => {
+    await expect(
+      openEventCache({
+        databaseName: 'lifeinvader-event-cache-test',
+        factory: new IDBFactory(),
+        filter: FILTER,
+        keyRange: IDBKeyRange,
+        maintenanceLogLimit: 5_001,
+      }),
+    ).rejects.toThrow(/maintenance log limit/i)
   })
 
   it('rejects out-of-range and noncanonical batches before opening a write', async () => {

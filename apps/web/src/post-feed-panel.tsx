@@ -69,7 +69,7 @@ function syncStatus(snapshot: PostFeedSnapshot) {
 
 function reactionStatus(state: PostReactionReadModelState) {
   if (state.phase === 'idle') {
-    return 'Reaction totals are not loaded. One request reads at most two bounded RPC ranges.'
+    return 'Reaction totals are not loaded. One request reads at most two bounded RPC ranges; exceptional cache repair is capped at 5,000 records per stream.'
   }
   if (state.phase === 'synchronizing') {
     return 'Reading one bounded range for likes and one for reposts…'
