@@ -35,7 +35,11 @@ export function parseAccounts(value: unknown): readonly Address[] {
 }
 
 export function parseChainId(value: unknown): bigint {
-  if (typeof value !== 'string' || !/^0x[0-9a-f]+$/i.test(value)) {
+  if (
+    typeof value !== 'string' ||
+    value.length > 66 ||
+    !/^0x[0-9a-f]+$/i.test(value)
+  ) {
     throw new Error('The wallet returned an invalid chain identifier.')
   }
 

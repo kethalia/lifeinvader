@@ -15,6 +15,7 @@ import {
 import {
   deployProtocol,
   inspectProtocol,
+  LOCAL_CHAIN_ID,
   PROTOCOL_ADDRESS,
   publishPost,
 } from './protocol'
@@ -131,14 +132,15 @@ describe('wallet transaction helpers on Anvil', () => {
     await expect(inspectProtocol(provider)).resolves.toEqual({
       kind: 'deployable',
     })
-    await expect(deployProtocol(provider, account)).resolves.toMatchObject({
-      blockNumber: 1n,
-    })
+    await expect(
+      deployProtocol(provider, account, LOCAL_CHAIN_ID),
+    ).resolves.toMatchObject({ blockNumber: 1n })
     await expect(inspectProtocol(provider)).resolves.toEqual({ kind: 'ready' })
 
     const postReceipt = await publishPost(
       provider,
       account,
+      LOCAL_CHAIN_ID,
       'Local chain, globally embarrassing.',
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })

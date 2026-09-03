@@ -118,7 +118,11 @@ async function requestLocalRpc({ method, params }: ProviderRequest) {
 const LOCAL_RPC_PROVIDER: Eip1193Provider = { request: requestLocalRpc }
 
 function parseRpcQuantity(value: unknown, field: string): bigint {
-  if (typeof value !== 'string' || !/^0x[0-9a-f]+$/i.test(value)) {
+  if (
+    typeof value !== 'string' ||
+    value.length > 66 ||
+    !/^0x[0-9a-f]+$/i.test(value)
+  ) {
     throw new Error(`The RPC returned an invalid ${field}.`)
   }
   return BigInt(value)
@@ -315,10 +319,8 @@ function accountChangedError() {
 async function createTransactionGuard(
   provider: Eip1193Provider,
   account: Address,
+  chainId: bigint,
 ): Promise<TransactionGuard> {
-  const chainId = parseChainId(
-    await provider.request({ method: 'eth_chainId' }),
-  )
   let chainChanged = false
   let accountChanged = false
   const handleChainChanged = (value: unknown) => {
@@ -431,12 +433,13 @@ function parseReceipt(
   if (status !== '0x0' && status !== '0x1') {
     throw new Error('The wallet returned an invalid transaction status.')
   }
-  if (typeof blockNumber !== 'string' || !/^0x[0-9a-f]+$/i.test(blockNumber)) {
-    throw new Error('The wallet returned an invalid receipt block number.')
-  }
+  const parsedBlockNumber = parseRpcQuantity(
+    blockNumber,
+    'receipt block number',
+  )
   if (status === '0x0') throw new TransactionRevertedError(hash)
 
-  return { blockNumber: BigInt(blockNumber), hash }
+  return { blockNumber: parsedBlockNumber, hash }
 }
 
 class TransactionRevertedError extends Error {
@@ -456,6 +459,36 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
 
+function receiptUnavailableError(hash: Hash) {
+  return new Error(
+    `Receipt for transaction ${hash} is still unavailable. Check its status before trying again.`,
+  )
+}
+
+async function beforeReceiptDeadline<T>(
+  operation: () => Promise<T>,
+  deadline: number,
+  hash: Hash,
+): Promise<T> {
+  const remainingMs = deadline - Date.now()
+  if (remainingMs <= 0) throw receiptUnavailableError(hash)
+
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(receiptUnavailableError(hash)),
+          remainingMs,
+        )
+      }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export async function waitForTransactionReceipt(
   provider: Eip1193Provider,
   hash: Hash,
@@ -470,19 +503,26 @@ export async function waitForTransactionReceipt(
   const deadline = Date.now() + timeoutMs
 
   while (true) {
-    await options.assertCurrentChain?.()
-    const receiptValue = await provider.request({
-      method: 'eth_getTransactionReceipt',
-      params: [hash],
-    })
-    await options.assertCurrentChain?.()
+    if (options.assertCurrentChain) {
+      await beforeReceiptDeadline(options.assertCurrentChain, deadline, hash)
+    }
+    const receiptValue = await beforeReceiptDeadline(
+      () =>
+        provider.request({
+          method: 'eth_getTransactionReceipt',
+          params: [hash],
+        }),
+      deadline,
+      hash,
+    )
+    if (options.assertCurrentChain) {
+      await beforeReceiptDeadline(options.assertCurrentChain, deadline, hash)
+    }
 
     const receipt = parseReceipt(receiptValue, hash)
     if (receipt) return receipt
     if (Date.now() >= deadline) {
-      throw new Error(
-        `Receipt for transaction ${hash} is still unavailable. Check its status before trying again.`,
-      )
+      throw receiptUnavailableError(hash)
     }
     await delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())))
   }
@@ -491,10 +531,11 @@ export async function waitForTransactionReceipt(
 export async function deployProtocol(
   provider: Eip1193Provider,
   account: Address,
+  chainId: bigint,
   onSubmitted?: TransactionSubmitted,
 ): Promise<TransactionReceipt> {
   assertProtocolConfiguration()
-  const guard = await createTransactionGuard(provider, account)
+  const guard = await createTransactionGuard(provider, account, chainId)
   try {
     const inspection = await inspectProtocol(provider)
     if (inspection.kind === 'ready') {
@@ -529,6 +570,7 @@ export function getPostBodyByteLength(body: string): number {
 export async function publishPost(
   provider: Eip1193Provider,
   account: Address,
+  chainId: bigint,
   body: string,
   onSubmitted?: TransactionSubmitted,
 ): Promise<TransactionReceipt> {
@@ -537,7 +579,7 @@ export async function publishPost(
   if (bodyLength > MAX_POST_BODY_BYTES) {
     throw new Error(`Posts are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`)
   }
-  const guard = await createTransactionGuard(provider, account)
+  const guard = await createTransactionGuard(provider, account, chainId)
   try {
     if ((await inspectProtocol(provider)).kind !== 'ready') {
       throw new Error(

@@ -191,6 +191,7 @@ export function WalletPanel() {
       if (nextReceipt) {
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
+        if (action === 'deploy') await refreshInspection()
       }
     } catch (error) {
       if (submittedHash && action !== 'chain') {
@@ -220,11 +221,10 @@ export function WalletPanel() {
   const handleDeploy = () => {
     const provider = session.provider
     const account = session.account
-    if (!provider || !account) return
+    const chainId = session.chainId
+    if (!provider || !account || chainId === undefined) return
     void runAction('deploy', async (onSubmitted) => {
-      const nextReceipt = await deployProtocol(provider, account, onSubmitted)
-      await refreshInspection()
-      return nextReceipt
+      return deployProtocol(provider, account, chainId, onSubmitted)
     })
   }
 
@@ -232,11 +232,13 @@ export function WalletPanel() {
     event.preventDefault()
     const provider = session.provider
     const account = session.account
-    if (!provider || !account) return
+    const chainId = session.chainId
+    if (!provider || !account || chainId === undefined) return
     void runAction('post', async (onSubmitted) => {
       const nextReceipt = await publishPost(
         provider,
         account,
+        chainId,
         body,
         onSubmitted,
       )
