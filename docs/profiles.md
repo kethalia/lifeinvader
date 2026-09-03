@@ -47,9 +47,14 @@ cache proof; copied or partial-catch-up anchors are not trusted.
 The pure projection core validates complete-block event pages, retains only the
 latest snapshot for one to fifty requested accounts, records compatible
 confirmation checkpoints, and exports canonical schema-versioned snapshots for
-resumable local work. A separate runner will scan the anchored local cache into
-that projection in bounded pages. No hosted indexer or server database is part
-of the protocol.
+resumable local work. The projection runner accepts only an anchor issued by the
+current page, scans its chronological cache snapshot one complete-block page at
+a time, and withholds every profile read until the full baseline and canonical
+provider checkpoint have been reauthenticated. Cache movement, corruption,
+reorgs, cancellation, or a wallet-context change fail closed and discard the
+partial projection. A completed run returns defensive profile data plus its
+authenticated cache baseline; wiring that result into the UI is a separate
+slice. No hosted indexer or server database is part of the protocol.
 
 Avatar CIDs identify content; they do not pay for or prove persistence. See
 [`media.md`](./media.md) for the storage boundary.
