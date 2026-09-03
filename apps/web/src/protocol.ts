@@ -390,8 +390,10 @@ async function sendTransaction(
   localProvider?: Eip1193Provider,
 ): Promise<Hash> {
   await guard.assertSubmission()
-  if (guard.chainId === LOCAL_CHAIN_ID)
+  if (guard.chainId === LOCAL_CHAIN_ID) {
     await verifyLocalChain(provider, localProvider)
+    await guard.assertSubmission()
+  }
   const hash = parseTransactionHash(
     await provider.request({
       method: 'eth_sendTransaction',
@@ -465,12 +467,15 @@ function assertExpectedPost(
       const { address, data, topics } = log as Record<string, unknown>
       return (
         typeof address === 'string' &&
+        /^0x[0-9a-f]{40}$/i.test(address) &&
         address.toLowerCase() === PROTOCOL_ADDRESS.toLowerCase() &&
         Array.isArray(topics) &&
         topics.length === 3 &&
         topics.every(
           (topic) =>
-            typeof topic === 'string' && /^0x[0-9a-f]{64}$/i.test(topic),
+            typeof topic === 'string' &&
+            topic.length === 66 &&
+            /^0x[0-9a-f]{64}$/i.test(topic),
         ) &&
         topics[0].toLowerCase() === POST_PUBLISHED_TOPIC.toLowerCase() &&
         topics[2].toLowerCase() === expectedAuthor &&
@@ -517,12 +522,14 @@ export async function waitForTransactionReceipt(
   const pollIntervalMs = options.pollIntervalMs ?? 1_000
   const timeoutMs = options.timeoutMs ?? 120_000
   const deadline = Date.now() + timeoutMs
+  const assertCurrentContext = () =>
+    options.assertCurrentChain
+      ? beforeDeadline(options.assertCurrentChain, deadline, () =>
+          receiptUnavailableError(hash),
+        )
+      : Promise.resolve()
   while (true) {
-    if (options.assertCurrentChain) {
-      await beforeDeadline(options.assertCurrentChain, deadline, () =>
-        receiptUnavailableError(hash),
-      )
-    }
+    await assertCurrentContext()
     const receiptValue = await beforeDeadline(
       () =>
         provider.request({
@@ -532,11 +539,7 @@ export async function waitForTransactionReceipt(
       deadline,
       () => receiptUnavailableError(hash),
     )
-    if (options.assertCurrentChain) {
-      await beforeDeadline(options.assertCurrentChain, deadline, () =>
-        receiptUnavailableError(hash),
-      )
-    }
+    await assertCurrentContext()
     const parsedReceipt = parseReceipt(receiptValue, hash)
     if (parsedReceipt) {
       const { logs, receipt, reverted } = parsedReceipt
@@ -550,11 +553,7 @@ export async function waitForTransactionReceipt(
         deadline,
         () => receiptUnavailableError(hash),
       )
-      if (options.assertCurrentChain) {
-        await beforeDeadline(options.assertCurrentChain, deadline, () =>
-          receiptUnavailableError(hash),
-        )
-      }
+      await assertCurrentContext()
       if (blockValue !== null) {
         const canonicalBlock = parseBlockFingerprint(blockValue)
         if (
@@ -567,6 +566,7 @@ export async function waitForTransactionReceipt(
               options.localProvider,
               Math.max(1, deadline - Date.now()),
             )
+            await assertCurrentContext()
           }
           if (!reverted && options.expectedPost) {
             assertExpectedPost(logs, options.expectedPost)
