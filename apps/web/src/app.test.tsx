@@ -88,6 +88,10 @@ describe('App', () => {
       screen.getByRole('heading', { name: /privacy was a bug/i }),
     ).toBeTruthy()
     expect(screen.getByText(/no delete button/i)).toBeTruthy()
+    expect(
+      screen.getByRole('heading', { name: /^public messages/i }),
+    ).toBeTruthy()
+    expect(screen.getByText(/“Direct” only names the recipient/i)).toBeTruthy()
     expect(screen.getByText(/unofficial parody project/i)).toBeTruthy()
   })
   it('offers an honest wallet entry point without claiming a wallet exists', () => {
@@ -353,14 +357,14 @@ describe('App', () => {
     fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
     fireEvent.click(chainBPublish)
     await waitFor(() => expect(submissions).toBe(2))
-    expect(buttonDisabled(/publishing/i)).toBe(true)
+    expect(buttonDisabled(/^publishing…$/i)).toBe(true)
 
     await act(async () => {
       firstSubmission.reject(rejection)
       await Promise.resolve()
       await Promise.resolve()
     })
-    expect(buttonDisabled(/publishing/i)).toBe(true)
+    expect(buttonDisabled(/^publishing…$/i)).toBe(true)
 
     await act(async () => {
       secondSubmission.reject(rejection)
