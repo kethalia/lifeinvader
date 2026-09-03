@@ -126,10 +126,19 @@ The completed baseline can seed a later append-only scan, while the retained
 members remain boundedly readable by address cursor. Membership is public social
 metadata, never access control.
 
+The React membership read model scopes that work to the selected provider,
+chain, and group. It performs no eager history read: one explicit action advances
+at most one RPC range, and a separate action advances at most one local cache
+page. Changing the chain, provider, or group aborts synchronization and closes
+the old projection. Completed member getters stay unavailable during catch-up or
+projection, so partial state cannot be mistaken for authenticated state. Deep
+cache corruption resets only the affected chain/group scope and requires an
+explicit rebuild.
+
 The Anvil integration covers create, join, send, confirmed exact-group message
 and membership readback, and discovery of the immutable group definition. Later
-slices will connect the authenticated membership runner to the React interface
-without a hosted indexer, application server, or database.
+slices will render the read model in the group interface without a hosted
+indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
