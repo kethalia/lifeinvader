@@ -41,7 +41,10 @@ const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const REPLACEMENT_BLOCK_HASH = `0x${'33'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
-const COMMENT_ANCHOR = { chainId: 1n } as PostCommentProjectionAnchor
+const COMMENT_ANCHOR = {
+  chainId: 1n,
+  safeHead: 18n,
+} as PostCommentProjectionAnchor
 const REACTION_ANCHOR = { chainId: 1n } as PostReactionProjectionAnchor
 
 function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
@@ -137,10 +140,10 @@ function commentStream(
     cacheReset: false,
     caughtUp: projectionAnchor !== undefined,
     head: 20n,
-    indexedThrough: 8n,
+    indexedThrough: 18n,
     ...(projectionAnchor ? { projectionAnchor } : {}),
     recentComments: [],
-    safeHead: 8n,
+    safeHead: 18n,
     scannedRanges: 1,
   }
 }
@@ -174,7 +177,7 @@ function commentProjection(
     logsProcessed: complete ? 12n : 10n,
     pagesScanned: complete ? 2n : 1n,
     phase,
-    safeHead: 8n,
+    safeHead: 18n,
   }
 }
 
@@ -439,7 +442,7 @@ describe('PostFeedPanel', () => {
     ).toBeTruthy()
     expect(
       screen.getByText(
-        /comment histories are exact through confirmed block 8/i,
+        /comment histories are exact through confirmed block 18/i,
       ),
     ).toBeTruthy()
     expect(screen.getByText('Public comment 1.')).toBeTruthy()

@@ -15,6 +15,11 @@ import {
   type PostCommentStreamSnapshot,
   type PostCommentStreamSynchronizer,
 } from './post-comment-stream'
+import {
+  synchronizePostFeed,
+  type PostFeedSnapshot,
+  type PostFeedSynchronizer,
+} from './post-feed'
 import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
@@ -53,11 +58,12 @@ type ScopedReadModelState = {
 export type UsePostCommentReadModelOptions = {
   openProjection?: PostCommentProjectionOpener
   synchronize?: PostCommentStreamSynchronizer
+  synchronizePosts?: PostFeedSynchronizer
 }
 
 export type PostCommentReadTarget = Pick<
   PublishedPost,
-  'blockHash' | 'logIndex' | 'postId'
+  'blockHash' | 'blockNumber' | 'logIndex' | 'postId'
 >
 
 const IDLE_STATE = { phase: 'idle' } as const
@@ -66,16 +72,56 @@ function getPostScope(posts: readonly PostCommentReadTarget[]) {
   return posts
     .map(
       (post) =>
-        `${post.postId.toString(16)},${post.blockHash.toLowerCase()},${post.logIndex.toString(16)}`,
+        `${post.postId.toString(16)},${post.blockNumber.toString(16)},${post.blockHash.toLowerCase()},${post.logIndex.toString(16)}`,
     )
     .toSorted()
     .join(';')
 }
 
-function getScopedPostIds(postScope: string) {
+function getScopedPosts(postScope: string): PostCommentReadTarget[] {
   return postScope === ''
     ? []
-    : postScope.split(';').map((post) => BigInt(`0x${post.split(',')[0]}`))
+    : postScope.split(';').map((post) => {
+        const [postId, blockNumber, blockHash, logIndex] = post.split(',')
+        return {
+          blockHash: blockHash as PublishedPost['blockHash'],
+          blockNumber: BigInt(`0x${blockNumber}`),
+          logIndex: Number.parseInt(logIndex!, 16),
+          postId: BigInt(`0x${postId}`),
+        }
+      })
+}
+
+function assertAuthenticatedPostScope(
+  anchor: PostCommentProjectionAnchor,
+  expectedScope: string,
+  posts: readonly PostCommentReadTarget[],
+  snapshot: PostFeedSnapshot,
+) {
+  if (!snapshot.caughtUp) {
+    throw new Error(
+      'The confirmed post feed is not caught up. Load the next post range before retrying comment histories.',
+    )
+  }
+  if (getPostScope(snapshot.posts) !== expectedScope) {
+    throw new Error(
+      'The confirmed post feed changed while comment histories were loading. Refresh posts before retrying.',
+    )
+  }
+  const lastPostBlock = posts.reduce(
+    (latest, post) => (post.blockNumber > latest ? post.blockNumber : latest),
+    0n,
+  )
+  if (
+    anchor.safeHead === undefined ||
+    snapshot.safeHead === undefined ||
+    anchor.safeHead < lastPostBlock ||
+    snapshot.safeHead < lastPostBlock
+  ) {
+    throw new Error(
+      'The confirmed comment boundary predates a visible post. Load newer chain ranges before retrying.',
+    )
+  }
 }
 
 function stateForProjection(
@@ -96,6 +142,7 @@ export function usePostCommentReadModel(
   {
     openProjection = openPostCommentProjectionRun,
     synchronize = synchronizePostCommentStream,
+    synchronizePosts = synchronizePostFeed,
   }: UsePostCommentReadModelOptions = {},
 ) {
   const [scopedState, setScopedState] = useState<ScopedReadModelState>()
@@ -177,9 +224,21 @@ export function usePostCommentReadModel(
           })
           return
         }
+        const scopedPosts = getScopedPosts(postScope)
+        const authenticatedFeed = await synchronizePosts(provider, chainId, {
+          signal: controller.signal,
+        })
+        if (controller.signal.aborted || requestSequence.current !== requestId)
+          return
+        assertAuthenticatedPostScope(
+          stream.projectionAnchor,
+          postScope,
+          scopedPosts,
+          authenticatedFeed,
+        )
         openedRun = await openProjection(
           stream.projectionAnchor,
-          getScopedPostIds(postScope),
+          scopedPosts.map((post) => post.postId),
         )
         if (
           controller.signal.aborted ||
@@ -221,7 +280,15 @@ export function usePostCommentReadModel(
         }
       }
     })()
-  }, [chainId, openProjection, postScope, provider, readable, synchronize])
+  }, [
+    chainId,
+    openProjection,
+    postScope,
+    provider,
+    readable,
+    synchronize,
+    synchronizePosts,
+  ])
 
   const advanceProjection = useCallback(() => {
     if (

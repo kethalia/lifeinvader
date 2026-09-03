@@ -135,10 +135,10 @@ function reactionButtonLabel(state: PostReactionReadModelState) {
 
 function commentStatus(state: PostCommentReadModelState) {
   if (state.phase === 'idle') {
-    return 'Comment histories are not loaded. One request reads one bounded global RPC range; exact visible threads are then derived in explicit local pages.'
+    return 'Comment histories are not loaded. Each request reads one bounded global comment range; a completed stream also authenticates one bounded post-feed range.'
   }
   if (state.phase === 'synchronizing') {
-    return 'Reading one bounded range from the global comment stream…'
+    return 'Reading one bounded comment range and authenticating the visible post feed if it catches up…'
   }
   if (state.phase === 'catchup') {
     const indexedThrough = state.stream.indexedThrough?.toString() ?? 'none'
@@ -454,6 +454,7 @@ export function PostFeedPanel({
   const commentModel = usePostCommentReadModel(session, visiblePosts, {
     openProjection: openCommentProjection,
     synchronize: synchronizePostComments,
+    synchronizePosts: synchronize,
   })
   const commentPages = useMemo(() => {
     const pages = new Map<string, PostCommentProjectionReadPage>()
@@ -1033,7 +1034,7 @@ export function PostFeedPanel({
           </button>
         </div>
       ) : null}
-      {connected && snapshot?.posts.length ? (
+      {connected && snapshot?.caughtUp && snapshot.posts.length ? (
         <div
           className={`feed-feedback comment-read-model${commentModel.state.phase === 'failed' ? ' error-message' : ''}`}
         >

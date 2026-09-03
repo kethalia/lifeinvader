@@ -12,12 +12,15 @@ import type {
   PostCommentProjectionAnchor,
   PostCommentStreamSnapshot,
 } from './post-comment-stream'
+import type { PostFeedSnapshot } from './post-feed'
+import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
-const ANCHOR = { chainId: 1n } as PostCommentProjectionAnchor
+const ANCHOR = { chainId: 1n, safeHead: 8n } as PostCommentProjectionAnchor
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const REPLACEMENT_BLOCK_HASH = `0x${'22'.repeat(32)}` as const
+const TRANSACTION_HASH = `0x${'33'.repeat(32)}` as const
 const COMMENT_PAGE = {
   comments: [],
   complete: true,
@@ -28,7 +31,37 @@ function target(
   postId: bigint,
   blockHash: PostCommentReadTarget['blockHash'] = BLOCK_HASH,
 ): PostCommentReadTarget {
-  return { blockHash, logIndex: Number(postId), postId }
+  return {
+    blockHash,
+    blockNumber: postId,
+    logIndex: Number(postId),
+    postId,
+  }
+}
+
+function feedSnapshot(
+  targets: readonly PostCommentReadTarget[],
+): PostFeedSnapshot {
+  return {
+    cacheReset: false,
+    caughtUp: true,
+    head: 20n,
+    indexedThrough: 8n,
+    posts: targets.map((entry): PublishedPost => ({
+      ...entry,
+      author: ACCOUNT,
+      body: `Post ${entry.postId.toString()}`,
+      mediaCid: '0x',
+      transactionHash: TRANSACTION_HASH,
+      transactionIndex: 0,
+    })),
+    safeHead: 8n,
+    scannedRanges: 1,
+  }
+}
+
+function postSynchronizer(...targets: PostCommentReadTarget[]) {
+  return vi.fn().mockResolvedValue(feedSnapshot(targets))
 }
 
 function connectedSession(
@@ -128,6 +161,7 @@ describe('usePostCommentReadModel', () => {
       .mockResolvedValueOnce(stream(ANCHOR))
     const run = reader()
     const openProjection = vi.fn().mockResolvedValue(run)
+    const synchronizePosts = postSynchronizer(target(7n), target(8n))
     const { result } = renderHook(() =>
       usePostCommentReadModel(
         connectedSession(provider),
@@ -135,6 +169,7 @@ describe('usePostCommentReadModel', () => {
         {
           openProjection,
           synchronize,
+          synchronizePosts,
         },
       ),
     )
@@ -143,6 +178,7 @@ describe('usePostCommentReadModel', () => {
     act(() => result.current.loadNextRange())
     await waitFor(() => expect(result.current.state.phase).toBe('catchup'))
     expect(synchronize).toHaveBeenCalledTimes(1)
+    expect(synchronizePosts).not.toHaveBeenCalled()
     expect(synchronize).toHaveBeenLastCalledWith(
       provider,
       1n,
@@ -153,6 +189,11 @@ describe('usePostCommentReadModel', () => {
     act(() => result.current.loadNextRange())
     await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
     expect(synchronize).toHaveBeenCalledTimes(2)
+    expect(synchronizePosts).toHaveBeenCalledWith(
+      provider,
+      1n,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
     expect(openProjection).toHaveBeenCalledWith(ANCHOR, [7n, 8n])
     expect(run.advance).not.toHaveBeenCalled()
   })
@@ -172,6 +213,7 @@ describe('usePostCommentReadModel', () => {
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection: vi.fn().mockResolvedValue(run),
         synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronizePosts: postSynchronizer(target(7n)),
       }),
     )
     act(() => result.current.loadNextRange())
@@ -207,6 +249,7 @@ describe('usePostCommentReadModel', () => {
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection: vi.fn().mockResolvedValue(run),
         synchronize,
+        synchronizePosts: postSynchronizer(target(7n)),
       }),
     )
 
@@ -235,6 +278,7 @@ describe('usePostCommentReadModel', () => {
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection: vi.fn().mockResolvedValue(run),
         synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronizePosts: postSynchronizer(target(7n)),
       }),
     )
 
@@ -284,6 +328,51 @@ describe('usePostCommentReadModel', () => {
     expect(openProjection).not.toHaveBeenCalled()
   })
 
+  it('refuses to publish comments beneath a post replaced on the authenticated feed', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const openProjection = vi.fn()
+    const { result } = renderHook(() =>
+      usePostCommentReadModel(connectedSession(provider), [target(7n)], {
+        openProjection,
+        synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronizePosts: postSynchronizer(target(7n, REPLACEMENT_BLOCK_HASH)),
+      }),
+    )
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('failed'))
+    expect(result.current.state).toMatchObject({
+      message: expect.stringMatching(/post feed changed.*refresh posts/i),
+      phase: 'failed',
+    })
+    expect(openProjection).not.toHaveBeenCalled()
+  })
+
+  it('aborts an authenticated feed refresh when the visible post scope changes', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const pendingFeed = deferred<PostFeedSnapshot>()
+    const synchronizePosts = vi.fn().mockReturnValue(pendingFeed.promise)
+    const openProjection = vi.fn()
+    const { rerender, result } = renderHook(
+      ({ postId }) =>
+        usePostCommentReadModel(connectedSession(provider), [target(postId)], {
+          openProjection,
+          synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+          synchronizePosts,
+        }),
+      { initialProps: { postId: 7n } },
+    )
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(synchronizePosts).toHaveBeenCalledTimes(1))
+    const signal = synchronizePosts.mock.calls[0]![2].signal as AbortSignal
+    rerender({ postId: 8n })
+    expect(signal.aborted).toBe(true)
+    await act(async () => pendingFeed.resolve(feedSnapshot([target(7n)])))
+    expect(result.current.state).toEqual({ phase: 'idle' })
+    expect(openProjection).not.toHaveBeenCalled()
+  })
+
   it('closes a late run when the canonical event for the same post ID changes', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pendingOpen = deferred<PostCommentProjectionReader>()
@@ -297,6 +386,7 @@ describe('usePostCommentReadModel', () => {
           {
             openProjection,
             synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+            synchronizePosts: postSynchronizer(target(7n)),
           },
         ),
       { initialProps: { replaced: false } },
@@ -319,12 +409,16 @@ describe('usePostCommentReadModel', () => {
       .mockResolvedValueOnce(firstRun)
       .mockResolvedValueOnce(secondRun)
     const synchronize = vi.fn().mockResolvedValue(stream(ANCHOR))
+    const synchronizePosts = vi
+      .fn()
+      .mockResolvedValueOnce(feedSnapshot([target(7n)]))
+      .mockResolvedValueOnce(feedSnapshot([target(8n)]))
     const { rerender, result } = renderHook(
       ({ chainId, postId }) =>
         usePostCommentReadModel(
           connectedSession(provider, chainId),
           [target(postId)],
-          { openProjection, synchronize },
+          { openProjection, synchronize, synchronizePosts },
         ),
       { initialProps: { chainId: 1n, postId: 7n } },
     )
