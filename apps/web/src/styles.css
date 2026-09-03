@@ -268,7 +268,7 @@ h1 span {
   display: grid;
   border-top: 1px solid var(--ink);
   border-left: 1px solid var(--ink);
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .wallet-console > div {
@@ -365,19 +365,23 @@ h1 span {
   color: rgba(25, 24, 23, 0.68);
 }
 
-.wallet-publish form {
+.wallet-publish form,
+.wallet-profile form {
   display: grid;
   gap: 0.75rem;
 }
 
-.wallet-publish label {
+.wallet-publish label,
+.wallet-profile label {
   font-size: 0.78rem;
   font-weight: 800;
   text-transform: uppercase;
 }
 
 .wallet-publish input,
-.wallet-publish textarea {
+.wallet-publish textarea,
+.wallet-profile input:not([type='checkbox']),
+.wallet-profile textarea {
   width: 100%;
   padding: 0.85rem;
   border: 1px solid var(--ink);
@@ -388,8 +392,30 @@ h1 span {
   line-height: 1.45;
 }
 
-.wallet-publish textarea {
+.wallet-publish textarea,
+.wallet-profile textarea {
   resize: vertical;
+}
+
+.profile-snapshot-warning {
+  margin: 0 0 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--ink);
+  background: rgba(232, 255, 0, 0.32);
+  font-weight: 800;
+}
+
+.wallet-profile .profile-clear-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  line-height: 1.45;
+  text-transform: none;
+}
+
+.profile-clear-confirmation input {
+  flex: 0 0 auto;
+  margin-top: 0.15rem;
 }
 
 .input-help {
