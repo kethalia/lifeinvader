@@ -191,8 +191,8 @@ export function WalletPanel() {
       if (nextReceipt) {
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
-        if (action === 'deploy') await refreshInspection()
       }
+      if (action === 'deploy') await refreshInspection()
     } catch (error) {
       if (submittedHash && action !== 'chain') {
         setSubmittedTransaction({

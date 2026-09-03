@@ -1,11 +1,4 @@
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
@@ -55,7 +48,8 @@ describe('App', () => {
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
   })
 
-  it('discovers an EIP-6963 wallet and inspects its selected chain', async () => {
+  it('refreshes when another actor deploys after inspection', async () => {
+    let protocolChecks = 0
     const provider = {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
@@ -69,7 +63,9 @@ describe('App', () => {
           if (method === 'eth_getCode') {
             const [address] = params as [string]
             expect([PROTOCOL_ADDRESS, FACTORY_ADDRESS]).toContain(address)
-            return '0x'
+            if (address === FACTORY_ADDRESS) return FACTORY_RUNTIME_CODE
+            protocolChecks += 1
+            return protocolChecks === 1 ? '0x' : PROTOCOL_RUNTIME_CODE
           }
           throw new Error(`Unexpected method: ${method}`)
         },
@@ -95,16 +91,12 @@ describe('App', () => {
     fireEvent.click(walletButton)
 
     expect(await screen.findByText('1')).toBeTruthy()
-    await waitFor(() => {
-      expect(provider.request).toHaveBeenCalledWith({
-        method: 'eth_getCode',
-        params: [PROTOCOL_ADDRESS, 'latest'],
-      })
-      expect(provider.request).toHaveBeenCalledWith({
-        method: 'eth_getCode',
-        params: [FACTORY_ADDRESS, 'latest'],
-      })
-    })
+    fireEvent.click(
+      await screen.findByRole('button', { name: /deploy protocol here/i }),
+    )
+    expect(
+      await screen.findByText(/verified Lifeinvader v1 code is ready/i),
+    ).toBeTruthy()
 
     window.removeEventListener('eip6963:requestProvider', announce)
   })
@@ -129,6 +121,9 @@ describe('App', () => {
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
         if (method === 'eth_requestAccounts') {
+          return ['0x000000000000000000000000000000000000a11c']
+        }
+        if (method === 'eth_accounts') {
           return ['0x000000000000000000000000000000000000a11c']
         }
         if (method === 'eth_chainId') return '0x7a69'

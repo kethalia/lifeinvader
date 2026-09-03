@@ -20,6 +20,34 @@ export type WalletSession = {
 
 const INITIAL_SESSION: WalletSession = { status: 'disconnected' }
 
+async function readConnection(provider: Eip1193Provider) {
+  let revision = 0
+  const trackChange = () => {
+    revision += 1
+  }
+  provider.on?.('accountsChanged', trackChange)
+  provider.on?.('chainChanged', trackChange)
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshotRevision = revision
+      const [accountsValue, chainIdValue] = await Promise.all([
+        provider.request({ method: 'eth_accounts' }),
+        provider.request({ method: 'eth_chainId' }),
+      ])
+      if (snapshotRevision === revision) {
+        return {
+          account: parseAccounts(accountsValue)[0],
+          chainId: parseChainId(chainIdValue),
+        }
+      }
+    }
+    throw new Error('Wallet state kept changing. Try again.')
+  } finally {
+    provider.removeListener?.('accountsChanged', trackChange)
+    provider.removeListener?.('chainChanged', trackChange)
+  }
+}
+
 export function useWalletSession() {
   const [session, setSession] = useState<WalletSession>(INITIAL_SESSION)
   const requestSequence = useRef(0)
@@ -33,18 +61,11 @@ export function useWalletSession() {
     })
 
     try {
-      const accounts = parseAccounts(
-        await wallet.provider.request({ method: 'eth_requestAccounts' }),
-      )
-      const chainId = parseChainId(
-        await wallet.provider.request({ method: 'eth_chainId' }),
-      )
-      const account = accounts[0]
-
+      await wallet.provider.request({ method: 'eth_requestAccounts' })
+      const { account, chainId } = await readConnection(wallet.provider)
       if (!account)
         throw new Error('Select an account in the wallet to continue.')
       if (requestId !== requestSequence.current) return
-
       setSession({
         account,
         chainId,
@@ -68,29 +89,34 @@ export function useWalletSession() {
     if (!provider) return
 
     try {
-      const accounts = parseAccounts(
-        await provider.request({ method: 'eth_accounts' }),
-      )
-      const chainId = parseChainId(
-        await provider.request({ method: 'eth_chainId' }),
-      )
-      const account = accounts[0]
+      const { account, chainId } = await readConnection(provider)
 
-      setSession((current) => ({
-        ...current,
-        account,
-        chainId,
-        error: account
-          ? undefined
-          : 'Select an account in the wallet to continue.',
-        status: account ? 'connected' : 'disconnected',
-      }))
+      setSession((current) =>
+        current.provider === provider
+          ? {
+              ...current,
+              account,
+              chainId,
+              error: account
+                ? undefined
+                : 'Select an account in the wallet to continue.',
+              status: account ? 'connected' : 'disconnected',
+            }
+          : current,
+      )
     } catch (error) {
-      setSession((current) => ({
-        ...current,
-        error: describeRpcError(error, 'Wallet state could not be refreshed.'),
-        status: 'disconnected',
-      }))
+      setSession((current) =>
+        current.provider === provider
+          ? {
+              ...current,
+              error: describeRpcError(
+                error,
+                'Wallet state could not be refreshed.',
+              ),
+              status: 'disconnected',
+            }
+          : current,
+      )
     }
   }, [session.provider])
 

@@ -72,7 +72,6 @@ describe('protocol configuration', () => {
       if (address === FACTORY_ADDRESS) return FACTORY_RUNTIME_CODE.toUpperCase()
       throw new Error(`Unexpected address: ${address}`)
     })
-
     await expect(inspectProtocol(provider)).resolves.toEqual({
       kind: 'deployable',
     })
@@ -88,17 +87,23 @@ describe('protocol configuration', () => {
         const [address] = params as readonly string[]
         return address === PROTOCOL_ADDRESS ? '0x' : factoryCode
       })
-
       await expect(inspectProtocol(provider)).resolves.toEqual({ kind })
     },
   )
 
   it('rejects unexpected code at the predetermined protocol address', async () => {
     const request = vi.fn(async () => '0x00')
-
     await expect(inspectProtocol(providerFrom(request))).resolves.toEqual({
       kind: 'address-conflict',
     })
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds stalled contract-code reads', async () => {
+    const request = vi.fn(() => new Promise<unknown>(() => undefined))
+    await expect(inspectProtocol(providerFrom(request), 5)).rejects.toThrow(
+      /inspection timed out/i,
+    )
     expect(request).toHaveBeenCalledTimes(1)
   })
 })
@@ -115,7 +120,6 @@ describe('post transactions', () => {
       status: '0x1',
       transactionHash: TRANSACTION_HASH,
     }))
-
     await expect(
       waitForTransactionReceipt(provider, TRANSACTION_HASH),
     ).resolves.toEqual({ blockNumber: 42n, hash: TRANSACTION_HASH })
@@ -123,7 +127,6 @@ describe('post transactions', () => {
 
   it('rejects an oversized UTF-8 body before opening the wallet', async () => {
     const request = vi.fn()
-
     await expect(
       publishPost(
         providerFrom(request),
@@ -141,12 +144,10 @@ describe('post transactions', () => {
       status: '0x0',
       transactionHash: TRANSACTION_HASH,
     }))
-
     const error = await waitForTransactionReceipt(
       provider,
       TRANSACTION_HASH,
     ).catch((error: unknown) => error)
-
     expect(isTransactionRevertedError(error)).toBe(true)
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toMatch(/reverted on-chain/i)
