@@ -213,7 +213,7 @@ export function WalletPanel() {
           status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
         })
       }
-      if (action === 'post' && !submittedHash) await refreshInspection()
+      if (action !== 'chain') await refreshInspection()
       setActionError(describeRpcError(error, 'The wallet action failed.'))
     } finally {
       setBusyAction(undefined)
@@ -306,6 +306,7 @@ export function WalletPanel() {
               transaction.action === 'post'
                 ? { author: transaction.account, body: transaction.postBody }
                 : undefined,
+            expectProtocol: transaction.action === 'deploy',
             selectedChainId: transaction.chainId,
           },
         )

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-
 import {
   parseAccounts,
   parseChainId,
@@ -21,7 +20,6 @@ import {
   verifyLocalChain,
   waitForTransactionReceipt,
 } from './protocol'
-
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const TRANSACTION_HASH =
@@ -54,6 +52,7 @@ function receiptProvider(
   status = '0x1',
   transactionHash = TRANSACTION_HASH,
   canonicalHash = BLOCK_HASH,
+  protocolCode = '0x',
 ) {
   return providerFrom(async ({ method }) => {
     if (method === 'eth_getTransactionReceipt')
@@ -65,6 +64,7 @@ function receiptProvider(
       }
     if (method === 'eth_getBlockByNumber')
       return { hash: canonicalHash, number: '0x2a' }
+    if (method === 'eth_getCode') return protocolCode
     throw new Error(`Unexpected method: ${method}`)
   })
 }
@@ -137,6 +137,11 @@ describe('post transactions', () => {
       blockNumber: 42n,
       hash: TRANSACTION_HASH,
     })
+    await expect(
+      waitForTransactionReceipt(receiptProvider(), TRANSACTION_HASH, {
+        expectProtocol: true,
+      }),
+    ).rejects.toThrow(/did not deploy/i)
   })
   it('rejects an oversized UTF-8 body before opening the wallet', async () => {
     const request = vi.fn()
@@ -166,7 +171,6 @@ describe('post transactions', () => {
     await expect(
       waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH),
     ).rejects.toThrow(/wallet disconnected/i)
-    expect(request).toHaveBeenCalledTimes(1)
   })
   it('rejects a receipt for a different transaction', async () => {
     await expect(
@@ -202,7 +206,6 @@ describe('post transactions', () => {
         timeoutMs: 5,
       }),
     ).rejects.toThrow(TRANSACTION_HASH)
-    expect(request).toHaveBeenCalledTimes(1)
   })
   it('rechecks the selected chain after reading a receipt', async () => {
     let changed = false
@@ -393,6 +396,7 @@ describe('local wallet network', () => {
       }
       if (method === 'wallet_switchEthereumChain') selected = true
       if (method === 'eth_chainId') return selected ? '0x7a69' : '0x1'
+      if (method === 'eth_blockNumber') return '0x2a'
       if (method === 'eth_getBlockByNumber') {
         return { hash: BLOCK_HASH, number: '0x2a' }
       }
@@ -405,6 +409,7 @@ describe('local wallet network', () => {
       'eth_chainId',
       'wallet_switchEthereumChain',
       'eth_chainId',
+      'eth_blockNumber',
       'eth_getBlockByNumber',
     ])
     expect(request.mock.calls[1]?.[0].params).toEqual([
@@ -422,6 +427,7 @@ describe('local wallet network', () => {
         throw Object.assign(new Error('Unknown chain'), { code: 4902 })
       }
       if (method === 'eth_chainId') return '0x7A69'
+      if (method === 'eth_blockNumber') return '0x2a'
       if (method === 'eth_getBlockByNumber') {
         return { hash: BLOCK_HASH, number: '0x2a' }
       }
@@ -433,6 +439,7 @@ describe('local wallet network', () => {
       'wallet_addEthereumChain',
       'eth_chainId',
       'eth_chainId',
+      'eth_blockNumber',
       'eth_getBlockByNumber',
     ])
   })

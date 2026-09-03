@@ -28,6 +28,9 @@ function announceWallet(name: string, uuid: string, provider: unknown) {
   window.addEventListener('eip6963:requestProvider', announce)
   return () => window.removeEventListener('eip6963:requestProvider', announce)
 }
+function buttonDisabled(name: RegExp) {
+  return screen.getByRole('button', { name }).hasAttribute('disabled')
+}
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
@@ -95,8 +98,7 @@ describe('App', () => {
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
     stop()
   })
-  it('does not trust a reused local chain ID with a different fingerprint', async () => {
-    const walletBlockHash = `0x${'aa'.repeat(32)}`
+  it('does not trust a reused local chain ID at a different head', async () => {
     const localBlockHash = `0x${'bb'.repeat(32)}`
     vi.stubGlobal(
       'fetch',
@@ -116,9 +118,7 @@ describe('App', () => {
         if (method === 'eth_requestAccounts') return [ACCOUNT]
         if (method === 'eth_accounts') return [ACCOUNT]
         if (method === 'eth_chainId') return '0x7a69'
-        if (method === 'eth_getBlockByNumber') {
-          return { hash: walletBlockHash, number: '0x2a' }
-        }
+        if (method === 'eth_blockNumber') return '0x2b'
         throw new Error(`Unexpected method: ${method}`)
       }),
     }
@@ -156,11 +156,11 @@ describe('App', () => {
           if (method === 'eth_accounts') return [ACCOUNT]
           if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_getCode') {
-            if (failNextInspection) {
+            const [address, blockTag] = params as [string, string]
+            if (failNextInspection && blockTag === 'latest') {
               failNextInspection = false
               throw new Error('Temporary RPC outage.')
             }
-            const [address] = params as [string]
             if (address === PROTOCOL_ADDRESS) {
               return deployed ? PROTOCOL_RUNTIME_CODE : '0x'
             }
@@ -222,11 +222,7 @@ describe('App', () => {
     )
     expect(await screen.findByText(/deployment submitted/i)).toBeTruthy()
     expect(screen.getByTitle(TRANSACTION_HASH)).toBeTruthy()
-    expect(
-      screen
-        .getByRole('button', { name: /deploying/i })
-        .hasAttribute('disabled'),
-    ).toBe(true)
+    expect(buttonDisabled(/deploying/i)).toBe(true)
     await act(async () => {
       resolveReceipt?.({
         blockHash: RECEIPT_BLOCK_HASH,
@@ -252,24 +248,12 @@ describe('App', () => {
       /reverted on-chain/i,
     )
     expect(screen.getByTitle(REVERTED_TRANSACTION_HASH)).toBeTruthy()
-    expect(
-      screen
-        .getByRole('button', { name: /publish on-chain/i })
-        .hasAttribute('disabled'),
-    ).toBe(false)
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
-    expect(
-      screen
-        .getByRole('button', { name: /publish on-chain/i })
-        .hasAttribute('disabled'),
-    ).toBe(true)
-    expect(
-      screen
-        .getByRole('button', { name: /connect pending wallet/i })
-        .hasAttribute('disabled'),
-    ).toBe(true)
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect(buttonDisabled(/connect pending wallet/i)).toBe(true)
     fireEvent.click(
       screen.getByRole('button', { name: /check receipt again/i }),
     )

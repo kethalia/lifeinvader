@@ -102,7 +102,9 @@ async function requestLocalRpc({ method, params }: ProviderRequest) {
       typeof error.message === 'string'
         ? error.message
         : undefined
-    throw new Error(message?.trim() || 'Local Anvil returned an RPC error.')
+    throw new Error(
+      message?.slice(0, 240).trim() || 'Local Anvil returned an RPC error.',
+    )
   }
   if (!Object.hasOwn(payload, 'result')) {
     throw new Error('Local Anvil returned an invalid RPC response.')
@@ -153,18 +155,12 @@ async function getCode(
   provider: Eip1193Provider,
   address: Address,
   deadline: number,
+  blockTag = 'latest',
 ): Promise<Hex> {
-  return parseCode(
-    await beforeDeadline(
-      () =>
-        provider.request({
-          method: 'eth_getCode',
-          params: [address, 'latest'],
-        }),
-      deadline,
-      () => new Error('Contract code inspection timed out.'),
-    ),
-  )
+  const request = () =>
+    provider.request({ method: 'eth_getCode', params: [address, blockTag] })
+  const timeout = () => new Error('Contract code inspection timed out.')
+  return parseCode(await beforeDeadline(request, deadline, timeout))
 }
 export function assertProtocolConfiguration() {
   if (keccak256(LIFEINVADER_INIT_CODE) !== INIT_CODE_HASH) {
@@ -221,6 +217,11 @@ export async function verifyLocalChain(
     await read(localProvider, { method: 'eth_blockNumber' }),
     'local block number',
   )
+  const walletBlockNumber = parseRpcQuantity(
+    await read(provider, { method: 'eth_blockNumber' }),
+    'wallet block number',
+  )
+  if (walletBlockNumber !== localBlockNumber) throw localChainMismatch()
   const blockTag = `0x${localBlockNumber.toString(16)}`
   const [localBlockValue, walletBlockValue] = await Promise.all([
     read(localProvider, {
@@ -276,10 +277,7 @@ export async function switchToLocalChain(
       Date.now() + WALLET_READ_TIMEOUT_MS,
       localChainMismatch,
     )
-    if (
-      typeof selectedChainId !== 'string' ||
-      selectedChainId.toLowerCase() !== chainId
-    ) {
+    if (parseChainId(selectedChainId) !== LOCAL_CHAIN_ID) {
       await provider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId }],
@@ -289,7 +287,6 @@ export async function switchToLocalChain(
   await verifyLocalChain(provider, localProvider)
 }
 type TransactionGuard = {
-  assertChain(): Promise<void>
   assertSubmission(): Promise<void>
   chainId: bigint
   release(): void
@@ -380,7 +377,7 @@ async function createTransactionGuard(
     release()
     throw error
   }
-  return { assertChain, assertSubmission, chainId, release }
+  return { assertSubmission, chainId, release }
 }
 async function sendTransaction(
   provider: Eip1193Provider,
@@ -513,6 +510,7 @@ export async function waitForTransactionReceipt(
   options: {
     assertCurrentChain?: () => Promise<void>
     expectedPost?: { author: Address; body: string }
+    expectProtocol?: boolean
     localProvider?: Eip1193Provider
     pollIntervalMs?: number
     selectedChainId?: bigint
@@ -568,6 +566,16 @@ export async function waitForTransactionReceipt(
             )
             await assertCurrentContext()
           }
+          if (!reverted && options.expectProtocol) {
+            const address = PROTOCOL_ADDRESS
+            const code = await getCode(provider, address, deadline, blockTag)
+            await assertCurrentContext()
+            if (keccak256(code) !== PROTOCOL_CODE_HASH) {
+              throw new Error(
+                'The confirmed transaction did not deploy Lifeinvader v1.',
+              )
+            }
+          }
           if (!reverted && options.expectedPost) {
             assertExpectedPost(logs, options.expectedPost)
           }
@@ -610,6 +618,7 @@ export async function deployProtocol(
     )
     return await waitForTransactionReceipt(provider, hash, {
       assertCurrentChain: guard.assertSubmission,
+      expectProtocol: true,
       localProvider,
       selectedChainId: chainId,
     })
