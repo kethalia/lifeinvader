@@ -163,6 +163,7 @@ describe('post reaction projection', () => {
         { account: getAddress(ACCOUNT_B), postId: 7n },
         { account: getAddress(ACCOUNT_A), postId: 8n },
       ],
+      blockHashes: [{ blockHash: hash('block:4'), blockNumber: 4n }],
       progress: {
         likes: {
           blockHash: hash('block:4'),
@@ -196,6 +197,14 @@ describe('post reaction projection', () => {
     expect(() =>
       restored.applyLikeLogs([likeLog(4n, { logIndex: 1 })]),
     ).toThrow(/page boundary/i)
+    expect(() =>
+      restored.applyRepostLogs([
+        {
+          ...repostLog(4n, { postId: 8n }),
+          blockHash: hash('conflicting restored fork'),
+        },
+      ]),
+    ).toThrow(/stream progress block hash/i)
     restored.applyLikeLogs([likeLog(5n)])
     restored.applyRepostLogs([repostLog(4n, { postId: 8n })])
     expect(restored.getSummary(7n, ACCOUNT_A).likeCount).toBe(2n)
@@ -229,6 +238,7 @@ describe('post reaction projection', () => {
     const reversed = {
       ...first.snapshot,
       activeLikes: first.snapshot.activeLikes.toReversed(),
+      blockHashes: first.snapshot.blockHashes.toReversed(),
       repostCounts: first.snapshot.repostCounts.toReversed(),
     }
     expect(getPostReactionProjectionSnapshotDigest(reversed)).toBe(
@@ -247,9 +257,11 @@ describe('post reaction projection', () => {
     const restored = PostReactionProjection.fromSnapshot(snapshot)
 
     snapshot.activeLikes[0]!.postId = 99n
+    snapshot.blockHashes[0]!.blockNumber = 99n
     snapshot.progress.likes!.blockNumber = 99n
     snapshot.repostCounts[0]!.count = 99n
     expect(projection.snapshot.activeLikes[0]!.postId).toBe(7n)
+    expect(projection.snapshot.blockHashes[0]!.blockNumber).toBe(3n)
     expect(restored.getSummary(7n).likeCount).toBe(2n)
     expect(restored.getSummary(7n).repostCount).toBe(1n)
     expect(restored.progress.likes!.blockNumber).toBe(2n)
@@ -272,7 +284,29 @@ describe('post reaction projection', () => {
         ...valid,
         activeLikes: [{ account: 'not-an-address', postId: 7n }],
       },
-      { ...valid, activeLikes: [{ account: ACCOUNT_A, postId: 0n }] },
+      { ...valid, blockHashes: 'not-an-array' },
+      {
+        ...valid,
+        blockHashes: [...valid.blockHashes, valid.blockHashes[0]!],
+      },
+      {
+        ...valid,
+        blockHashes: [{ blockHash: '0x01', blockNumber: 1n }],
+      },
+      {
+        ...valid,
+        blockHashes: valid.blockHashes.filter(
+          ({ blockNumber }) =>
+            blockNumber !== valid.progress.reposts!.blockNumber,
+        ),
+      },
+      {
+        ...valid,
+        blockHashes: [
+          ...valid.blockHashes,
+          { blockHash: hash('completed block'), blockNumber: 1n },
+        ],
+      },
       {
         ...valid,
         progress: { ...valid.progress, likes: undefined },
@@ -343,7 +377,7 @@ describe('post reaction projection', () => {
 
   it('rejects conflicting cross-stream blocks before changing state', () => {
     const likesFirst = new PostReactionProjection()
-    likesFirst.applyLikeLogs([likeLog(2n)])
+    likesFirst.applyLikeLogs([likeLog(2n), likeLog(4n)])
     const likesFirstSnapshot = likesFirst.snapshot
     expect(() =>
       likesFirst.applyRepostLogs([
@@ -360,7 +394,7 @@ describe('post reaction projection', () => {
     expect(likesFirst.snapshot).toEqual(likesFirstSnapshot)
 
     const repostsFirst = new PostReactionProjection()
-    repostsFirst.applyRepostLogs([repostLog(2n)])
+    repostsFirst.applyRepostLogs([repostLog(2n), repostLog(4n)])
     const repostsFirstSnapshot = repostsFirst.snapshot
     expect(() =>
       repostsFirst.applyLikeLogs([
