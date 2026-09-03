@@ -10,6 +10,7 @@ import {
 
 import {
   getRpcErrorCode,
+  parseChainId,
   parseTransactionHash,
   type Eip1193Provider,
   type ProviderRequest,
@@ -56,6 +57,8 @@ export type TransactionReceipt = {
   blockNumber: bigint
   hash: Hash
 }
+
+export type TransactionSubmitted = (hash: Hash) => void
 
 type BlockFingerprint = {
   hash: Hash
@@ -289,16 +292,74 @@ export async function switchToLocalChain(
   await verifyLocalChain(provider, localProvider)
 }
 
+type ChainGuard = {
+  assertCurrent(): Promise<void>
+  chainId: bigint
+  release(): void
+}
+
+function chainChangedError() {
+  return new Error(
+    'The wallet network changed during this action. Check the submitted transaction in your wallet before trying again.',
+  )
+}
+
+async function createChainGuard(
+  provider: Eip1193Provider,
+): Promise<ChainGuard> {
+  const chainId = parseChainId(
+    await provider.request({ method: 'eth_chainId' }),
+  )
+  let changed = false
+  const handleChainChanged = (value: unknown) => {
+    try {
+      if (parseChainId(value) !== chainId) changed = true
+    } catch {
+      changed = true
+    }
+  }
+  provider.on?.('chainChanged', handleChainChanged)
+
+  const release = () =>
+    provider.removeListener?.('chainChanged', handleChainChanged)
+  const assertCurrent = async () => {
+    const currentChainId = parseChainId(
+      await provider.request({ method: 'eth_chainId' }),
+    )
+    if (changed || currentChainId !== chainId) throw chainChangedError()
+  }
+
+  try {
+    await assertCurrent()
+  } catch (error) {
+    release()
+    throw error
+  }
+
+  return { assertCurrent, chainId, release }
+}
+
 async function sendTransaction(
   provider: Eip1193Provider,
   transaction: { data: Hex; from: Address; to: Address },
+  guard: ChainGuard,
+  onSubmitted?: TransactionSubmitted,
 ): Promise<Hash> {
-  return parseTransactionHash(
+  await guard.assertCurrent()
+  const hash = parseTransactionHash(
     await provider.request({
       method: 'eth_sendTransaction',
-      params: [transaction],
+      params: [
+        {
+          ...transaction,
+          chainId: `0x${guard.chainId.toString(16)}`,
+        },
+      ],
     }),
   )
+  onSubmitted?.(hash)
+  await guard.assertCurrent()
+  return hash
 }
 
 function parseReceipt(
@@ -330,54 +391,64 @@ function delay(milliseconds: number) {
 export async function waitForTransactionReceipt(
   provider: Eip1193Provider,
   hash: Hash,
-  options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+  options: {
+    assertCurrentChain?: () => Promise<void>
+    pollIntervalMs?: number
+  } = {},
 ): Promise<TransactionReceipt> {
   const pollIntervalMs = options.pollIntervalMs ?? 1_000
-  const timeoutMs = options.timeoutMs ?? 120_000
-  const deadline = Date.now() + timeoutMs
 
-  while (Date.now() <= deadline) {
-    const receipt = parseReceipt(
-      await provider.request({
+  while (true) {
+    await options.assertCurrentChain?.()
+    let receiptValue: unknown
+    try {
+      receiptValue = await provider.request({
         method: 'eth_getTransactionReceipt',
         params: [hash],
-      }),
-      hash,
-    )
+      })
+    } catch {
+      await delay(pollIntervalMs)
+      continue
+    }
+
+    const receipt = parseReceipt(receiptValue, hash)
     if (receipt) return receipt
     await delay(pollIntervalMs)
   }
-
-  throw new Error('Timed out while waiting for the transaction receipt.')
 }
 
 export async function deployProtocol(
   provider: Eip1193Provider,
   account: Address,
+  onSubmitted?: TransactionSubmitted,
 ): Promise<TransactionReceipt> {
   assertProtocolConfiguration()
-  const inspection = await inspectProtocol(provider)
-  if (inspection.kind === 'ready') {
-    throw new Error('Lifeinvader v1 is already deployed on this chain.')
-  }
-  if (inspection.kind !== 'deployable') {
-    throw new Error('This chain cannot safely deploy Lifeinvader v1.')
-  }
+  const guard = await createChainGuard(provider)
+  try {
+    const inspection = await inspectProtocol(provider)
+    if (inspection.kind === 'ready') {
+      throw new Error('Lifeinvader v1 is already deployed on this chain.')
+    }
+    if (inspection.kind !== 'deployable') {
+      throw new Error('This chain cannot safely deploy Lifeinvader v1.')
+    }
 
-  const hash = await sendTransaction(provider, {
-    data: concatHex([DEPLOYMENT_SALT, LIFEINVADER_INIT_CODE]),
-    from: account,
-    to: FACTORY_ADDRESS,
-  })
-  const receipt = await waitForTransactionReceipt(provider, hash)
-
-  if ((await inspectProtocol(provider)).kind !== 'ready') {
-    throw new Error(
-      'The deployment transaction did not install Lifeinvader v1.',
+    const hash = await sendTransaction(
+      provider,
+      {
+        data: concatHex([DEPLOYMENT_SALT, LIFEINVADER_INIT_CODE]),
+        from: account,
+        to: FACTORY_ADDRESS,
+      },
+      guard,
+      onSubmitted,
     )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertCurrent,
+    })
+  } finally {
+    guard.release()
   }
-
-  return receipt
 }
 
 export function getPostBodyByteLength(body: string): number {
@@ -388,26 +459,39 @@ export async function publishPost(
   provider: Eip1193Provider,
   account: Address,
   body: string,
+  onSubmitted?: TransactionSubmitted,
 ): Promise<TransactionReceipt> {
   const bodyLength = getPostBodyByteLength(body)
   if (bodyLength === 0) throw new Error('Write something before publishing.')
   if (bodyLength > MAX_POST_BODY_BYTES) {
     throw new Error(`Posts are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`)
   }
-  if ((await inspectProtocol(provider)).kind !== 'ready') {
-    throw new Error(
-      'Verified Lifeinvader v1 code is required before publishing.',
-    )
-  }
+  const guard = await createChainGuard(provider)
+  try {
+    if ((await inspectProtocol(provider)).kind !== 'ready') {
+      throw new Error(
+        'Verified Lifeinvader v1 code is required before publishing.',
+      )
+    }
 
-  const hash = await sendTransaction(provider, {
-    data: encodeFunctionData({
-      abi: PUBLISH_POST_ABI,
-      functionName: 'publishPost',
-      args: [body, '0x'],
-    }),
-    from: account,
-    to: PROTOCOL_ADDRESS,
-  })
-  return waitForTransactionReceipt(provider, hash)
+    const hash = await sendTransaction(
+      provider,
+      {
+        data: encodeFunctionData({
+          abi: PUBLISH_POST_ABI,
+          functionName: 'publishPost',
+          args: [body, '0x'],
+        }),
+        from: account,
+        to: PROTOCOL_ADDRESS,
+      },
+      guard,
+      onSubmitted,
+    )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertCurrent,
+    })
+  } finally {
+    guard.release()
+  }
 }

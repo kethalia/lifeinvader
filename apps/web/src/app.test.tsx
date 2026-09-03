@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -8,8 +9,18 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
-import { FACTORY_ADDRESS, PROTOCOL_ADDRESS } from './protocol'
+import {
+  FACTORY_ADDRESS,
+  LIFEINVADER_INIT_CODE,
+  PROTOCOL_ADDRESS,
+} from './protocol'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
+
+const FACTORY_RUNTIME_CODE =
+  '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
+const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
+const TRANSACTION_HASH =
+  '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 afterEach(() => {
   cleanup()
@@ -144,6 +155,88 @@ describe('App', () => {
       screen.queryByRole('button', { name: /deploy protocol here/i }),
     ).toBeNull()
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
+
+    window.removeEventListener('eip6963:requestProvider', announce)
+  })
+
+  it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
+    let deployed = false
+    let failNextInspection = false
+    let resolveReceipt: ((value: unknown) => void) | undefined
+    const receiptResponse = new Promise<unknown>((resolve) => {
+      resolveReceipt = resolve
+    })
+    const provider = {
+      request: vi.fn(
+        async ({ method, params }: { method: string; params?: unknown }) => {
+          if (method === 'eth_requestAccounts') {
+            return ['0x000000000000000000000000000000000000a11c']
+          }
+          if (method === 'eth_chainId') return '0x1'
+          if (method === 'eth_getCode') {
+            if (failNextInspection) {
+              failNextInspection = false
+              throw new Error('Temporary RPC outage.')
+            }
+            const [address] = params as [string]
+            if (address === PROTOCOL_ADDRESS) {
+              return deployed ? PROTOCOL_RUNTIME_CODE : '0x'
+            }
+            if (address === FACTORY_ADDRESS) return FACTORY_RUNTIME_CODE
+          }
+          if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+          if (method === 'eth_getTransactionReceipt') {
+            const result = await receiptResponse
+            deployed = true
+            failNextInspection = true
+            return result
+          }
+          throw new Error(`Unexpected method: ${method}`)
+        },
+      ),
+    }
+    const announce = () => {
+      window.dispatchEvent(
+        new CustomEvent('eip6963:announceProvider', {
+          detail: {
+            info: { name: 'Pending Wallet', uuid: 'pending-wallet' },
+            provider,
+          },
+        }),
+      )
+    }
+    window.addEventListener('eip6963:requestProvider', announce)
+
+    render(<App />)
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect pending wallet/i,
+      }),
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: /deploy protocol here/i }),
+    )
+
+    expect(await screen.findByText(/deployment submitted/i)).toBeTruthy()
+    expect(screen.getByTitle(TRANSACTION_HASH)).toBeTruthy()
+    expect(
+      screen
+        .getByRole('button', { name: /deploying/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
+
+    await act(async () => {
+      resolveReceipt?.({ blockNumber: '0x2a', status: '0x1' })
+    })
+
+    expect(await screen.findByText(/confirmed in block 42/i)).toBeTruthy()
+    const retryButton = await screen.findByRole('button', {
+      name: /retry verification/i,
+    })
+    fireEvent.click(retryButton)
+    expect(
+      await screen.findByText(/verified Lifeinvader v1 code is ready/i),
+    ).toBeTruthy()
 
     window.removeEventListener('eip6963:requestProvider', announce)
   })

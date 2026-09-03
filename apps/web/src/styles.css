@@ -343,6 +343,7 @@ h1 span {
 .protocol-address,
 .compose-actions,
 .transaction-result,
+.transaction-pending,
 .error-message {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
@@ -405,6 +406,12 @@ h1 span {
   margin: 1rem 0 0;
   padding: 1rem;
   border: 1px solid currentColor;
+}
+
+.transaction-pending {
+  color: var(--ink);
+  background: rgba(232, 255, 0, 0.32);
+  font-weight: 800;
 }
 
 .transaction-result {

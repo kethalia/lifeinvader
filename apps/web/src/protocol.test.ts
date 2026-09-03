@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import {
   assertProtocolConfiguration,
+  deployProtocol,
   FACTORY_ADDRESS,
   FACTORY_CODE_HASH,
   getPostBodyByteLength,
@@ -130,6 +131,85 @@ describe('post transactions', () => {
     await expect(
       waitForTransactionReceipt(provider, TRANSACTION_HASH),
     ).rejects.toThrow(/reverted on-chain/i)
+  })
+})
+
+describe('transaction chain binding', () => {
+  it('does not open the transaction request after the inspected chain changes', async () => {
+    let handleChainChanged: ((...args: unknown[]) => void) | undefined
+    const request = vi.fn(async ({ method, params }: ProviderRequest) => {
+      if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_getCode') {
+        const [address] = params as readonly string[]
+        if (address === PROTOCOL_ADDRESS) return '0x'
+        if (address === FACTORY_ADDRESS) {
+          handleChainChanged?.('0x2')
+          return FACTORY_RUNTIME_CODE
+        }
+      }
+      if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+      throw new Error(`Unexpected method: ${method}`)
+    })
+
+    await expect(
+      deployProtocol(
+        {
+          request,
+          on: (_event, listener) => {
+            handleChainChanged = listener
+          },
+          removeListener: () => {
+            handleChainChanged = undefined
+          },
+        },
+        ACCOUNT,
+      ),
+    ).rejects.toThrow(/network changed/i)
+    expect(
+      request.mock.calls.some(
+        ([request]) => request.method === 'eth_sendTransaction',
+      ),
+    ).toBe(false)
+  })
+
+  it('reports the hash when the wallet changes chain during submission', async () => {
+    let handleChainChanged: ((...args: unknown[]) => void) | undefined
+    const onSubmitted = vi.fn()
+    const request = vi.fn(async ({ method, params }: ProviderRequest) => {
+      if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_getCode') {
+        const [address] = params as readonly string[]
+        return address === PROTOCOL_ADDRESS ? '0x' : FACTORY_RUNTIME_CODE
+      }
+      if (method === 'eth_sendTransaction') {
+        expect(params).toEqual([expect.objectContaining({ chainId: '0x1' })])
+        handleChainChanged?.('0x2')
+        return TRANSACTION_HASH
+      }
+      throw new Error(`Unexpected method: ${method}`)
+    })
+
+    await expect(
+      deployProtocol(
+        {
+          request,
+          on: (_event, listener) => {
+            handleChainChanged = listener
+          },
+          removeListener: () => {
+            handleChainChanged = undefined
+          },
+        },
+        ACCOUNT,
+        onSubmitted,
+      ),
+    ).rejects.toThrow(/network changed/i)
+    expect(onSubmitted).toHaveBeenCalledWith(TRANSACTION_HASH)
+    expect(
+      request.mock.calls.some(
+        ([request]) => request.method === 'eth_getTransactionReceipt',
+      ),
+    ).toBe(false)
   })
 })
 
