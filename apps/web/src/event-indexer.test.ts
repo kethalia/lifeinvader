@@ -456,6 +456,52 @@ describe('untrusted RPC and cursor data', () => {
     ).rejects.toThrow(/duplicate event log/i)
   })
 
+  it('rejects transaction indexes that contradict canonical log order', async () => {
+    const { provider } = chainProvider({
+      head: () => 0n,
+      getLogs: () => [
+        rpcLog(0n, {
+          logIndex: 0,
+          overrides: { transactionIndex: '0x1' },
+        }),
+        rpcLog(0n, {
+          logIndex: 1,
+          overrides: { transactionIndex: '0x0' },
+        }),
+      ],
+    })
+    await expect(
+      syncEventLogs(provider, FILTER, eventCursor(0n, 1), {
+        maxRangeSize: 1,
+        maxRanges: 1,
+      }),
+    ).rejects.toThrow(/transaction index order/i)
+  })
+
+  it('requires every positional wildcard topic to exist', async () => {
+    const filter = {
+      address: PROTOCOL_ADDRESS,
+      topics: [TOPIC, null],
+    } as const
+    const cursor = createEventCursor({
+      chainId: 1n,
+      filter,
+      finalityDepth: 0n,
+      rangeSize: 1,
+      startBlock: 0n,
+    })
+    const { provider } = chainProvider({
+      head: () => 0n,
+      getLogs: () => [rpcLog(0n)],
+    })
+    await expect(
+      syncEventLogs(provider, filter, cursor, {
+        maxRangeSize: 1,
+        maxRanges: 1,
+      }),
+    ).rejects.toThrow(/event log topics/i)
+  })
+
   it('rejects mixed block hashes at one height', async () => {
     const { provider } = chainProvider({
       head: () => 0n,

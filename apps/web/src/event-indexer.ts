@@ -321,6 +321,7 @@ function topicsMatch(
   actual: readonly Hex[],
   expected: NormalizedEventLogFilter,
 ) {
+  if (actual.length < expected.topics.length) return false
   return expected.topics.every((topic, index) => {
     if (topic === null) return true
     const actualTopic = actual[index]
@@ -388,10 +389,23 @@ function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
   if (first.blockNumber !== second.blockNumber) {
     return first.blockNumber < second.blockNumber ? -1 : 1
   }
-  if (first.transactionIndex !== second.transactionIndex) {
-    return first.transactionIndex - second.transactionIndex
-  }
   return first.logIndex - second.logIndex
+}
+export function eventTransactionOrderMatchesLogOrder(
+  first: IndexedEventLog,
+  second: IndexedEventLog,
+) {
+  if (
+    first.blockNumber !== second.blockNumber ||
+    first.logIndex === second.logIndex ||
+    first.transactionIndex === second.transactionIndex
+  ) {
+    return true
+  }
+  const logIndexesAscending = first.logIndex < second.logIndex
+  const transactionIndexesAscending =
+    first.transactionIndex < second.transactionIndex
+  return logIndexesAscending === transactionIndexesAscending
 }
 function parseLogs(
   value: readonly unknown[],
@@ -412,7 +426,13 @@ function parseLogs(
     blockHashes.set(log.blockNumber, log.blockHash)
     uniqueLogs.set(key, log)
   }
-  return [...uniqueLogs.values()].toSorted(compareLogs)
+  const logs = [...uniqueLogs.values()].toSorted(compareLogs)
+  for (let index = 1; index < logs.length; index += 1) {
+    if (!eventTransactionOrderMatchesLogOrder(logs[index - 1]!, logs[index]!)) {
+      throw invalidRpc('event transaction index order')
+    }
+  }
+  return logs
 }
 function validateNormalizedIndex(value: unknown, field: string) {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {

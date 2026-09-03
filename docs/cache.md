@@ -26,7 +26,7 @@ The cache stores three record families:
 
 Each cache instance is bound to a normalized address/topic filter. The persisted copy is revalidated against that filter before cached logs are returned. The generation is a random 256-bit value created with browser Web Crypto. It stays stable while its independent scope record is valid. Separating it from the cursor means cursor-record loss cannot recreate an old compare-and-swap token; if the scope record itself is corrupt, recovery rotates to a fresh generation.
 
-The position key is `(blockNumber, transactionIndex, logIndex)`. Fixed-width hexadecimal components preserve numeric order in IndexedDB without using unsupported `bigint` keys. A unique `(scope, blockNumber, logIndex)` identity index prevents the same EVM log from being stored under conflicting transaction positions. A separate scope index reaches every record for validation and cleanup even if corruption changes `position` to another valid IndexedDB key type. The log itself retains bigint quantities and is validated again after structured cloning.
+The position key is `(blockNumber, logIndex)`, because `logIndex` is the canonical block-wide event order. Fixed-width hexadecimal components preserve numeric order in IndexedDB without using unsupported `bigint` keys. A unique `(scope, blockNumber, logIndex)` identity index prevents the same EVM log from being stored under an alternate corrupted position and provides a seekable rollback order. A separate scope index reaches every record for validation and full cleanup even if corruption changes `position` to another valid IndexedDB key type. The log itself retains bigint quantities and is validated again after structured cloning; transaction indexes must remain monotonic with log indexes but never determine event order.
 
 Reads use a descending key cursor and stop after 50 records by default. Callers may request at most 200 records in one page. There is no `getAll` or unbounded local history load.
 
@@ -40,7 +40,7 @@ Applying a synchronization result uses one read-write transaction across scope, 
 4. Insert the validated canonical replacement and addition logs.
 5. Store the returned cursor and incremented revision.
 
-The transaction either commits all five effects or none. Reorg rollback traverses only the local scope index, validates each stored record, and never expands the RPC query range. The generation and revision prevent an ABA race when a reorg returns the cursor fields to an earlier value, so a stale tab cannot overwrite newer canonical history.
+The transaction either commits all five effects or none. Reorg rollback seeks directly to `rollbackTo` in the ordered identity index, traverses only the affected suffix newest-first, validates each affected record, and never expands the RPC query range. Full resets and explicit clears continue to traverse the separate scope index so malformed primary-key types cannot escape cleanup. The generation and revision prevent an ABA race when a reorg returns the cursor fields to an earlier value, so a stale tab cannot overwrite newer canonical history.
 
 ## Corruption and recovery
 

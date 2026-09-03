@@ -1,4 +1,5 @@
 import {
+  eventTransactionOrderMatchesLogOrder,
   indexedEventLogMatchesFilter,
   normalizeEventLogFilter,
   validateEventCursor,
@@ -10,7 +11,7 @@ import {
   type NormalizedEventLogFilter,
 } from './event-indexer'
 
-const CACHE_SCHEMA_VERSION = 5
+const CACHE_SCHEMA_VERSION = 6
 const DEFAULT_DATABASE_NAME = 'lifeinvader-event-cache'
 const SCOPE_STORE = 'scopes'
 const CURSOR_STORE = 'cursors'
@@ -124,13 +125,10 @@ function fixedHex(value: bigint | number, width: number) {
   return encoded.padStart(width, '0')
 }
 function getLogPosition(log: IndexedEventLog) {
-  return `${fixedHex(log.blockNumber, 64)}:${fixedHex(
-    log.transactionIndex,
-    16,
-  )}:${fixedHex(log.logIndex, 16)}`
+  return `${fixedHex(log.blockNumber, 64)}:${fixedHex(log.logIndex, 16)}`
 }
 function getLogIdentity(log: IndexedEventLog) {
-  return `${fixedHex(log.blockNumber, 64)}:${fixedHex(log.logIndex, 16)}`
+  return getLogPosition(log)
 }
 function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
   const firstPosition = getLogPosition(first)
@@ -144,6 +142,7 @@ function getLogStreamProblem(
   filter: NormalizedEventLogFilter,
 ) {
   const identities = new Set<string>()
+  let previous: IndexedEventLog | undefined
   const blockHashes = new Map(
     cursor.checkpoints.map((checkpoint) => [
       checkpoint.blockNumber.toString(),
@@ -155,6 +154,9 @@ function getLogStreamProblem(
     const identity = getLogIdentity(log)
     if (identities.has(identity)) return 'duplicate block/log-index pairs'
     identities.add(identity)
+    if (previous && !eventTransactionOrderMatchesLogOrder(previous, log)) {
+      return 'inconsistent transaction indexes'
+    }
     const block = log.blockNumber.toString()
     const blockHash = log.blockHash.toLowerCase()
     const knownHash = blockHashes.get(block)
@@ -162,6 +164,7 @@ function getLogStreamProblem(
       return 'conflicting block hashes'
     }
     blockHashes.set(block, blockHash)
+    previous = log
   }
   return undefined
 }
@@ -409,8 +412,16 @@ export class BrowserEventCache {
       ) {
         throw cacheError('The event sync batch contains an out-of-range log.')
       }
-      if (index > 0 && compareLogs(logs[index - 1]!, log) >= 0) {
-        throw cacheError('The event sync batch is not canonically ordered.')
+      if (index > 0) {
+        const order = compareLogs(logs[index - 1]!, log)
+        if (order === 0) {
+          throw cacheError(
+            'The event sync batch has duplicate block/log-index pairs.',
+          )
+        }
+        if (order > 0) {
+          throw cacheError('The event sync batch is not canonically ordered.')
+        }
       }
     }
     const streamProblem = getLogStreamProblem(logs, nextCursor, this.#filter)
@@ -728,8 +739,14 @@ export class BrowserEventCache {
           }
           if (rollbackTo !== undefined) {
             const rollbackRequest = logStore
-              .index(LOG_SCOPE_INDEX)
-              .openCursor(this.#keyRange.only(scope))
+              .index(LOG_IDENTITY_INDEX)
+              .openCursor(
+                this.#keyRange.bound(
+                  [scope, `${fixedHex(rollbackTo, 64)}:${'0'.repeat(16)}`],
+                  [scope, '\uffff'],
+                ),
+                'prev',
+              )
             rollbackRequest.onsuccess = () => {
               const rollbackCursor = rollbackRequest.result
               if (!rollbackCursor) {

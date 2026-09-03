@@ -9,6 +9,7 @@ import {
 import {
   createEventCursor,
   type EventCursor,
+  type EventLogFilter,
   type EventSyncResult,
   type IndexedEventLog,
 } from './event-indexer'
@@ -30,10 +31,10 @@ function blockHash(blockNumber: bigint, branch = 'a') {
 function transactionHash(blockNumber: bigint, logIndex = 0) {
   return keccak256(stringToHex(`transaction:${blockNumber}:${logIndex}`))
 }
-function seedCursor() {
+function seedCursor(filter: EventLogFilter = FILTER) {
   return createEventCursor({
     chainId: 1n,
-    filter: FILTER,
+    filter,
     finalityDepth: 12n,
     rangeSize: 4,
     startBlock: 0n,
@@ -52,7 +53,11 @@ function cursorAt(seed: EventCursor, nextBlock: bigint, branch = 'a') {
 }
 function eventLog(
   blockNumber: bigint,
-  options: { branch?: string; logIndex?: number } = {},
+  options: {
+    branch?: string
+    logIndex?: number
+    transactionIndex?: number
+  } = {},
 ): IndexedEventLog {
   const logIndex = options.logIndex ?? 0
   return {
@@ -63,7 +68,7 @@ function eventLog(
     logIndex,
     topics: [POST_PUBLISHED_TOPIC],
     transactionHash: transactionHash(blockNumber, logIndex),
-    transactionIndex: 0,
+    transactionIndex: options.transactionIndex ?? 0,
   }
 }
 function logIdentity(log: IndexedEventLog) {
@@ -86,11 +91,14 @@ function syncResult(
     scannedRanges: 1,
   }
 }
-async function createCache(factory = new IDBFactory()) {
+async function createCache(
+  factory = new IDBFactory(),
+  filter: EventLogFilter = FILTER,
+) {
   cache = await openEventCache({
     databaseName: 'lifeinvader-event-cache-test',
     factory,
-    filter: FILTER,
+    filter,
     keyRange: IDBKeyRange,
   })
   return { cache, factory }
@@ -101,7 +109,7 @@ async function putRawRecord(
   value: Record<string, unknown>,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 5)
+    const request = factory.open('lifeinvader-event-cache-test', 6)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -122,7 +130,7 @@ async function deleteRawRecord(
   key: IDBValidKey,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 5)
+    const request = factory.open('lifeinvader-event-cache-test', 6)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -136,7 +144,7 @@ async function deleteRawRecord(
 }
 async function countRawScopeLogs(factory: IDBFactory, scope: string) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 5)
+    const request = factory.open('lifeinvader-event-cache-test', 6)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -285,12 +293,12 @@ describe('browser event cache', () => {
     const log = eventLog(1n)
     const initial = await opened.readLatest(seed)
     await opened.apply(initial, syncResult(next, [log]))
-    const position = `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(16)}`
+    const position = `${'0'.repeat(63)}1:${'0'.repeat(16)}`
     await putRawRecord(factory, 'logs', {
       identity: logIdentity(log),
       log: { ...log, data: '0x1' },
       position,
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
     expect(await opened.readLatest(seed)).toEqual({
@@ -315,8 +323,8 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'logs', {
       identity: logIdentity(corruptLog),
       log: { ...corruptLog, data: '0x1' },
-      position: `${'0'.repeat(63)}2:${'0'.repeat(16)}:${'0'.repeat(16)}`,
-      schemaVersion: 5,
+      position: `${'0'.repeat(63)}2:${'0'.repeat(16)}`,
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -418,7 +426,7 @@ describe('browser event cache', () => {
       filter: { address: OTHER_ADDRESS, topics: [POST_PUBLISHED_TOPIC] },
       generation: stale.generation,
       revision: stale.revision,
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -441,7 +449,7 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     await putRawRecord(factory, 'cursors', {
       cursor: cursorAt(seed, 2n),
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -460,7 +468,7 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     await putRawRecord(factory, 'cursors', {
       cursor: cursorAt(seed, 2n),
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -484,8 +492,32 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'logs', {
       identity: logIdentity(conflict),
       log: conflict,
-      position: `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(15)}1`,
-      schemaVersion: 5,
+      position: `${'0'.repeat(63)}1:${'0'.repeat(15)}1`,
+      schemaVersion: 6,
+      scope: getEventCacheScope(seed),
+    })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('resets cached logs whose transaction indexes contradict log order', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    const first = eventLog(1n, { transactionIndex: 1 })
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [first]))
+    const second = eventLog(1n, { logIndex: 1, transactionIndex: 0 })
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(second),
+      log: second,
+      position: logIdentity(second),
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -507,8 +539,8 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'logs', {
       identity: logIdentity(conflict),
       log: conflict,
-      position: `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(16)}`,
-      schemaVersion: 5,
+      position: `${'0'.repeat(63)}1:${'0'.repeat(16)}`,
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -533,7 +565,7 @@ describe('browser event cache', () => {
         identity: logIdentity(duplicate),
         log: duplicate,
         position: `${'0'.repeat(63)}1:${'0'.repeat(15)}1:${'0'.repeat(16)}`,
-        schemaVersion: 5,
+        schemaVersion: 6,
         scope: getEventCacheScope(seed),
       }),
     ).rejects.toMatchObject({ name: 'ConstraintError' })
@@ -556,8 +588,39 @@ describe('browser event cache', () => {
     await putRawRecord(factory, 'logs', {
       identity: logIdentity(eventLog(2n)),
       log: unrelated,
-      position: `${'0'.repeat(63)}2:${'0'.repeat(16)}:${'0'.repeat(16)}`,
-      schemaVersion: 5,
+      position: `${'0'.repeat(63)}2:${'0'.repeat(16)}`,
+      schemaVersion: 6,
+      scope: getEventCacheScope(seed),
+    })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('requires cached logs to contain wildcard topic positions', async () => {
+    const filter = {
+      address: PROTOCOL_ADDRESS,
+      topics: [POST_PUBLISHED_TOPIC, null],
+    } as const
+    const factory = new IDBFactory()
+    const { cache: opened } = await createCache(factory, filter)
+    const seed = seedCursor(filter)
+    const initial = await opened.readLatest(seed)
+    const valid = {
+      ...eventLog(1n),
+      topics: [POST_PUBLISHED_TOPIC, OTHER_TOPIC],
+    } as const
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [valid]))
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(valid),
+      log: { ...valid, topics: [POST_PUBLISHED_TOPIC] },
+      position: logIdentity(valid),
+      schemaVersion: 6,
       scope: getEventCacheScope(seed),
     })
 
@@ -579,7 +642,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(0n)),
       log: eventLog(0n),
       position: 7,
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope,
     })
 
@@ -602,7 +665,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(0n)),
       log: eventLog(0n),
       position: 7,
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope,
     })
     expect(await countRawScopeLogs(factory, scope)).toBe(1)
@@ -622,7 +685,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(2n)),
       log: eventLog(2n),
       position: 7,
-      schemaVersion: 5,
+      schemaVersion: 6,
       scope,
     })
 
@@ -642,6 +705,31 @@ describe('browser event cache', () => {
       logs: [],
       revision: 2n,
     })
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
+  })
+
+  it('seeks directly to the affected rollback suffix', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const active = await opened.readLatest(seed)
+    const scope = getEventCacheScope(seed)
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(eventLog(0n)),
+      log: eventLog(0n),
+      position: 7,
+      schemaVersion: 6,
+      scope,
+    })
+
+    await opened.apply(
+      active,
+      syncResult(cursorAt(seed, 4n, 'b'), [eventLog(2n, { branch: 'b' })], 2n),
+    )
+    expect(await countRawScopeLogs(factory, scope)).toBe(3)
+
+    await opened.clear(seed)
     expect(await countRawScopeLogs(factory, scope)).toBe(0)
   })
 
@@ -680,6 +768,15 @@ describe('browser event cache', () => {
         ]),
       ),
     ).rejects.toThrow(/duplicate block\/log-index/i)
+    await expect(
+      opened.apply(
+        initial,
+        syncResult(next, [
+          eventLog(1n, { transactionIndex: 1 }),
+          eventLog(1n, { logIndex: 1, transactionIndex: 0 }),
+        ]),
+      ),
+    ).rejects.toThrow(/transaction indexes/i)
     await expect(
       opened.apply(
         initial,

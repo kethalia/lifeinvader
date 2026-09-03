@@ -57,11 +57,13 @@ Only the latest 64 checkpoints are retained. Their newest canonical hash commits
 
 ## Untrusted RPC data
 
-RPC responses are treated as external input. Quantities must use canonical bounded hexadecimal encoding. Hashes, addresses, data, topics, block membership, transaction indexes, log indexes, removal state, filter membership, and duplicate positions are validated locally. Logs are sorted by:
+RPC responses are treated as external input. Quantities must use canonical bounded hexadecimal encoding. Hashes, addresses, data, topics, block membership, transaction indexes, log indexes, removal state, filter membership, and duplicate positions are validated locally. A positional wildcard still requires that topic position to exist. Logs are sorted by the block-wide canonical event order:
 
 ```text
-(blockNumber, transactionIndex, logIndex)
+(blockNumber, logIndex)
 ```
+
+Within a block, transaction indexes must be monotonic with that order. They are retained as validated metadata but never control reducer order.
 
 Malformed or mismatched responses fail the invocation without mutating the input cursor. The cache layer must likewise treat persisted cursor and log records as disposable and versioned.
 
