@@ -236,7 +236,10 @@ function assertTransactionHashesBelongToOneBlock(
   }
 }
 
-function assertConsistentProfileMetadata(profiles: readonly ProfileSet[]) {
+function assertConsistentProfileMetadata(
+  profiles: readonly ProfileSet[],
+  label: string,
+) {
   const blockHashes = new Map<bigint, Hash>()
   const positions = new Set<string>()
   const ordered = profiles.toSorted((first, second) =>
@@ -245,16 +248,16 @@ function assertConsistentProfileMetadata(profiles: readonly ProfileSet[]) {
   for (const profile of ordered) {
     const position = `${profile.blockNumber.toString()}:${profile.logIndex.toString()}`
     if (positions.has(position)) {
-      throw projectionError('snapshot duplicate log position')
+      throw projectionError(`${label} duplicate log position`)
     }
     positions.add(position)
     const knownHash = blockHashes.get(profile.blockNumber)
     if (knownHash !== undefined && knownHash !== profile.blockHash) {
-      throw projectionError('snapshot profile block hash')
+      throw projectionError(`${label} profile block hash`)
     }
     blockHashes.set(profile.blockNumber, profile.blockHash)
   }
-  assertTransactionHashesBelongToOneBlock(ordered, 'snapshot')
+  assertTransactionHashesBelongToOneBlock(ordered, label)
   const logs = ordered.map((profile): IndexedEventLog => ({
     address: PROTOCOL_ADDRESS,
     blockHash: profile.blockHash,
@@ -266,7 +269,21 @@ function assertConsistentProfileMetadata(profiles: readonly ProfileSet[]) {
     transactionIndex: profile.transactionIndex,
   }))
   if (!eventTransactionsAreConsistent(logs)) {
-    throw projectionError('snapshot transaction metadata')
+    throw projectionError(`${label} transaction metadata`)
+  }
+}
+
+function assertCheckpointMatchesProfiles(
+  checkpoint: EventCheckpoint,
+  profiles: Iterable<ProfileSet>,
+) {
+  for (const profile of profiles) {
+    if (
+      profile.blockNumber === checkpoint.blockNumber &&
+      profile.blockHash !== checkpoint.blockHash
+    ) {
+      throw projectionError('snapshot confirmation profile block hash')
+    }
   }
 }
 
@@ -309,7 +326,10 @@ function normalizeSnapshot(value: unknown): ProfileProjectionSnapshot {
       assertProfileBeforeBoundary(profile, last)
     }
   }
-  assertConsistentProfileMetadata([...profiles.values()])
+  if (confirmedThrough) {
+    assertCheckpointMatchesProfiles(confirmedThrough, profiles.values())
+  }
+  assertConsistentProfileMetadata([...profiles.values()], 'snapshot')
   return {
     accounts,
     ...(confirmedThrough ? { confirmedThrough } : {}),
@@ -517,6 +537,9 @@ export class ProfileProjection {
       const key = profile.account.toLowerCase()
       if (this.#tracked.has(key)) updates.set(key, profile)
     }
+    const retainedProfiles = new Map(this.#profiles)
+    for (const [key, profile] of updates) retainedProfiles.set(key, profile)
+    assertConsistentProfileMetadata([...retainedProfiles.values()], 'retained')
     for (const [key, profile] of updates) {
       this.#profiles.set(key, copyProfile(profile))
     }

@@ -383,6 +383,54 @@ describe('profile projection', () => {
     }
   })
 
+  it('matches older confirmations to retained profiles at that height', () => {
+    const projection = new ProfileProjection([ACCOUNT_A, ACCOUNT_B])
+    projection.applyLogs([
+      profileLog(1n, { account: ACCOUNT_A }),
+      profileLog(2n, { account: ACCOUNT_B }),
+      profileLog(3n, { account: ACCOUNT_C }),
+    ])
+    const snapshot = projection.snapshot
+    expect(snapshot.last?.blockNumber).toBe(3n)
+    expect(() =>
+      ProfileProjection.fromSnapshot({
+        ...snapshot,
+        confirmedThrough: {
+          blockHash: hash('wrong block:2 fork'),
+          blockNumber: 2n,
+        },
+      }),
+    ).toThrow(/confirmation profile block hash/i)
+    expect(() =>
+      ProfileProjection.fromSnapshot({
+        ...snapshot,
+        confirmedThrough: {
+          blockHash: hash('block:2'),
+          blockNumber: 2n,
+        },
+      }),
+    ).not.toThrow()
+  })
+
+  it('validates merged retained metadata before applying a later page', () => {
+    const projection = new ProfileProjection([ACCOUNT_A, ACCOUNT_B])
+    const reusedTransactionHash = hash('cross-page transaction')
+    projection.applyLogs([
+      profileLog(1n, { transactionHash: reusedTransactionHash }),
+    ])
+    const snapshot = projection.snapshot
+
+    expect(() =>
+      projection.applyLogs([
+        profileLog(2n, {
+          account: ACCOUNT_B,
+          transactionHash: reusedTransactionHash,
+        }),
+      ]),
+    ).toThrow(/retained transaction block/i)
+    expect(projection.snapshot).toEqual(snapshot)
+  })
+
   it('applies pages atomically and enforces complete-block ordering', () => {
     const projection = new ProfileProjection([ACCOUNT_A, ACCOUNT_B])
     projection.applyLogs([profileLog(1n)])
