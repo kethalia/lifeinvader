@@ -11,6 +11,7 @@ import {
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
+import { PostReactionProjection } from './post-reaction-projection'
 import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
 import { parseMediaCid } from './media-cid'
@@ -224,6 +225,15 @@ describe('wallet transaction helpers on Anvil', () => {
     await projection.advance()
     await projection.advance()
     expect(projection.getSummary(1n, account)).toEqual({
+      likeCount: 0n,
+      likedByAccount: false,
+      repostCount: 1n,
+    })
+    expect(
+      PostReactionProjection.fromSnapshot(
+        projection.projectionSnapshot,
+      ).getSummary(1n, account),
+    ).toEqual({
       likeCount: 0n,
       likedByAccount: false,
       repostCount: 1n,

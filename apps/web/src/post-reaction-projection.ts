@@ -1,4 +1,11 @@
-import { getAddress, isAddress, type Address, type Hash } from 'viem'
+import {
+  getAddress,
+  isAddress,
+  keccak256,
+  stringToHex,
+  type Address,
+  type Hash,
+} from 'viem'
 import {
   eventTransactionsAreConsistent,
   validateIndexedEventLog,
@@ -12,6 +19,7 @@ import {
 } from './protocol-events'
 
 export const MAX_POST_REACTION_PROJECTION_PAGE_LOGS = 5_199
+export const POST_REACTION_PROJECTION_SNAPSHOT_VERSION = 1
 
 const MAX_UINT256 = (1n << 256n) - 1n
 
@@ -32,13 +40,42 @@ export type PostReactionSummary = {
   repostCount: bigint
 }
 
+export type PostReactionProjectionActiveLike = {
+  account: Address
+  postId: bigint
+}
+
+export type PostReactionProjectionRepostCount = {
+  count: bigint
+  postId: bigint
+}
+
+export type PostReactionProjectionBlockFingerprint = {
+  blockHash: Hash
+  blockNumber: bigint
+}
+
+export type PostReactionProjectionSnapshot = {
+  activeLikes: readonly PostReactionProjectionActiveLike[]
+  blockHashes: readonly PostReactionProjectionBlockFingerprint[]
+  confirmedThrough?: PostReactionProjectionBlockFingerprint
+  progress: PostReactionProjectionProgress
+  repostCounts: readonly PostReactionProjectionRepostCount[]
+  schemaVersion: typeof POST_REACTION_PROJECTION_SNAPSHOT_VERSION
+}
+
 type DecodedPage<Event> = {
+  blockHashes: ReadonlyMap<bigint, Hash>
   events: readonly Event[]
   last?: PostReactionProjectionPosition
 }
 
 function projectionError(message: string) {
   return new Error(`Invalid post reaction projection ${message}.`)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
@@ -60,9 +97,65 @@ function copyPosition(position: PostReactionProjectionPosition) {
   return { ...position }
 }
 
+function copyBlockFingerprint(
+  fingerprint: PostReactionProjectionBlockFingerprint,
+) {
+  return { ...fingerprint }
+}
+
+function assertCompatibleProjectionPage(
+  page: DecodedPage<unknown>,
+  retainedBlockHashes: ReadonlyMap<bigint, Hash>,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  for (const [blockNumber, blockHash] of page.blockHashes) {
+    const retainedHash = retainedBlockHashes.get(blockNumber)
+    if (
+      (retainedHash !== undefined && retainedHash !== blockHash) ||
+      (confirmedThrough?.blockNumber === blockNumber &&
+        confirmedThrough.blockHash !== blockHash)
+    ) {
+      throw projectionError('stream progress block hash')
+    }
+  }
+}
+
+function normalizePosition(
+  value: unknown,
+  label: string,
+): PostReactionProjectionPosition | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw projectionError(`${label} snapshot position`)
+  if (
+    typeof value.blockHash !== 'string' ||
+    !/^0x[0-9a-f]{64}$/i.test(value.blockHash)
+  ) {
+    throw projectionError(`${label} snapshot block hash`)
+  }
+  if (
+    typeof value.blockNumber !== 'bigint' ||
+    value.blockNumber < 0n ||
+    value.blockNumber > MAX_UINT256
+  ) {
+    throw projectionError(`${label} snapshot block number`)
+  }
+  if (
+    typeof value.logIndex !== 'number' ||
+    !Number.isSafeInteger(value.logIndex) ||
+    value.logIndex < 0
+  ) {
+    throw projectionError(`${label} snapshot log index`)
+  }
+  return {
+    blockHash: value.blockHash.toLowerCase() as Hash,
+    blockNumber: value.blockNumber,
+    logIndex: value.logIndex,
+  }
+}
+
 function decodePage<Event>(
   value: unknown,
-  previous: PostReactionProjectionPosition | undefined,
+  previous: { blockNumber: bigint } | undefined,
   decode: (log: IndexedEventLog) => Event | undefined,
   label: string,
 ): DecodedPage<Event> {
@@ -114,6 +207,7 @@ function decodePage<Event>(
     }
   })
   return {
+    blockHashes,
     events,
     last: logs.length > 0 ? getPosition(logs.at(-1)!) : undefined,
   }
@@ -141,12 +235,318 @@ function getLikeKey(postId: bigint, account: Address) {
   return `${getPostKey(postId)}:${account.toLowerCase()}`
 }
 
+function compareActiveLikes(
+  first: PostReactionProjectionActiveLike,
+  second: PostReactionProjectionActiveLike,
+) {
+  if (first.postId !== second.postId)
+    return first.postId < second.postId ? -1 : 1
+  const firstAccount = first.account.toLowerCase()
+  const secondAccount = second.account.toLowerCase()
+  if (firstAccount === secondAccount) return 0
+  return firstAccount < secondAccount ? -1 : 1
+}
+
+function compareRepostCounts(
+  first: PostReactionProjectionRepostCount,
+  second: PostReactionProjectionRepostCount,
+) {
+  if (first.postId === second.postId) return 0
+  return first.postId < second.postId ? -1 : 1
+}
+
+function compareBlockFingerprints(
+  first: PostReactionProjectionBlockFingerprint,
+  second: PostReactionProjectionBlockFingerprint,
+) {
+  if (first.blockNumber === second.blockNumber) return 0
+  return first.blockNumber < second.blockNumber ? -1 : 1
+}
+
+function decodeLikeKey(key: string): PostReactionProjectionActiveLike {
+  const separator = key.indexOf(':')
+  if (separator < 1) throw projectionError('internal like key')
+  return {
+    account: getAddress(key.slice(separator + 1)),
+    postId: BigInt(`0x${key.slice(0, separator)}`),
+  }
+}
+
+function normalizeActiveLikes(
+  value: unknown,
+): readonly PostReactionProjectionActiveLike[] {
+  if (!Array.isArray(value)) throw projectionError('active likes snapshot')
+  const likes = new Map<string, PostReactionProjectionActiveLike>()
+  for (const entryValue of value) {
+    if (!isRecord(entryValue)) throw projectionError('active like snapshot')
+    const postId = normalizePostId(entryValue.postId)
+    const account = normalizeAccount(entryValue.account)
+    const key = getLikeKey(postId, account)
+    if (likes.has(key)) throw projectionError('duplicate active like snapshot')
+    likes.set(key, { account, postId })
+  }
+  return [...likes.values()].toSorted(compareActiveLikes)
+}
+
+function normalizeRepostCounts(
+  value: unknown,
+): readonly PostReactionProjectionRepostCount[] {
+  if (!Array.isArray(value)) throw projectionError('repost counts snapshot')
+  const counts = new Map<string, PostReactionProjectionRepostCount>()
+  for (const entryValue of value) {
+    if (!isRecord(entryValue)) throw projectionError('repost count snapshot')
+    const postId = normalizePostId(entryValue.postId)
+    if (typeof entryValue.count !== 'bigint' || entryValue.count < 1n) {
+      throw projectionError('repost snapshot count')
+    }
+    const key = getPostKey(postId)
+    if (counts.has(key))
+      throw projectionError('duplicate repost count snapshot')
+    counts.set(key, { count: entryValue.count, postId })
+  }
+  return [...counts.values()].toSorted(compareRepostCounts)
+}
+
+function normalizeBlockHashes(
+  value: unknown,
+): readonly PostReactionProjectionBlockFingerprint[] {
+  if (!Array.isArray(value)) throw projectionError('block hashes snapshot')
+  const fingerprints = new Map<bigint, Hash>()
+  for (const entryValue of value) {
+    if (!isRecord(entryValue)) throw projectionError('block hash snapshot')
+    if (
+      typeof entryValue.blockNumber !== 'bigint' ||
+      entryValue.blockNumber < 0n ||
+      entryValue.blockNumber > MAX_UINT256
+    ) {
+      throw projectionError('snapshot block hash number')
+    }
+    if (
+      typeof entryValue.blockHash !== 'string' ||
+      !/^0x[0-9a-f]{64}$/i.test(entryValue.blockHash)
+    ) {
+      throw projectionError('snapshot block hash value')
+    }
+    if (fingerprints.has(entryValue.blockNumber)) {
+      throw projectionError('duplicate snapshot block hash')
+    }
+    fingerprints.set(
+      entryValue.blockNumber,
+      entryValue.blockHash.toLowerCase() as Hash,
+    )
+  }
+  return [...fingerprints]
+    .map(([blockNumber, blockHash]) => ({ blockHash, blockNumber }))
+    .toSorted(compareBlockFingerprints)
+}
+
+function normalizeBlockFingerprint(
+  value: unknown,
+  label: string,
+): PostReactionProjectionBlockFingerprint | undefined {
+  if (value === undefined) return undefined
+  const [fingerprint] = normalizeBlockHashes([value])
+  if (!fingerprint) throw projectionError(`${label} block fingerprint`)
+  return fingerprint
+}
+
+function getStreamBoundary(
+  position: PostReactionProjectionPosition | undefined,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  if (!confirmedThrough) return position
+  if (!position || confirmedThrough.blockNumber >= position.blockNumber) {
+    return confirmedThrough
+  }
+  return position
+}
+
+function getProjectionBoundaries(
+  progress: PostReactionProjectionProgress,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  return {
+    likes: getStreamBoundary(progress.likes, confirmedThrough),
+    reposts: getStreamBoundary(progress.reposts, confirmedThrough),
+  }
+}
+
+function getFrontierStart(
+  progress: PostReactionProjectionProgress,
+  confirmedThrough: PostReactionProjectionBlockFingerprint | undefined,
+) {
+  const boundaries = getProjectionBoundaries(progress, confirmedThrough)
+  const likeBlock = boundaries.likes?.blockNumber
+  const repostBlock = boundaries.reposts?.blockNumber
+  if (likeBlock === undefined || repostBlock === undefined) return undefined
+  return likeBlock < repostBlock ? likeBlock : repostBlock
+}
+
+function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
+  if (!isRecord(value)) throw projectionError('snapshot')
+  if (value.schemaVersion !== POST_REACTION_PROJECTION_SNAPSHOT_VERSION) {
+    throw projectionError('snapshot schema version')
+  }
+  if (!isRecord(value.progress)) throw projectionError('snapshot progress')
+  const progress = {
+    likes: normalizePosition(value.progress.likes, 'like'),
+    reposts: normalizePosition(value.progress.reposts, 'repost'),
+  }
+  const activeLikes = normalizeActiveLikes(value.activeLikes)
+  const blockHashes = normalizeBlockHashes(value.blockHashes)
+  const confirmedThrough = normalizeBlockFingerprint(
+    value.confirmedThrough,
+    'confirmed through',
+  )
+  const repostCounts = normalizeRepostCounts(value.repostCounts)
+  if (activeLikes.length > 0 && !progress.likes) {
+    throw projectionError('active likes snapshot progress')
+  }
+  if (repostCounts.length > 0 && !progress.reposts) {
+    throw projectionError('repost counts snapshot progress')
+  }
+  if (progress.reposts && repostCounts.length === 0) {
+    throw projectionError('repost progress snapshot counts')
+  }
+  const fingerprints = new Map(
+    blockHashes.map(({ blockHash, blockNumber }) => [blockNumber, blockHash]),
+  )
+  for (const position of [progress.likes, progress.reposts]) {
+    if (
+      position &&
+      confirmedThrough &&
+      position.blockNumber === confirmedThrough.blockNumber &&
+      position.blockHash !== confirmedThrough.blockHash
+    ) {
+      throw projectionError('snapshot confirmed block hash')
+    }
+  }
+  const boundaries = getProjectionBoundaries(progress, confirmedThrough)
+  const likeBlock = boundaries.likes?.blockNumber
+  const repostBlock = boundaries.reposts?.blockNumber
+  const frontierStart = getFrontierStart(progress, confirmedThrough)
+  const frontierEnd =
+    likeBlock === undefined
+      ? repostBlock
+      : repostBlock === undefined || likeBlock > repostBlock
+        ? likeBlock
+        : repostBlock
+  if (
+    blockHashes.some(
+      ({ blockNumber }) =>
+        frontierEnd === undefined ||
+        blockNumber > frontierEnd ||
+        (frontierStart !== undefined && blockNumber <= frontierStart),
+    )
+  ) {
+    throw projectionError('snapshot block hash boundary')
+  }
+  const frontierPosition =
+    likeBlock === undefined
+      ? boundaries.reposts
+      : repostBlock === undefined || likeBlock > repostBlock
+        ? boundaries.likes
+        : repostBlock > likeBlock
+          ? boundaries.reposts
+          : undefined
+  if (
+    frontierPosition &&
+    fingerprints.get(frontierPosition.blockNumber) !==
+      frontierPosition.blockHash
+  ) {
+    throw projectionError('snapshot progress block fingerprint')
+  }
+  if (
+    progress.likes &&
+    progress.reposts &&
+    progress.likes.blockNumber === progress.reposts.blockNumber &&
+    progress.likes.blockHash !== progress.reposts.blockHash
+  ) {
+    throw projectionError('snapshot progress block hash')
+  }
+  return {
+    activeLikes,
+    blockHashes,
+    ...(confirmedThrough ? { confirmedThrough } : {}),
+    progress,
+    repostCounts,
+    schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
+  }
+}
+
+function serializeSnapshot(snapshot: PostReactionProjectionSnapshot) {
+  return JSON.stringify([
+    'lifeinvader.post-reaction-projection.snapshot.v1',
+    snapshot.confirmedThrough
+      ? [
+          snapshot.confirmedThrough.blockNumber.toString(16),
+          snapshot.confirmedThrough.blockHash,
+        ]
+      : null,
+    snapshot.blockHashes.map(({ blockHash, blockNumber }) => [
+      blockNumber.toString(16),
+      blockHash,
+    ]),
+    snapshot.activeLikes.map(({ account, postId }) => [
+      postId.toString(16),
+      account.toLowerCase(),
+    ]),
+    snapshot.repostCounts.map(({ count, postId }) => [
+      postId.toString(16),
+      count.toString(16),
+    ]),
+    snapshot.progress.likes
+      ? [
+          snapshot.progress.likes.blockNumber.toString(16),
+          snapshot.progress.likes.logIndex.toString(16),
+          snapshot.progress.likes.blockHash,
+        ]
+      : null,
+    snapshot.progress.reposts
+      ? [
+          snapshot.progress.reposts.blockNumber.toString(16),
+          snapshot.progress.reposts.logIndex.toString(16),
+          snapshot.progress.reposts.blockHash,
+        ]
+      : null,
+  ])
+}
+
+export function getPostReactionProjectionSnapshotDigest(value: unknown) {
+  return keccak256(stringToHex(serializeSnapshot(normalizeSnapshot(value))))
+}
+
 export class PostReactionProjection {
   readonly #activeLikes = new Set<string>()
+  readonly #blockHashes = new Map<bigint, Hash>()
   readonly #likeCounts = new Map<string, bigint>()
   readonly #repostCounts = new Map<string, bigint>()
+  #confirmedThrough?: PostReactionProjectionBlockFingerprint
   #lastLike?: PostReactionProjectionPosition
   #lastRepost?: PostReactionProjectionPosition
+
+  static fromSnapshot(value: unknown) {
+    const snapshot = normalizeSnapshot(value)
+    const projection = new PostReactionProjection()
+    for (const { account, postId } of snapshot.activeLikes) {
+      const postKey = getPostKey(postId)
+      projection.#activeLikes.add(getLikeKey(postId, account))
+      projection.#likeCounts.set(
+        postKey,
+        (projection.#likeCounts.get(postKey) ?? 0n) + 1n,
+      )
+    }
+    for (const { blockHash, blockNumber } of snapshot.blockHashes) {
+      projection.#blockHashes.set(blockNumber, blockHash)
+    }
+    for (const { count, postId } of snapshot.repostCounts) {
+      projection.#repostCounts.set(getPostKey(postId), count)
+    }
+    projection.#confirmedThrough = snapshot.confirmedThrough
+    projection.#lastLike = snapshot.progress.likes
+    projection.#lastRepost = snapshot.progress.reposts
+    return projection
+  }
 
   get progress(): PostReactionProjectionProgress {
     return {
@@ -155,18 +555,83 @@ export class PostReactionProjection {
     }
   }
 
+  get snapshot(): PostReactionProjectionSnapshot {
+    const activeLikes = [...this.#activeLikes]
+      .map(decodeLikeKey)
+      .toSorted(compareActiveLikes)
+    const repostCounts = [...this.#repostCounts].map(([postKey, count]) => ({
+      count,
+      postId: BigInt(`0x${postKey}`),
+    }))
+    repostCounts.sort(compareRepostCounts)
+    const progress = this.progress
+    const confirmedThrough = this.#confirmedThrough
+      ? copyBlockFingerprint(this.#confirmedThrough)
+      : undefined
+    const frontierStart = getFrontierStart(progress, confirmedThrough)
+    if (frontierStart !== undefined) {
+      for (const blockNumber of this.#blockHashes.keys()) {
+        if (blockNumber <= frontierStart) this.#blockHashes.delete(blockNumber)
+      }
+    }
+    const blockHashes = [...this.#blockHashes]
+      .map(([blockNumber, blockHash]) => ({ blockHash, blockNumber }))
+      .toSorted(compareBlockFingerprints)
+    return {
+      activeLikes,
+      blockHashes,
+      ...(confirmedThrough ? { confirmedThrough } : {}),
+      progress,
+      repostCounts,
+      schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
+    }
+  }
+
   reset() {
     this.#activeLikes.clear()
+    this.#blockHashes.clear()
     this.#likeCounts.clear()
     this.#repostCounts.clear()
+    this.#confirmedThrough = undefined
     this.#lastLike = undefined
     this.#lastRepost = undefined
+  }
+
+  confirmThrough(value: unknown) {
+    const confirmedThrough = normalizeBlockFingerprint(value, 'confirmation')
+    if (!confirmedThrough) throw projectionError('confirmation')
+    if (
+      this.#confirmedThrough &&
+      (confirmedThrough.blockNumber < this.#confirmedThrough.blockNumber ||
+        (confirmedThrough.blockNumber === this.#confirmedThrough.blockNumber &&
+          confirmedThrough.blockHash !== this.#confirmedThrough.blockHash))
+    ) {
+      throw projectionError('confirmation boundary')
+    }
+    for (const position of [this.#lastLike, this.#lastRepost]) {
+      if (
+        position &&
+        (position.blockNumber > confirmedThrough.blockNumber ||
+          (position.blockNumber === confirmedThrough.blockNumber &&
+            position.blockHash !== confirmedThrough.blockHash))
+      ) {
+        throw projectionError('confirmation progress')
+      }
+    }
+    const retainedHash = this.#blockHashes.get(confirmedThrough.blockNumber)
+    if (
+      retainedHash !== undefined &&
+      retainedHash !== confirmedThrough.blockHash
+    ) {
+      throw projectionError('confirmation block hash')
+    }
+    this.#confirmedThrough = confirmedThrough
   }
 
   applyLikeLogs(value: unknown) {
     const page = decodePage<PostLikeSet>(
       value,
-      this.#lastLike,
+      getStreamBoundary(this.#lastLike, this.#confirmedThrough),
       decodePostLikeSet,
       'like',
     )
@@ -187,6 +652,11 @@ export class PostReactionProjection {
       activeChanges.set(likeKey, event.liked)
       countChanges.set(postKey, count)
     }
+    assertCompatibleProjectionPage(
+      page,
+      this.#blockHashes,
+      this.#confirmedThrough,
+    )
     for (const [likeKey, liked] of activeChanges) {
       if (liked) this.#activeLikes.add(likeKey)
       else this.#activeLikes.delete(likeKey)
@@ -195,13 +665,16 @@ export class PostReactionProjection {
       if (count === 0n) this.#likeCounts.delete(postKey)
       else this.#likeCounts.set(postKey, count)
     }
+    for (const [blockNumber, blockHash] of page.blockHashes) {
+      this.#blockHashes.set(blockNumber, blockHash)
+    }
     if (page.last) this.#lastLike = page.last
   }
 
   applyRepostLogs(value: unknown) {
     const page = decodePage<PublishedRepost>(
       value,
-      this.#lastRepost,
+      getStreamBoundary(this.#lastRepost, this.#confirmedThrough),
       decodePublishedRepost,
       'repost',
     )
@@ -212,8 +685,16 @@ export class PostReactionProjection {
         countChanges.get(postKey) ?? this.#repostCounts.get(postKey) ?? 0n
       countChanges.set(postKey, count + 1n)
     }
+    assertCompatibleProjectionPage(
+      page,
+      this.#blockHashes,
+      this.#confirmedThrough,
+    )
     for (const [postKey, count] of countChanges) {
       this.#repostCounts.set(postKey, count)
+    }
+    for (const [blockNumber, blockHash] of page.blockHashes) {
+      this.#blockHashes.set(blockNumber, blockHash)
     }
     if (page.last) this.#lastRepost = page.last
   }

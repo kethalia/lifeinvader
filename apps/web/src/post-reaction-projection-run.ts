@@ -14,6 +14,7 @@ import {
 import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
 import {
   PostReactionProjection,
+  type PostReactionProjectionSnapshot,
   type PostReactionSummary,
 } from './post-reaction-projection'
 import {
@@ -369,6 +370,13 @@ export class PostReactionProjectionRun {
     }
   }
 
+  get projectionSnapshot(): PostReactionProjectionSnapshot {
+    if (this.#phase !== 'complete') {
+      throw new Error('The post reaction projection is not complete.')
+    }
+    return this.#projection.snapshot
+  }
+
   getSummary(postId: unknown, account?: unknown): PostReactionSummary {
     if (this.#phase !== 'complete') {
       throw new Error('The post reaction projection is not complete.')
@@ -515,6 +523,13 @@ export class PostReactionProjectionRun {
     }
     if (currentPhase !== 'authenticate') {
       throw projectionRunError('phase')
+    }
+    if (this.#anchor.safeHead !== undefined) {
+      const checkpoint = this.#anchor.likes.cursor.checkpoints.at(-1)
+      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
+        throw projectionRunError('confirmed projection boundary')
+      }
+      this.#projection.confirmThrough(checkpoint)
     }
     cache.close()
     this.#likeCache = undefined
