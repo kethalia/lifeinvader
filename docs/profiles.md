@@ -32,13 +32,24 @@ invalidate the operation. Profile editing UI is staged separately from this
 protocol foundation.
 
 Profile history is independently queryable through the `ProfileSet` signature
-and indexed account topic. The canonical decoder and global event-family filter
-are available now. The pure projection core validates complete-block event
-pages, retains only the latest snapshot for one to fifty requested accounts,
-records compatible confirmation checkpoints, and exports canonical
-schema-versioned snapshots for resumable local work. A separate runner will
-connect this core to bounded RPC scans and reorg-aware IndexedDB checkpoints.
-No hosted indexer or database is part of the protocol.
+and indexed account topic. The browser's global profile stream verifies the
+selected chain and exact v1 runtime, scans at most one bounded RPC range per
+call, strictly decodes every returned event, and commits accepted ranges to the
+reorg-aware IndexedDB event cache. Its nominal 200-event recent page is only a
+preview, never a complete profile projection.
+
+Once the global cursor reaches a twice-checked confirmed safe head, the stream
+can issue an immutable, provider-bound projection anchor containing the exact
+cache generation, revision, and cursor. Later publication of derived state must
+authenticate both that canonical provider checkpoint and the corresponding
+cache proof; copied or partial-catch-up anchors are not trusted.
+
+The pure projection core validates complete-block event pages, retains only the
+latest snapshot for one to fifty requested accounts, records compatible
+confirmation checkpoints, and exports canonical schema-versioned snapshots for
+resumable local work. A separate runner will scan the anchored local cache into
+that projection in bounded pages. No hosted indexer or server database is part
+of the protocol.
 
 Avatar CIDs identify content; they do not pay for or prove persistence. See
 [`media.md`](./media.md) for the storage boundary.
