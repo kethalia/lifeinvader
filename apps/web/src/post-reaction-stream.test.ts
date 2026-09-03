@@ -195,6 +195,39 @@ describe('post reaction stream synchronization', () => {
     ])
   })
 
+  it('refuses to anchor reaction streams from different safe-head forks', async () => {
+    const branches = [
+      ...Array<string>(5).fill('a'),
+      ...Array<string>(5).fill('b'),
+      'a',
+      'b',
+      'a',
+      'b',
+    ]
+    let blockReads = 0
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getLogs') return []
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const branch = branches[blockReads]
+          blockReads += 1
+          if (!branch) throw new Error('Unexpected safe-head block read.')
+          return { hash: blockHash(BigInt(number), branch), number }
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/do not share one confirmed safe-head block/i)
+    expect(blockReads).toBe(branches.length)
+  })
+
   it('returns validated recent signals without presenting aggregate counts', async () => {
     const provider: Eip1193Provider = {
       async request({ method, params }) {

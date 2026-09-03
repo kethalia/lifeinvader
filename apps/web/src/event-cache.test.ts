@@ -1082,6 +1082,33 @@ describe('browser event cache', () => {
     })
   })
 
+  it('can defer corrupt scan cleanup outside a bounded reader', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 5n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const scope = getEventCacheScope(seed)
+    await deleteRawRecord(factory, 'logs', [scope, logIdentity(eventLog(2n))])
+
+    await expect(
+      opened.scan(seed, { resetOnCorruption: false }),
+    ).rejects.toThrow(/corrupt and was not reset/i)
+    expect(await countRawScopeLogs(factory, scope)).toBe(2)
+    await expect(opened.readLatest(seed)).resolves.toMatchObject({
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
+  })
+
   it('resets a noncanonical position key outside the scan range', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
@@ -1181,6 +1208,9 @@ describe('browser event cache', () => {
     await expect(opened.scan(seed, null as unknown as never)).rejects.toThrow(
       /scan options/i,
     )
+    await expect(
+      opened.scan(seed, { resetOnCorruption: 'yes' } as never),
+    ).rejects.toThrow(/corruption reset option/i)
   })
 
   it('rejects out-of-range and noncanonical batches before opening a write', async () => {

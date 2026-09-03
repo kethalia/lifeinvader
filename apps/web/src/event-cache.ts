@@ -107,6 +107,7 @@ export type EventCacheScanOptions = {
   baseline?: EventCacheScanBaseline
   continuation?: EventCacheScanCursor
   limit?: number
+  resetOnCorruption?: boolean
 }
 export type OpenEventCacheOptions = {
   databaseName?: string
@@ -768,6 +769,10 @@ export class BrowserEventCache {
     const options = optionsValue as EventCacheScanOptions
     const limit = options.limit ?? DEFAULT_PAGE_SIZE
     assertPageSize(limit)
+    const resetOnCorruption = options.resetOnCorruption ?? true
+    if (typeof resetOnCorruption !== 'boolean') {
+      throw cacheError('Invalid event cache corruption reset option.')
+    }
     let continuation: EventCacheScanCursor | undefined
     let baseline: EventCacheScanBaseline | undefined
     let scanSession: string
@@ -803,6 +808,7 @@ export class BrowserEventCache {
       continuation,
       baseline,
       scanSession,
+      resetOnCorruption,
     )
     if (page.next) this.#rememberScanContinuation(seedCursor, page.next)
     return page
@@ -1178,6 +1184,7 @@ export class BrowserEventCache {
     continuation: EventCacheScanCursor | undefined,
     baseline: EventCacheScanBaseline | undefined,
     scanSession: string,
+    resetOnCorruption: boolean,
   ) {
     return new Promise<EventCacheScanPage>((resolve, reject) => {
       const transaction = this.#database.transaction(
@@ -1498,6 +1505,14 @@ export class BrowserEventCache {
         } catch (error) {
           if (!(error instanceof EventCacheCorruptionError)) {
             fail(error)
+            return
+          }
+          if (!resetOnCorruption) {
+            fail(
+              cacheError(
+                'The browser event cache is corrupt and was not reset. Synchronize again.',
+              ),
+            )
             return
           }
           try {

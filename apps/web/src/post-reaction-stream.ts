@@ -224,6 +224,27 @@ function sameCursor(first: EventCursor, second: EventCursor) {
   )
 }
 
+function assertSharedProjectionCheckpoint(
+  likes: SynchronizedStream<PostLikeSet>,
+  reposts: SynchronizedStream<PublishedRepost>,
+  safeHead: bigint | undefined,
+) {
+  if (safeHead === undefined) return
+  const likeCheckpoint = likes.position.cursor.checkpoints.at(-1)
+  const repostCheckpoint = reposts.position.cursor.checkpoints.at(-1)
+  if (
+    !likeCheckpoint ||
+    !repostCheckpoint ||
+    likeCheckpoint.blockNumber !== safeHead ||
+    repostCheckpoint.blockNumber !== safeHead ||
+    likeCheckpoint.blockHash !== repostCheckpoint.blockHash
+  ) {
+    throw new Error(
+      'The post reaction streams do not share one confirmed safe-head block.',
+    )
+  }
+}
+
 async function synchronizeStream<Event>(
   provider: Eip1193Provider,
   chainId: bigint,
@@ -460,6 +481,9 @@ export const synchronizePostReactionStream: PostReactionStreamSynchronizer =
         shared.safeHead === undefined || likes.nextBlock > shared.safeHead
       const repostsCaughtUp =
         shared.safeHead === undefined || reposts.nextBlock > shared.safeHead
+      if (likesCaughtUp && repostsCaughtUp) {
+        assertSharedProjectionCheckpoint(likes, reposts, shared.safeHead)
+      }
       return {
         likes: {
           cacheReset: likes.cacheReset,

@@ -418,6 +418,7 @@ export class PostReactionProjectionRun {
       const page = await cache.scan(getSeed(this.#anchor[stream]), {
         continuation,
         limit: this.#pageSize,
+        resetOnCorruption: false,
       })
       const currentPhase = this.#readPhase()
       if (currentPhase === 'closed') {
@@ -507,6 +508,7 @@ export class PostReactionProjectionRun {
     const page = await cache.scan(getSeed(this.#anchor.likes), {
       baseline,
       limit: this.#pageSize,
+      resetOnCorruption: false,
     })
     const currentPhase = this.#readPhase()
     if (currentPhase === 'closed') {
