@@ -37,12 +37,13 @@ function receipt(
   blockHash: Hash = BLOCK_HASH,
   blockNumber = '0x8',
   logs: unknown = postLogs(),
+  status = '0x1',
 ) {
   return {
     blockHash,
     blockNumber,
     logs,
-    status: '0x1',
+    status,
     transactionHash: TRANSACTION_HASH,
   }
 }
@@ -77,7 +78,7 @@ describe('post feed confirmation monitoring', () => {
         timeoutMs: 1_000,
       }),
     ).resolves.toBeUndefined()
-    expect(provider.request).toHaveBeenCalledTimes(8)
+    expect(provider.request).toHaveBeenCalledTimes(9)
   })
 
   it('restarts the depth check when the transaction is re-included', async () => {
@@ -107,6 +108,87 @@ describe('post feed confirmation monitoring', () => {
         .mocked(provider.request)
         .mock.calls.filter(([request]) => request.method === 'eth_blockNumber'),
     ).toHaveLength(3)
+  })
+
+  it('detects an earlier re-inclusion after the head rolls back', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x50'
+        if (method === 'eth_getTransactionReceipt') {
+          return receipt(REINCLUDED_BLOCK_HASH, '0x3c')
+        }
+        if (method === 'eth_getBlockByNumber') {
+          expect(params).toEqual(['0x3c', false])
+          return { hash: REINCLUDED_BLOCK_HASH, number: '0x3c' }
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      waitForPostFeedConfirmation(provider, 1n, inclusion(100n, BLOCK_HASH), {
+        pollIntervalMs: 1,
+        timeoutMs: 1_000,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('waits through a temporary reverted replacement receipt', async () => {
+    let receiptReads = 0
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getTransactionReceipt') {
+          receiptReads += 1
+          return receipt(
+            receiptReads === 1 ? REINCLUDED_BLOCK_HASH : BLOCK_HASH,
+            receiptReads === 1 ? '0x10' : '0x8',
+            receiptReads === 1 ? [] : postLogs(),
+            receiptReads === 1 ? '0x0' : '0x1',
+          )
+        }
+        if (method === 'eth_getBlockByNumber') {
+          return { hash: BLOCK_HASH, number: (params as [string])[0] }
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      waitForPostFeedConfirmation(provider, 1n, inclusion(), {
+        pollIntervalMs: 1,
+        timeoutMs: 1_000,
+      }),
+    ).resolves.toBeUndefined()
+    expect(receiptReads).toBe(2)
+  })
+
+  it('stops only after a reverted receipt is canonical and deep', async () => {
+    let blockReads = 0
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getTransactionReceipt') {
+          return receipt(BLOCK_HASH, '0x8', [], '0x0')
+        }
+        if (method === 'eth_getBlockByNumber') {
+          blockReads += 1
+          return { hash: BLOCK_HASH, number: (params as [string])[0] }
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      waitForPostFeedConfirmation(provider, 1n, inclusion(), {
+        pollIntervalMs: 1,
+        timeoutMs: 1_000,
+      }),
+    ).rejects.toThrow(/reverted in canonical history/i)
+    expect(blockReads).toBe(1)
   })
 
   it('does not accept a receipt from a non-canonical block', async () => {

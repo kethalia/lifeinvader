@@ -80,16 +80,14 @@ function parseReceiptInclusion(value: unknown, expectedHash: Hash) {
   if (transactionHash !== expectedHash) {
     throw new Error('The wallet returned a receipt for a different post.')
   }
-  if (receipt.status === '0x0') {
-    throw new Error('The post transaction is reverted in canonical history.')
-  }
-  if (receipt.status !== '0x1') {
+  if (receipt.status !== '0x0' && receipt.status !== '0x1') {
     throw new Error('The wallet returned an invalid post receipt status.')
   }
   return {
     blockHash: parseHash(receipt.blockHash, 'receipt block hash'),
     blockNumber: parseBlockNumber(receipt.blockNumber),
     logs: receipt.logs,
+    reverted: receipt.status === '0x0',
   }
 }
 
@@ -253,76 +251,76 @@ export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
         throw new Error('The wallet chain changed while awaiting confirmation.')
       }
       const head = parseBlockNumber(headValue)
-      if (head >= candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH) {
-        const receiptValue = await requestBeforeDeadline(
-          provider,
-          {
-            method: 'eth_getTransactionReceipt',
-            params: [transactionHash],
-          },
-          deadline,
-          interruption.signal,
-        )
-        assertActive()
-        const currentInclusion = parseReceiptInclusion(
-          receiptValue,
-          transactionHash,
-        )
-        if (currentInclusion) {
-          if (
-            currentInclusion.blockNumber >
-            MAX_EVM_QUANTITY - POST_FEED_CONFIRMATION_DEPTH
-          ) {
-            throw new Error('Invalid post confirmation block number.')
-          }
-          candidate = currentInclusion
-          if (head >= candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH) {
-            const blockValue = await requestBeforeDeadline(
-              provider,
-              {
-                method: 'eth_getBlockByNumber',
-                params: [`0x${candidate.blockNumber.toString(16)}`, false],
-              },
-              deadline,
-              interruption.signal,
-            )
+      const receiptValue = await requestBeforeDeadline(
+        provider,
+        {
+          method: 'eth_getTransactionReceipt',
+          params: [transactionHash],
+        },
+        deadline,
+        interruption.signal,
+      )
+      assertActive()
+      const currentInclusion = parseReceiptInclusion(
+        receiptValue,
+        transactionHash,
+      )
+      if (currentInclusion) {
+        if (
+          currentInclusion.blockNumber >
+          MAX_EVM_QUANTITY - POST_FEED_CONFIRMATION_DEPTH
+        ) {
+          throw new Error('Invalid post confirmation block number.')
+        }
+        candidate = currentInclusion
+        if (head >= candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH) {
+          const blockValue = await requestBeforeDeadline(
+            provider,
+            {
+              method: 'eth_getBlockByNumber',
+              params: [`0x${candidate.blockNumber.toString(16)}`, false],
+            },
+            deadline,
+            interruption.signal,
+          )
+          assertActive()
+          const canonicalBlock = parseCanonicalBlock(
+            blockValue,
+            candidate.blockNumber,
+          )
+          if (canonicalBlock?.blockHash === candidate.blockHash) {
+            const [finalChainValue, finalHeadValue] = await Promise.all([
+              requestBeforeDeadline(
+                provider,
+                { method: 'eth_chainId' },
+                deadline,
+                interruption.signal,
+              ),
+              requestBeforeDeadline(
+                provider,
+                { method: 'eth_blockNumber' },
+                deadline,
+                interruption.signal,
+              ),
+            ])
             assertActive()
-            const canonicalBlock = parseCanonicalBlock(
-              blockValue,
-              candidate.blockNumber,
-            )
-            if (canonicalBlock?.blockHash === candidate.blockHash) {
-              const [finalChainValue, finalHeadValue] = await Promise.all([
-                requestBeforeDeadline(
-                  provider,
-                  { method: 'eth_chainId' },
-                  deadline,
-                  interruption.signal,
-                ),
-                requestBeforeDeadline(
-                  provider,
-                  { method: 'eth_blockNumber' },
-                  deadline,
-                  interruption.signal,
-                ),
-              ])
-              assertActive()
-              if (parseChainId(finalChainValue) !== chainId) {
+            if (parseChainId(finalChainValue) !== chainId) {
+              throw new Error(
+                'The wallet chain changed while awaiting confirmation.',
+              )
+            }
+            const finalHead = parseBlockNumber(finalHeadValue)
+            if (
+              finalHead >=
+              candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH
+            ) {
+              if (currentInclusion.reverted) {
                 throw new Error(
-                  'The wallet chain changed while awaiting confirmation.',
+                  'The post transaction is reverted in canonical history.',
                 )
               }
-              const finalHead = parseBlockNumber(finalHeadValue)
-              if (
-                finalHead >=
-                candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH
-              ) {
-                assertExpectedPost(
-                  currentInclusion.logs,
-                  inclusion.expectedPost,
-                )
-                return
-              }
+              assertExpectedPost(currentInclusion.logs, inclusion.expectedPost)
+              return
             }
           }
         }

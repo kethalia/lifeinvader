@@ -234,6 +234,32 @@ describe('post feed synchronization', () => {
     expect(listeners.size).toBe(0)
   })
 
+  it('rejects a committed range that loses confirmation depth', async () => {
+    const heads = [100n, 89n]
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(heads.shift() ?? 89n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/head moved behind the confirmed post feed/i)
+    expect(
+      vi
+        .mocked(provider.request)
+        .mock.calls.filter(([request]) => request.method === 'eth_getLogs'),
+    ).toHaveLength(1)
+  })
+
   it('rejects a post-apply page from a newer cache position', async () => {
     const provider: Eip1193Provider = {
       async request({ method, params }) {

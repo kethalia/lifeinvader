@@ -17,6 +17,7 @@ import {
   parseChainId,
   WALLET_READ_TIMEOUT_MS,
   type Eip1193Provider,
+  type ProviderRequest,
 } from './ethereum'
 
 const POST_FEED_PAGE_SIZE = 50
@@ -57,9 +58,9 @@ function contextCancelledError() {
   return new Error('Post feed synchronization was cancelled.')
 }
 
-async function assertSelectedChain(
+async function requestInContext(
   provider: Eip1193Provider,
-  chainId: bigint,
+  request: ProviderRequest,
   signal: AbortSignal,
 ) {
   if (signal.aborted) throw contextCancelledError()
@@ -70,21 +71,56 @@ async function assertSelectedChain(
   })
   try {
     const value = await beforeDeadline(
-      () =>
-        Promise.race([
-          provider.request({ method: 'eth_chainId' }),
-          interrupted,
-        ]),
+      () => Promise.race([provider.request(request), interrupted]),
       Date.now() + WALLET_READ_TIMEOUT_MS,
-      () => new Error('Post feed chain inspection timed out.'),
+      () => new Error('Post feed context read timed out.'),
     )
     if (signal.aborted) throw contextCancelledError()
-    if (parseChainId(value) !== chainId) {
-      throw new Error('The post feed belongs to a different wallet chain.')
-    }
+    return value
   } finally {
     if (handleAbort) signal.removeEventListener('abort', handleAbort)
   }
+}
+
+async function assertSelectedChain(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  signal: AbortSignal,
+) {
+  const value = await requestInContext(
+    provider,
+    { method: 'eth_chainId' },
+    signal,
+  )
+  if (parseChainId(value) !== chainId) {
+    throw new Error('The post feed belongs to a different wallet chain.')
+  }
+}
+
+function parseHead(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    value.length > 66 ||
+    !/^0x(?:0|[1-9a-f][0-9a-f]*)$/i.test(value)
+  ) {
+    throw new Error('The wallet returned an invalid post feed head.')
+  }
+  return BigInt(value)
+}
+
+async function readSelectedHead(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  signal: AbortSignal,
+) {
+  const [chainValue, headValue] = await Promise.all([
+    requestInContext(provider, { method: 'eth_chainId' }, signal),
+    requestInContext(provider, { method: 'eth_blockNumber' }, signal),
+  ])
+  if (parseChainId(chainValue) !== chainId) {
+    throw new Error('The post feed belongs to a different wallet chain.')
+  }
+  return parseHead(headValue)
 }
 
 function decodePostLogs(logs: readonly IndexedEventLog[]) {
@@ -197,16 +233,36 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
         await cache.clear(seed)
         throw error
       }
+      const finalHead = await readSelectedHead(
+        provider,
+        chainId,
+        interruption.signal,
+      )
+      assertContextActive()
+      const indexedThrough =
+        after.cursor.nextBlock > after.cursor.startBlock
+          ? after.cursor.nextBlock - 1n
+          : undefined
+      if (
+        indexedThrough !== undefined &&
+        (finalHead < indexedThrough ||
+          finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
+      ) {
+        throw new Error(
+          'The wallet head moved behind the confirmed post feed. Retry after the chain stabilizes.',
+        )
+      }
+      const safeHead =
+        finalHead >= POST_FEED_CONFIRMATION_DEPTH
+          ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+          : undefined
       return {
         cacheReset: cacheReset || after.reset,
-        caughtUp: result.caughtUp,
-        head: result.head,
-        indexedThrough:
-          after.cursor.nextBlock > after.cursor.startBlock
-            ? after.cursor.nextBlock - 1n
-            : undefined,
+        caughtUp: safeHead === undefined || after.cursor.nextBlock > safeHead,
+        head: finalHead,
+        indexedThrough,
         posts,
-        safeHead: result.safeHead,
+        safeHead,
         scannedRanges: result.scannedRanges,
       }
     } finally {
