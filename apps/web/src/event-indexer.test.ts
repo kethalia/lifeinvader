@@ -154,6 +154,28 @@ describe('bounded event synchronization', () => {
     expect(result.cursor.rangeSize).toBe(2)
   })
 
+  it('shrinks ranges with too many distinct log-bearing blocks', async () => {
+    const { provider, request } = chainProvider({
+      head: () => 3n,
+      getLogs: (fromBlock, toBlock) =>
+        [0n, 1n, 2n, 3n]
+          .filter((block) => block >= fromBlock && block <= toBlock)
+          .map((block) => rpcLog(block)),
+    })
+    const result = await syncEventLogs(provider, FILTER, eventCursor(0n, 4), {
+      maxLogBlocksPerRange: 2,
+      maxRangeSize: 4,
+      maxRanges: 2,
+    })
+    expect(requestedLogRanges(request)).toEqual([
+      [0n, 3n],
+      [0n, 1n],
+    ])
+    expect(result.logs.map((log) => log.blockNumber)).toEqual([0n, 1n])
+    expect(result.cursor.nextBlock).toBe(2n)
+    expect(result.scannedRanges).toBe(1)
+  })
+
   it('does not reinterpret unrelated RPC failures as range limits', async () => {
     const { provider } = chainProvider({
       getLogs: () => {
@@ -284,6 +306,23 @@ describe('canonical checkpoints', () => {
     expect(result.logs).toHaveLength(1)
     expect(result.logs[0]?.blockHash).toBe(blockHash(1n, 'b'))
     expect(result.cursor.checkpoints[0]?.blockHash).toBe(blockHash(3n, 'b'))
+  })
+
+  it('does not accept a stale log before the range endpoint', async () => {
+    const { provider, request } = chainProvider({
+      head: () => 3n,
+      getLogs: () => [rpcLog(1n, { branch: 'stale' })],
+    })
+    await expect(
+      syncEventLogs(provider, FILTER, eventCursor(0n, 4), {
+        maxRangeSize: 4,
+        maxRanges: 1,
+      }),
+    ).rejects.toThrow(/event block hash/i)
+    expect(request).toHaveBeenCalledWith({
+      method: 'eth_getBlockByNumber',
+      params: ['0x1', false],
+    })
   })
 
   it('falls back to a full rebuild when the rollback budget is exhausted', async () => {

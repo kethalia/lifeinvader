@@ -26,8 +26,9 @@ The start block and finality depth are explicit cursor inputs. A later chain con
 - A log request covers no more than 10,000 blocks, with a 2,000-block initial range.
 - One invocation attempts at most four ranges by default and sixteen at the hard limit.
 - One range accepts at most 2,000 logs and one invocation returns at most 5,000 logs.
+- An accepted range verifies at most 32 distinct log-bearing blocks by default (128 at the hard limit). Denser ranges are split before header reads begin.
 - Log data, topic counts, topic alternatives, quantities, hashes, indexes, cursor checkpoints, time, and rollback probes are all bounded before expensive processing.
-- Requests are sequential within a range. There is no fan-out across historical ranges.
+- Requests and log-bearing block checks are sequential within a range. There is no fan-out across historical ranges.
 
 When an RPC explicitly reports that a block range or result set is too large, the engine halves the range and retries within the same attempt budget. Rate-limit and transport errors are returned to the caller instead of being mistaken for range pressure and amplified through retries. Sparse successful ranges grow gradually up to the configured and hard limits.
 
@@ -40,10 +41,11 @@ The default safe head trails the reported head by twelve blocks. Chain integrati
 For each range, the engine:
 
 1. Reads the range-end block fingerprint.
-2. Requests matching logs with explicit `fromBlock`, `toBlock`, address, and topics.
-3. Rechecks the preceding checkpoint when one exists.
-4. Reads the range-end fingerprint again.
-5. Accepts the range only when both end fingerprints match and the previous checkpoint remains canonical.
+2. Requests and locally validates matching logs with explicit `fromBlock`, `toBlock`, address, and topics.
+3. Reads the canonical header for every distinct log-bearing block under the configured bound.
+4. Rechecks the preceding checkpoint when one exists.
+5. Reads the range-end fingerprint again.
+6. Accepts the range only when both end fingerprints match, the previous checkpoint remains canonical, and every log hash matches its canonical block.
 
 The accepted endpoint becomes a checkpoint. A final checkpoint validation is the last RPC read before the result is returned. This catches a reorganization during parsing, adaptation, or an otherwise unaccepted final attempt.
 

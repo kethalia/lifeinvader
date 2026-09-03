@@ -15,12 +15,14 @@ const MAX_TOPIC_ALTERNATIVES = 32
 const MAX_LOG_DATA_BYTES = 8_192
 const HARD_MAX_BLOCK_RANGE = 10_000
 const HARD_MAX_LOGS_PER_RANGE = 2_000
+const HARD_MAX_LOG_BLOCKS_PER_RANGE = 128
 const HARD_MAX_RANGES_PER_SYNC = 16
 const HARD_MAX_REORG_CHECKS = 16
 const HARD_MAX_LOGS_PER_SYNC = 5_000
 export const DEFAULT_BLOCK_RANGE = 2_000
 export const DEFAULT_FINALITY_DEPTH = 12n
 export const DEFAULT_LOGS_PER_RANGE = 2_000
+export const DEFAULT_LOG_BLOCKS_PER_RANGE = 32
 export const DEFAULT_RANGES_PER_SYNC = 4
 export type EventTopicFilter = Hex | readonly Hex[] | null
 export type EventLogFilter = {
@@ -51,6 +53,7 @@ export type IndexedEventLog = {
   transactionIndex: number
 }
 export type EventSyncOptions = {
+  maxLogBlocksPerRange?: number
   maxLogsPerRange?: number
   maxRangeSize?: number
   maxRanges?: number
@@ -377,6 +380,17 @@ function parseLogs(
   }
   return [...uniqueLogs.values()].toSorted(compareLogs)
 }
+function getLogBlockFingerprints(logs: readonly IndexedEventLog[]) {
+  const fingerprints: EventCheckpoint[] = []
+  for (const log of logs) {
+    if (fingerprints.at(-1)?.blockNumber === log.blockNumber) continue
+    fingerprints.push({
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+    })
+  }
+  return fingerprints
+}
 function isRangeLimitError(error: unknown) {
   if (!(error instanceof Error)) return false
   const message = error.message.slice(0, 512).toLowerCase()
@@ -484,6 +498,12 @@ export async function syncEventLogs(
     DEFAULT_LOGS_PER_RANGE,
     HARD_MAX_LOGS_PER_RANGE,
     'maximum logs per range',
+  )
+  const maxLogBlocks = parsePositiveInteger(
+    options.maxLogBlocksPerRange,
+    DEFAULT_LOG_BLOCKS_PER_RANGE,
+    HARD_MAX_LOG_BLOCKS_PER_RANGE,
+    'maximum log-bearing blocks per range',
   )
   const maxRange = parsePositiveInteger(
     options.maxRangeSize,
@@ -594,6 +614,18 @@ export async function syncEventLogs(
         continue
       }
       const nextLogs = parseLogs(rawLogs, normalizedFilter, fromBlock, toBlock)
+      const logBlocks = getLogBlockFingerprints(nextLogs)
+      if (logBlocks.length > maxLogBlocks) {
+        cursor = shrinkRange(cursor, span)
+        continue
+      }
+      const canonicalLogBlocks = new Map<bigint, Hash>()
+      for (const expectedBlock of logBlocks) {
+        if (expectedBlock.blockNumber === toBlock) continue
+        const block = await readBlock(request, expectedBlock.blockNumber)
+        if (!block) throw unavailableBlock(expectedBlock.blockNumber)
+        canonicalLogBlocks.set(block.number, block.hash)
+      }
       const previousCheckpoint = cursor.checkpoints.at(-1)
       const previousBlock = previousCheckpoint
         ? await readBlock(request, previousCheckpoint.blockNumber)
@@ -604,6 +636,7 @@ export async function syncEventLogs(
         throw unavailableBlock(previousCheckpoint.blockNumber)
       }
       if (!afterBlock) throw unavailableBlock(toBlock)
+      canonicalLogBlocks.set(afterBlock.number, afterBlock.hash)
       if (
         beforeBlock.hash !== afterBlock.hash ||
         (previousCheckpoint &&
@@ -627,9 +660,9 @@ export async function syncEventLogs(
         continue
       }
       if (
-        nextLogs.some(
-          (log) =>
-            log.blockNumber === toBlock && log.blockHash !== afterBlock.hash,
+        logBlocks.some(
+          (block) =>
+            canonicalLogBlocks.get(block.blockNumber) !== block.blockHash,
         )
       ) {
         throw invalidRpc('event block hash')
