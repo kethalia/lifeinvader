@@ -11,6 +11,7 @@ import {
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
+import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
 import { parseMediaCid } from './media-cid'
 import {
@@ -190,16 +191,15 @@ describe('wallet transaction helpers on Anvil', () => {
       mediaCid: MEDIA_CID.bytes,
       postId: 1n,
     })
+    const reactionStorage = {
+      databaseName: 'lifeinvader-anvil-post-reactions',
+      factory: new IDBFactory(),
+      keyRange: IDBKeyRange,
+    }
     const reactions = await synchronizePostReactionStream(
       provider,
       LOCAL_CHAIN_ID,
-      {
-        storage: {
-          databaseName: 'lifeinvader-anvil-post-reactions',
-          factory: new IDBFactory(),
-          keyRange: IDBKeyRange,
-        },
-      },
+      { storage: reactionStorage },
     )
     expect(reactions.likes).toMatchObject({
       caughtUp: true,
@@ -211,6 +211,21 @@ describe('wallet transaction helpers on Anvil', () => {
     expect(reactions.reposts).toMatchObject({
       caughtUp: true,
       recentReposts: [{ account, postId: 1n }],
+    })
+    expect(reactions.projectionAnchor).toBeDefined()
+    if (!reactions.projectionAnchor) {
+      throw new Error('Caught-up reactions did not issue a projection anchor.')
+    }
+    const projection = await openPostReactionProjectionRun(
+      reactions.projectionAnchor,
+      reactionStorage,
+    )
+    await projection.advance()
+    await projection.advance()
+    expect(projection.getSummary(1n, account)).toEqual({
+      likeCount: 0n,
+      likedByAccount: false,
+      repostCount: 1n,
     })
   })
 })

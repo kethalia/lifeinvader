@@ -1,4 +1,8 @@
-import { openEventCache, type OpenEventCacheOptions } from './event-cache'
+import {
+  openEventCache,
+  type EventCachePosition,
+  type OpenEventCacheOptions,
+} from './event-cache'
 import {
   createEventCursor,
   syncEventLogs,
@@ -25,8 +29,8 @@ import {
   type ProviderRequest,
 } from './ethereum'
 
-const REACTION_EVENT_PAGE_SIZE = 200
-const REACTION_EVENT_START_BLOCK = 0n
+export const POST_REACTION_EVENT_PAGE_SIZE = 200
+export const POST_REACTION_EVENT_START_BLOCK = 0n
 
 type ReactionEventStreamSnapshot = {
   cacheReset: boolean
@@ -41,9 +45,18 @@ export type PostReactionStreamSnapshot = {
   likes: ReactionEventStreamSnapshot & {
     recentSignals: readonly PostLikeSet[]
   }
+  projectionAnchor?: PostReactionProjectionAnchor
   reposts: ReactionEventStreamSnapshot & {
     recentReposts: readonly PublishedRepost[]
   }
+}
+
+export type PostReactionProjectionAnchor = {
+  chainId: bigint
+  head: bigint
+  likes: EventCachePosition
+  reposts: EventCachePosition
+  safeHead?: bigint
 }
 
 export type PostReactionStreamStorageOptions = Pick<
@@ -74,6 +87,7 @@ type SynchronizedStream<Event> = ReactionEventStreamSnapshot & {
   checkpoint?: EventCheckpoint
   events: readonly Event[]
   nextBlock: bigint
+  position: EventCachePosition
 }
 
 function cancelledError() {
@@ -221,18 +235,18 @@ async function synchronizeStream<Event>(
     chainId,
     filter: definition.filter,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: REACTION_EVENT_START_BLOCK,
+    startBlock: POST_REACTION_EVENT_START_BLOCK,
   })
   const cache = await openEventCache({ ...storage, filter: definition.filter })
   try {
     if (signal.aborted) throw cancelledError()
-    let before = await cache.readLatest(seed, REACTION_EVENT_PAGE_SIZE)
+    let before = await cache.readLatest(seed, POST_REACTION_EVENT_PAGE_SIZE)
     let cacheReset = before.reset
     try {
       decodeEvents(before.logs, definition)
     } catch {
       await cache.clear(seed)
-      before = await cache.readLatest(seed, REACTION_EVENT_PAGE_SIZE)
+      before = await cache.readLatest(seed, POST_REACTION_EVENT_PAGE_SIZE)
       cacheReset = true
     }
     const result = await syncEventLogs(
@@ -245,7 +259,7 @@ async function synchronizeStream<Event>(
     decodeEvents(result.logs, definition)
     await cache.apply(before, result)
     if (signal.aborted) throw cancelledError()
-    const after = await cache.readLatest(seed, REACTION_EVENT_PAGE_SIZE)
+    const after = await cache.readLatest(seed, POST_REACTION_EVENT_PAGE_SIZE)
     if (
       after.generation !== before.generation ||
       after.revision !== before.revision + 1n ||
@@ -305,6 +319,11 @@ async function synchronizeStream<Event>(
       head: finalHead,
       indexedThrough,
       nextBlock: after.cursor.nextBlock,
+      position: {
+        cursor: after.cursor,
+        generation: after.generation,
+        revision: after.revision,
+      },
       safeHead,
       scannedRanges: result.scannedRanges,
     }
@@ -437,22 +456,33 @@ export const synchronizePostReactionStream: PostReactionStreamSynchronizer =
         interruption.signal,
       )
       assertContextActive()
+      const likesCaughtUp =
+        shared.safeHead === undefined || likes.nextBlock > shared.safeHead
+      const repostsCaughtUp =
+        shared.safeHead === undefined || reposts.nextBlock > shared.safeHead
       return {
         likes: {
           cacheReset: likes.cacheReset,
-          caughtUp:
-            shared.safeHead === undefined || likes.nextBlock > shared.safeHead,
+          caughtUp: likesCaughtUp,
           head: shared.head,
           indexedThrough: likes.indexedThrough,
           recentSignals: likes.events,
           safeHead: shared.safeHead,
           scannedRanges: likes.scannedRanges,
         },
+        projectionAnchor:
+          likesCaughtUp && repostsCaughtUp
+            ? {
+                chainId,
+                head: shared.head,
+                likes: likes.position,
+                reposts: reposts.position,
+                safeHead: shared.safeHead,
+              }
+            : undefined,
         reposts: {
           cacheReset: reposts.cacheReset,
-          caughtUp:
-            shared.safeHead === undefined ||
-            reposts.nextBlock > shared.safeHead,
+          caughtUp: repostsCaughtUp,
           head: shared.head,
           indexedThrough: reposts.indexedThrough,
           recentReposts: reposts.events,

@@ -127,6 +127,7 @@ describe('post reaction stream synchronization', () => {
     const first = await synchronizePostReactionStream(provider, 1n, {
       storage: cacheStorage,
     })
+    expect(first.projectionAnchor).toBeUndefined()
     expect(first.likes).toMatchObject({
       caughtUp: false,
       indexedThrough: 1_999n,
@@ -140,6 +141,19 @@ describe('post reaction stream synchronization', () => {
 
     const second = await synchronizePostReactionStream(provider, 1n, {
       storage: cacheStorage,
+    })
+    expect(second.projectionAnchor).toMatchObject({
+      chainId: 1n,
+      head: 5_000n,
+      likes: {
+        cursor: { nextBlock: 4_989n },
+        revision: 2n,
+      },
+      reposts: {
+        cursor: { nextBlock: 4_989n },
+        revision: 2n,
+      },
+      safeHead: 4_988n,
     })
     expect(second.likes).toMatchObject({
       caughtUp: true,
@@ -201,9 +215,17 @@ describe('post reaction stream synchronization', () => {
       },
     }
 
-    await expect(
-      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
-    ).resolves.toMatchObject({
+    const snapshot = await synchronizePostReactionStream(provider, 1n, {
+      storage: storage(),
+    })
+    expect(snapshot).toMatchObject({
+      projectionAnchor: {
+        chainId: 1n,
+        head: 20n,
+        likes: { cursor: { nextBlock: 9n } },
+        reposts: { cursor: { nextBlock: 9n } },
+        safeHead: 8n,
+      },
       likes: {
         caughtUp: true,
         indexedThrough: 8n,

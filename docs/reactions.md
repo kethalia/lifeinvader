@@ -24,7 +24,7 @@ Reaction reads use two separate bounded, reorg-aware event streams and disposabl
 
 Each synchronization invocation scans at most one adaptive block range per filter, for at most two bounded `eth_getLogs` calls in total, and resumes from independent browser-cache cursors. It verifies the exact protocol bytecode before reading, validates every decoded event before advancing either cursor, and rechecks both confirmed checkpoints against one final wallet-chain head after both filters finish. Chain changes and caller cancellation interrupt in-flight context reads, including contract-code inspection.
 
-The stream API exposes up to 200 recent validated signals from each cache plus independent progress. It intentionally does not expose counts: a recent page is not complete history. The event cache provides bounded, hash-chain-verified chronological pages and canonical completed-scan baselines for the projection layer below; a cache-to-projection driver is not implemented yet. A total may be called complete only after that driver consumes the entire cache snapshot and the corresponding chain cursor reaches its confirmed head.
+The stream API exposes up to 200 recent validated signals from each cache plus independent progress. It intentionally does not expose counts: a recent page is not complete history. Only when both cursors reach one jointly verified safe head does synchronization issue a projection anchor containing their exact cache generations, revisions, and canonical cursors. Partial catch-up never produces an anchor.
 
 ## Deterministic projection core
 
@@ -32,4 +32,12 @@ The stream API exposes up to 200 recent validated signals from each cache plus i
 
 For likes, the projection retains only active `(postId, account)` pairs and exact per-post `bigint` counts. Repeating the same state is idempotent; a transition from liked to unliked decrements once, and a later like increments once. Every canonical repost event increments its post's `bigint` total, including repeated reposts from one account, because the protocol defines reposts as append-only public actions. Account-specific queries normalize the address before checking active membership.
 
-The core deliberately does not claim snapshot completeness and is not wired into the feed yet. A projection driver must feed it pages from one authenticated cache scan session and publish results only after that scan completes. For future deltas, it must retain the derived state with the completed baseline; if baseline authentication or canonical ancestry fails, it must discard the derived state and rebuild from a full scan.
+The core deliberately does not claim snapshot completeness and is not wired into the feed yet.
+
+## Bounded projection runs
+
+`apps/web/src/post-reaction-projection-run.ts` connects a jointly verified synchronization anchor to the projection core. Each explicit `advance()` reads exactly one bounded chronological cache page: it completes likes first, then reposts. It performs no RPC calls and never hides a full-history loop behind one invocation. Complete-block expansion remains capped by the cache and projection limits.
+
+Every page must retain the anchor's exact cursor, generation, and revision. A concurrent cache update, reset, malformed page, consumed continuation, or projection error fails the run closed and discards all partially derived state. The completed page's authenticated log count and tail must also match what the projection actually consumed.
+
+Summaries and completed baselines throw until both streams finish. Once complete, a summary is exact as of the anchor's recorded safe head, and defensive copies of both authenticated baselines are available for a future delta layer. The current run intentionally performs an initial rebuild only; persisting derived state and applying append-only deltas will be a separate change. The feed does not display these totals yet.
