@@ -542,6 +542,20 @@ export async function waitForTransactionReceipt(
     if (parsedReceipt) {
       const { logs, receipt, reverted } = parsedReceipt
       const blockTag = `0x${receipt.blockNumber.toString(16)}`
+      if (options.selectedChainId === LOCAL_CHAIN_ID) {
+        await verifyLocalChain(
+          provider,
+          options.localProvider,
+          Math.max(1, deadline - Date.now()),
+        )
+        await assertCurrentContext()
+      }
+      let protocolCode: Hex | undefined
+      if (!reverted && options.expectProtocol) {
+        const address = PROTOCOL_ADDRESS
+        protocolCode = await getCode(provider, address, deadline, blockTag)
+        await assertCurrentContext()
+      }
       const blockValue = await beforeDeadline(
         () =>
           provider.request({
@@ -558,23 +572,8 @@ export async function waitForTransactionReceipt(
           canonicalBlock.number === receipt.blockNumber &&
           canonicalBlock.hash === receipt.blockHash
         ) {
-          if (options.selectedChainId === LOCAL_CHAIN_ID) {
-            await verifyLocalChain(
-              provider,
-              options.localProvider,
-              Math.max(1, deadline - Date.now()),
-            )
-            await assertCurrentContext()
-          }
-          if (!reverted && options.expectProtocol) {
-            const address = PROTOCOL_ADDRESS
-            const code = await getCode(provider, address, deadline, blockTag)
-            await assertCurrentContext()
-            if (keccak256(code) !== PROTOCOL_CODE_HASH) {
-              throw new Error(
-                'The confirmed transaction did not deploy Lifeinvader v1.',
-              )
-            }
+          if (protocolCode && keccak256(protocolCode) !== PROTOCOL_CODE_HASH) {
+            throw new Error('The receipt did not deploy Lifeinvader v1.')
           }
           if (!reverted && options.expectedPost) {
             assertExpectedPost(logs, options.expectedPost)
