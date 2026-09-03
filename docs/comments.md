@@ -14,7 +14,9 @@ A receipt counts as inclusion only when its canonical block contains a `CommentP
 
 The feed does not show an optimistic comment. If the wallet may have broadcast without returning a hash, or a returned hash cannot yet be verified, other post writes in that wallet context remain locked until the user checks the wallet or retries the receipt. The retained recovery record includes the original provider, chain, account, post, body, and media bytes, so another context cannot relabel it.
 
-A successful receipt clears only the exact draft revision that produced it. Editing a newer draft or changing wallet context prevents a late completion from erasing that work. Inclusion feedback is not a claim of confirmation-depth finality.
+Drafts are retained separately for each provider, chain, and account context. Each draft is also bound to the confirmed post event's block hash and log index, not only its numeric post identifier. If that exact event leaves the visible confirmed page or is replaced by a reorg, the composer becomes a paused, copyable draft with an explicit discard control instead of permitting a comment against different content.
+
+A successful receipt clears only the exact draft revision that produced it, even if its wallet context is not currently selected. A newer draft in that or another context remains untouched. Inclusion feedback is not a claim of confirmation-depth finality.
 
 ## Read boundary
 

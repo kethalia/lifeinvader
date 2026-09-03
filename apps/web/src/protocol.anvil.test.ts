@@ -114,7 +114,7 @@ afterAll(async () => {
   })
 })
 describe('wallet transaction helpers on Anvil', () => {
-  it('deploys v1 and publishes a media-only event with canonical CID bytes', async () => {
+  it('deploys v1 and verifies post, comment, and reaction transactions', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
     )

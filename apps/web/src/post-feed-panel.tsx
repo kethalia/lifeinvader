@@ -37,6 +37,7 @@ import {
   type PostReactionReadModelState,
 } from './post-reaction-read-model'
 import type { PostReactionStreamSynchronizer } from './post-reaction-stream'
+import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
 function shortValue(value: string) {
@@ -129,7 +130,9 @@ type CommentDraft = {
   body: string
   chainId: bigint
   mediaCidInput: string
+  postBlockHash: PublishedPost['blockHash']
   postId: bigint
+  postLogIndex: number
   provider: Eip1193Provider
   revision: number
 }
@@ -173,6 +176,42 @@ function sameActionContext(
     first.chainId === second.chainId &&
     first.expected.account.toLowerCase() ===
       second.expected.account.toLowerCase()
+  )
+}
+
+function sameCommentDraftContext(
+  draft: CommentDraft,
+  provider: Eip1193Provider,
+  chainId: bigint,
+  account: string,
+) {
+  return (
+    draft.provider === provider &&
+    draft.chainId === chainId &&
+    draft.account.toLowerCase() === account.toLowerCase()
+  )
+}
+
+function commentDraftTargetsPost(draft: CommentDraft, post: PublishedPost) {
+  return (
+    draft.postId === post.postId &&
+    draft.postBlockHash.toLowerCase() === post.blockHash.toLowerCase() &&
+    draft.postLogIndex === post.logIndex
+  )
+}
+
+function sameCommentDraftRevision(first: CommentDraft, second: CommentDraft) {
+  return (
+    sameCommentDraftContext(
+      first,
+      second.provider,
+      second.chainId,
+      second.account,
+    ) &&
+    first.postId === second.postId &&
+    first.postBlockHash.toLowerCase() === second.postBlockHash.toLowerCase() &&
+    first.postLogIndex === second.postLogIndex &&
+    first.revision === second.revision
   )
 }
 
@@ -227,7 +266,7 @@ export function PostFeedPanel({
   const [postActionProblems, setPostActionProblems] = useState<
     PostActionProblem[]
   >([])
-  const [commentDraft, setCommentDraft] = useState<CommentDraft>()
+  const [commentDrafts, setCommentDrafts] = useState<CommentDraft[]>([])
   const reactionModel = usePostReactionReadModel(session, {
     openProjection: openReactionProjection,
     synchronize: synchronizePostReactions,
@@ -236,19 +275,20 @@ export function PostFeedPanel({
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const commentRevision = useRef(0)
   const requestSequence = useRef(0)
-  const sessionRef = useRef(session)
-  sessionRef.current = session
   const connected =
     session.status === 'connected' &&
     session.provider !== undefined &&
     session.chainId !== undefined
   const activeCommentDraft =
-    connected &&
-    commentDraft !== undefined &&
-    commentDraft.provider === session.provider &&
-    commentDraft.chainId === session.chainId &&
-    commentDraft.account.toLowerCase() === session.account?.toLowerCase()
-      ? commentDraft
+    connected && session.account
+      ? commentDrafts.findLast((draft) =>
+          sameCommentDraftContext(
+            draft,
+            session.provider!,
+            session.chainId!,
+            session.account!,
+          ),
+        )
       : undefined
   let parsedCommentMediaCid: ReturnType<typeof parseMediaCid>
   let commentMediaCidError: string | undefined
@@ -269,6 +309,15 @@ export function PostFeedPanel({
     loaded.provider === session.provider &&
     loaded.chainId === session.chainId
       ? loaded.snapshot
+      : undefined
+  const activeCommentDraftPost = activeCommentDraft
+    ? snapshot?.posts.find((post) =>
+        commentDraftTargetsPost(activeCommentDraft, post),
+      )
+    : undefined
+  const orphanedCommentDraft =
+    activeCommentDraft && snapshot && !activeCommentDraftPost
+      ? activeCommentDraft
       : undefined
   const error =
     connected &&
@@ -403,20 +452,21 @@ export function PostFeedPanel({
 
   const clearPublishedCommentDraft = (context: PostActionContext) => {
     const expected = context.expected
-    if (
-      expected.kind !== 'comment' ||
-      !actionContextMatchesSession(context, sessionRef.current)
-    ) {
-      return
-    }
-    setCommentDraft((current) =>
-      current?.provider === context.provider &&
-      current.chainId === context.chainId &&
-      current.account.toLowerCase() === expected.account.toLowerCase() &&
-      current.postId === expected.postId &&
-      current.revision === context.commentRevision
-        ? undefined
-        : current,
+    if (expected.kind !== 'comment') return
+    setCommentDrafts((current) =>
+      current.filter(
+        (draft) =>
+          !(
+            sameCommentDraftContext(
+              draft,
+              context.provider,
+              context.chainId,
+              expected.account,
+            ) &&
+            draft.postId === expected.postId &&
+            draft.revision === context.commentRevision
+          ),
+      ),
     )
   }
 
@@ -654,48 +704,61 @@ export function PostFeedPanel({
     )
   }
 
-  const toggleCommentComposer = (postId: bigint) => {
+  const discardCommentDraft = (draft: CommentDraft) => {
+    if (postActionsLocked) return
+    setCommentDrafts((current) =>
+      current.filter(
+        (candidate) => !sameCommentDraftRevision(candidate, draft),
+      ),
+    )
+  }
+
+  const toggleCommentComposer = (post: PublishedPost) => {
     const account = session.account
     const chainId = session.chainId
     const provider = session.provider
     if (!account || chainId === undefined || !provider || postActionsLocked) {
       return
     }
-    if (activeCommentDraft?.postId === postId) {
-      setCommentDraft(undefined)
+    if (
+      activeCommentDraft &&
+      commentDraftTargetsPost(activeCommentDraft, post)
+    ) {
+      discardCommentDraft(activeCommentDraft)
       return
     }
     if (activeCommentDraft) return
-    setCommentDraft({
-      account,
-      body: '',
-      chainId,
-      mediaCidInput: '',
-      postId,
-      provider,
-      revision: ++commentRevision.current,
-    })
+    setCommentDrafts((current) => [
+      ...current.filter(
+        (draft) => !sameCommentDraftContext(draft, provider, chainId, account),
+      ),
+      {
+        account,
+        body: '',
+        chainId,
+        mediaCidInput: '',
+        postBlockHash: post.blockHash,
+        postId: post.postId,
+        postLogIndex: post.logIndex,
+        provider,
+        revision: ++commentRevision.current,
+      },
+    ])
   }
 
   const updateCommentDraft = (
-    postId: bigint,
+    draft: CommentDraft,
     update: Partial<Pick<CommentDraft, 'body' | 'mediaCidInput'>>,
   ) => {
-    const draft = activeCommentDraft
-    if (!draft || draft.postId !== postId) return
+    if (draft !== activeCommentDraft) return
     const revision = ++commentRevision.current
-    setCommentDraft((current) => {
-      if (
-        !current ||
-        current.provider !== draft.provider ||
-        current.chainId !== draft.chainId ||
-        current.account.toLowerCase() !== draft.account.toLowerCase() ||
-        current.postId !== postId
-      ) {
-        return current
-      }
-      return { ...current, ...update, revision }
-    })
+    setCommentDrafts((current) =>
+      current.map((candidate) =>
+        sameCommentDraftRevision(candidate, draft)
+          ? { ...candidate, ...update, revision }
+          : candidate,
+      ),
+    )
   }
 
   const submitComment = (
@@ -876,6 +939,37 @@ export function PostFeedPanel({
           block {activeCompletedPostAction.receipt.blockNumber.toString()}.
         </p>
       ) : null}
+      {orphanedCommentDraft ? (
+        <aside
+          aria-labelledby="paused-comment-draft-title"
+          className="feed-feedback orphaned-comment-draft"
+        >
+          <strong id="paused-comment-draft-title">Comment draft paused</strong>
+          <p role="status">
+            Post #{orphanedCommentDraft.postId.toString()} no longer matches an
+            event in this confirmed feed view. The draft cannot be submitted
+            against a replacement post. Copy anything you need before discarding
+            it.
+          </p>
+          <label>
+            Paused draft text
+            <textarea readOnly rows={3} value={orphanedCommentDraft.body} />
+          </label>
+          {orphanedCommentDraft.mediaCidInput ? (
+            <label>
+              Paused draft media CID
+              <input readOnly value={orphanedCommentDraft.mediaCidInput} />
+            </label>
+          ) : null}
+          <button
+            disabled={postActionsLocked}
+            onClick={() => discardCommentDraft(orphanedCommentDraft)}
+            type="button"
+          >
+            Discard paused draft
+          </button>
+        </aside>
+      ) : null}
 
       {snapshot?.posts.length ? (
         <ol className="post-list" aria-busy={loading}>
@@ -884,6 +978,9 @@ export function PostFeedPanel({
               post.postId,
               session.account,
             )
+            const draftingThisPost =
+              activeCommentDraft !== undefined &&
+              commentDraftTargetsPost(activeCommentDraft, post)
             return (
               <li key={`${post.blockHash}:${post.logIndex}`}>
                 <article className="post-card">
@@ -922,18 +1019,16 @@ export function PostFeedPanel({
                     ) : null}
                     <div>
                       <button
-                        aria-label={`${activeCommentDraft?.postId === post.postId ? 'Cancel comment' : 'Write comment'} for post ${post.postId.toString()}`}
+                        aria-label={`${draftingThisPost ? 'Cancel comment' : 'Write comment'} for post ${post.postId.toString()}`}
                         disabled={
                           postActionsLocked ||
                           (activeCommentDraft !== undefined &&
-                            activeCommentDraft.postId !== post.postId)
+                            !draftingThisPost)
                         }
-                        onClick={() => toggleCommentComposer(post.postId)}
+                        onClick={() => toggleCommentComposer(post)}
                         type="button"
                       >
-                        {activeCommentDraft?.postId === post.postId
-                          ? 'Cancel comment'
-                          : 'Comment'}
+                        {draftingThisPost ? 'Cancel comment' : 'Comment'}
                       </button>
                       <button
                         aria-label={`Record like for post ${post.postId.toString()}`}
@@ -960,7 +1055,7 @@ export function PostFeedPanel({
                         Repost
                       </button>
                     </div>
-                    {activeCommentDraft?.postId === post.postId ? (
+                    {draftingThisPost && activeCommentDraft ? (
                       <form
                         className="comment-composer"
                         onSubmit={(event) =>
@@ -977,7 +1072,7 @@ export function PostFeedPanel({
                           id={`comment-body-${post.postId.toString()}`}
                           maxLength={MAX_POST_BODY_BYTES}
                           onChange={(event) =>
-                            updateCommentDraft(post.postId, {
+                            updateCommentDraft(activeCommentDraft, {
                               body: event.target.value,
                             })
                           }
@@ -997,7 +1092,7 @@ export function PostFeedPanel({
                           id={`comment-media-cid-${post.postId.toString()}`}
                           maxLength={MAX_MEDIA_CID_TEXT_LENGTH}
                           onChange={(event) =>
-                            updateCommentDraft(post.postId, {
+                            updateCommentDraft(activeCommentDraft, {
                               mediaCidInput: event.target.value,
                             })
                           }
