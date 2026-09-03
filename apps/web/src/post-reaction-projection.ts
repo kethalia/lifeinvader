@@ -58,6 +58,7 @@ export type PostReactionProjectionSnapshot = {
 }
 
 type DecodedPage<Event> = {
+  blockHashes: ReadonlyMap<bigint, Hash>
   events: readonly Event[]
   last?: PostReactionProjectionPosition
 }
@@ -89,16 +90,13 @@ function copyPosition(position: PostReactionProjectionPosition) {
   return { ...position }
 }
 
-function assertCompatibleStreamPositions(
-  next: PostReactionProjectionPosition | undefined,
+function assertCompatibleStreamPage(
+  page: DecodedPage<unknown>,
   other: PostReactionProjectionPosition | undefined,
 ) {
-  if (
-    next &&
-    other &&
-    next.blockNumber === other.blockNumber &&
-    next.blockHash !== other.blockHash
-  ) {
+  if (!other) return
+  const matchingHash = page.blockHashes.get(other.blockNumber)
+  if (matchingHash !== undefined && matchingHash !== other.blockHash) {
     throw projectionError('stream progress block hash')
   }
 }
@@ -190,6 +188,7 @@ function decodePage<Event>(
     }
   })
   return {
+    blockHashes,
     events,
     last: logs.length > 0 ? getPosition(logs.at(-1)!) : undefined,
   }
@@ -432,7 +431,7 @@ export class PostReactionProjection {
       activeChanges.set(likeKey, event.liked)
       countChanges.set(postKey, count)
     }
-    assertCompatibleStreamPositions(page.last, this.#lastRepost)
+    assertCompatibleStreamPage(page, this.#lastRepost)
     for (const [likeKey, liked] of activeChanges) {
       if (liked) this.#activeLikes.add(likeKey)
       else this.#activeLikes.delete(likeKey)
@@ -458,7 +457,7 @@ export class PostReactionProjection {
         countChanges.get(postKey) ?? this.#repostCounts.get(postKey) ?? 0n
       countChanges.set(postKey, count + 1n)
     }
-    assertCompatibleStreamPositions(page.last, this.#lastLike)
+    assertCompatibleStreamPage(page, this.#lastLike)
     for (const [postKey, count] of countChanges) {
       this.#repostCounts.set(postKey, count)
     }

@@ -341,7 +341,7 @@ describe('post reaction projection', () => {
     expect(projection.progress).toEqual(progress)
   })
 
-  it('rejects conflicting cross-stream tails before changing state', () => {
+  it('rejects conflicting cross-stream blocks before changing state', () => {
     const likesFirst = new PostReactionProjection()
     likesFirst.applyLikeLogs([likeLog(2n)])
     const likesFirstSnapshot = likesFirst.snapshot
@@ -350,6 +350,10 @@ describe('post reaction projection', () => {
         {
           ...repostLog(2n),
           blockHash: hash('conflicting repost fork'),
+        },
+        {
+          ...repostLog(3n),
+          blockHash: hash('later repost block'),
         },
       ]),
     ).toThrow(/stream progress block hash/i)
@@ -363,6 +367,10 @@ describe('post reaction projection', () => {
         {
           ...likeLog(2n),
           blockHash: hash('conflicting like fork'),
+        },
+        {
+          ...likeLog(3n),
+          blockHash: hash('later like block'),
         },
       ]),
     ).toThrow(/stream progress block hash/i)
