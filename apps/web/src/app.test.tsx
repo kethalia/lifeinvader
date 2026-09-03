@@ -9,14 +9,19 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
+import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
+  publishPost,
+  type TransactionReceipt,
 } from './protocol'
+import { WalletPanel } from './wallet-panel'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
+import type { WalletSessionController } from './wallet-session'
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
@@ -240,6 +245,8 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
 
     expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
+    expect((mediaInput as HTMLInputElement).value).toBe('')
     expect(waitForSafePost).toHaveBeenCalledWith(
       provider,
       1n,
@@ -364,6 +371,81 @@ describe('App', () => {
       await screen.findByRole('button', { name: /publish on-chain/i }),
     ).toBeTruthy()
     stop()
+  })
+  it('does not let a stale post completion clear the current draft', async () => {
+    let selectedChain = '0x1'
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return selectedChain
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const controller = (chainId: bigint): WalletSessionController => ({
+      connect: vi.fn(async () => undefined),
+      refresh: vi.fn(async () => undefined),
+      session: {
+        account: ACCOUNT,
+        chainId,
+        name: 'Completion Wallet',
+        provider,
+        status: 'connected',
+      },
+    })
+    const completion = deferred<TransactionReceipt>()
+    const publishPostAction = vi.fn<typeof publishPost>(
+      async () => completion.promise,
+    )
+    const onPostConfirmed = vi.fn()
+    const { rerender } = render(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        publishPostAction={publishPostAction}
+        walletSession={controller(1n)}
+      />,
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Submitted on chain A.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    await waitFor(() => expect(publishPostAction).toHaveBeenCalledTimes(1))
+
+    selectedChain = '0x2'
+    rerender(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        publishPostAction={publishPostAction}
+        walletSession={controller(2n)}
+      />,
+    )
+    await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    fireEvent.change(textarea, { target: { value: 'Unsent chain B draft.' } })
+    const mediaInput = screen.getByLabelText(/IPFS media CID/i)
+    fireEvent.change(mediaInput, { target: { value: MEDIA_CID_V0 } })
+
+    await act(async () =>
+      completion.resolve({
+        blockHash: RECEIPT_BLOCK_HASH as TransactionReceipt['blockHash'],
+        blockNumber: 42n,
+        hash: TRANSACTION_HASH,
+      }),
+    )
+
+    expect(onPostConfirmed).not.toHaveBeenCalled()
+    expect((textarea as HTMLTextAreaElement).value).toBe(
+      'Unsent chain B draft.',
+    )
+    expect((mediaInput as HTMLInputElement).value).toBe(MEDIA_CID_V0)
+    expect(screen.queryByText(/included in block 42/i)).toBeNull()
+
+    selectedChain = '0x1'
+    rerender(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        publishPostAction={publishPostAction}
+        walletSession={controller(1n)}
+      />,
+    )
+    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
   })
   it('preserves an unknown post while another chain starts a write', async () => {
     let chainId = '0x1'
