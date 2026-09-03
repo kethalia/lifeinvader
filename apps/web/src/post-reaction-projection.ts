@@ -328,6 +328,13 @@ function normalizeBlockHashes(
     .toSorted(compareBlockFingerprints)
 }
 
+function getFrontierStart(progress: PostReactionProjectionProgress) {
+  const likeBlock = progress.likes?.blockNumber
+  const repostBlock = progress.reposts?.blockNumber
+  if (likeBlock === undefined || repostBlock === undefined) return undefined
+  return likeBlock < repostBlock ? likeBlock : repostBlock
+}
+
 function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
   if (!isRecord(value)) throw projectionError('snapshot')
   if (value.schemaVersion !== POST_REACTION_PROJECTION_SNAPSHOT_VERSION) {
@@ -355,12 +362,7 @@ function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
   )
   const likeBlock = progress.likes?.blockNumber
   const repostBlock = progress.reposts?.blockNumber
-  const frontierStart =
-    likeBlock !== undefined && repostBlock !== undefined
-      ? likeBlock < repostBlock
-        ? likeBlock
-        : repostBlock
-      : undefined
+  const frontierStart = getFrontierStart(progress)
   const frontierEnd =
     likeBlock === undefined
       ? repostBlock
@@ -491,13 +493,19 @@ export class PostReactionProjection {
       postId: BigInt(`0x${postKey}`),
     }))
     repostCounts.sort(compareRepostCounts)
+    const progress = this.progress
+    const frontierStart = getFrontierStart(progress)
     const blockHashes = [...this.#blockHashes]
+      .filter(
+        ([blockNumber]) =>
+          frontierStart === undefined || blockNumber > frontierStart,
+      )
       .map(([blockNumber, blockHash]) => ({ blockHash, blockNumber }))
       .toSorted(compareBlockFingerprints)
     return {
       activeLikes,
       blockHashes,
-      progress: this.progress,
+      progress,
       repostCounts,
       schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
     }
@@ -510,17 +518,6 @@ export class PostReactionProjection {
     this.#repostCounts.clear()
     this.#lastLike = undefined
     this.#lastRepost = undefined
-  }
-
-  #pruneBlockHashes() {
-    if (!this.#lastLike || !this.#lastRepost) return
-    const completeThrough =
-      this.#lastLike.blockNumber < this.#lastRepost.blockNumber
-        ? this.#lastLike.blockNumber
-        : this.#lastRepost.blockNumber
-    for (const blockNumber of this.#blockHashes.keys()) {
-      if (blockNumber <= completeThrough) this.#blockHashes.delete(blockNumber)
-    }
   }
 
   applyLikeLogs(value: unknown) {
@@ -560,7 +557,6 @@ export class PostReactionProjection {
       this.#blockHashes.set(blockNumber, blockHash)
     }
     if (page.last) this.#lastLike = page.last
-    this.#pruneBlockHashes()
   }
 
   applyRepostLogs(value: unknown) {
@@ -585,7 +581,6 @@ export class PostReactionProjection {
       this.#blockHashes.set(blockNumber, blockHash)
     }
     if (page.last) this.#lastRepost = page.last
-    this.#pruneBlockHashes()
   }
 
   getSummary(
