@@ -9,8 +9,12 @@ history, and no creator or administrator can remove another account or message.
 
 `createGroup(name, metadataCid)` assigns the next positive group identifier and
 emits an immutable `GroupCreated` definition. The creator field records who sent
-that transaction; it grants no role. Names contain between 1 and 96 UTF-8 bytes,
-and the optional metadata CID is limited to 128 raw bytes.
+that transaction; it grants no role. The first-party composer accepts names
+containing between 1 and 96 UTF-8 bytes, while the contract's ABI-level rule is
+only a 1-to-96-byte bound. A raw caller can therefore publish non-UTF-8 name
+bytes. Readers preserve those bytes and display their canonical hex form rather
+than letting one such definition block the directory. The optional metadata CID
+is limited to 128 raw bytes.
 
 `setGroupMembership(groupId, joined)` emits the caller's latest public join or
 leave signal for a known group. Membership is social metadata only. It is neither
@@ -63,10 +67,13 @@ rather than treated as proof that content exists.
 The global group directory scans only `GroupCreated`. Each explicit invocation
 advances at most one bounded range, persists a chain-scoped reorganization-aware
 cursor, and returns at most the newest 100 retained definitions after validating
-the complete cache page. An incomplete directory is marked `caughtUp: false`;
-callers must not present that recent page as the complete set of groups. Cached
-corruption clears only that chain's directory scope, while another chain's scope
-is preserved.
+the complete cache page and the event identifier sequence. Before reporting
+catch-up it reads `nextGroupId()` at the exact confirmed safe-head block and
+requires the retained event count to match. A truncated RPC response therefore
+resets the disposable directory scope instead of permanently skipping groups.
+An incomplete directory is marked `caughtUp: false`; callers must not present
+that recent page as the complete set of groups. Cached corruption clears only
+that chain's directory scope, while another chain's scope is preserved.
 
 The selected-group message stream verifies the chosen chain and exact v1 runtime
 before touching logs. Each explicit invocation scans at most one bounded range

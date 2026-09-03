@@ -29,8 +29,8 @@ import {
 
 const ACCOUNT_A = '0x000000000000000000000000000000000000aaaa' as Address
 const ACCOUNT_B = '0x000000000000000000000000000000000000bbbb' as Address
-const GROUP_A = 17n
-const GROUP_B = 18n
+const GROUP_A = 1n
+const GROUP_B = 2n
 const GROUP_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
 
@@ -40,6 +40,10 @@ function blockHash(blockNumber: bigint, branch = 'a') {
 
 function transactionHash(blockNumber: bigint) {
   return keccak256(stringToHex(`transaction:${blockNumber.toString()}`))
+}
+
+function uint256Result(value: bigint) {
+  return padHex(toHex(value), { size: 32 })
 }
 
 function rawGroup(
@@ -112,6 +116,7 @@ describe('group-directory stream synchronization', () => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_call') return uint256Result(1n)
         if (method === 'eth_getBlockByNumber') {
           const [number] = params as [string]
           return { hash: blockHash(BigInt(number)), number }
@@ -183,6 +188,7 @@ describe('group-directory stream synchronization', () => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_call') return uint256Result(3n)
         if (method === 'eth_getBlockByNumber') {
           const [number] = params as [string]
           return { hash: blockHash(BigInt(number)), number }
@@ -216,6 +222,47 @@ describe('group-directory stream synchronization', () => {
     })
   })
 
+  it('keeps discovery moving past a protocol-valid non-UTF-8 name', async () => {
+    const data = encodeAbiParameters(
+      [{ type: 'bytes' }, { type: 'bytes' }],
+      ['0xfffe', '0x'],
+    )
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_call') return uint256Result(2n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          return [
+            rawGroup(2n, GROUP_A, ACCOUNT_A, 'ignored fallback input', {
+              data,
+            }),
+          ]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      groups: [
+        {
+          groupId: GROUP_A,
+          name: '0xfffe',
+          nameBytes: '0xfffe',
+          nameEncoding: 'hex',
+        },
+      ],
+    })
+  })
+
   it('decodes a whole dense boundary block but returns only 100 groups', async () => {
     const logs = Array.from({ length: 101 }, (_, index) =>
       rawGroup(2n, BigInt(index + 1), ACCOUNT_A, `Public group ${index + 1}`, {
@@ -227,6 +274,7 @@ describe('group-directory stream synchronization', () => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_call') return uint256Result(102n)
         if (method === 'eth_getBlockByNumber') {
           const [number] = params as [string]
           return { hash: blockHash(BigInt(number)), number }
@@ -253,6 +301,7 @@ describe('group-directory stream synchronization', () => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_call') return uint256Result(2n)
         if (method === 'eth_getBlockByNumber') {
           const [number] = params as [string]
           return { hash: blockHash(BigInt(number)), number }
@@ -282,6 +331,54 @@ describe('group-directory stream synchronization', () => {
       groups: [{ groupId: GROUP_A, name: 'A valid public group' }],
     })
     expect(fromBlocks).toEqual(['0x0', '0x0'])
+  })
+
+  it('resets a falsely complete directory when RPC logs are truncated', async () => {
+    let returnCompleteHistory = false
+    const fromBlocks: string[] = []
+    const calls: Array<readonly unknown[]> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_call') {
+          calls.push((params ?? []) as unknown as readonly unknown[])
+          return uint256Result(3n)
+        }
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string }]
+          fromBlocks.push(filter.fromBlock)
+          const logs = [rawGroup(2n, GROUP_A, ACCOUNT_A, 'First group')]
+          if (returnCompleteHistory) {
+            logs.push(rawGroup(3n, GROUP_B, ACCOUNT_B, 'Second group'))
+          }
+          return logs
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, { storage: cacheStorage }),
+    ).rejects.toThrow(/incomplete confirmed group directory/i)
+    returnCompleteHistory = true
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      groups: [{ groupId: GROUP_B }, { groupId: GROUP_A }],
+    })
+    expect(fromBlocks).toEqual(['0x0', '0x0'])
+    expect(calls[0]).toEqual([
+      { data: '0x5eda7a76', to: PROTOCOL_ADDRESS },
+      '0x8',
+    ])
   })
 
   it('repairs a malformed cached group before resuming from genesis', async () => {
@@ -316,6 +413,7 @@ describe('group-directory stream synchronization', () => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_call') return uint256Result(2n)
         if (method === 'eth_getBlockByNumber') {
           const [number] = params as [string]
           return { hash: blockHash(BigInt(number)), number }
@@ -541,6 +639,7 @@ describe('group-directory stream synchronization', () => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return toHex(100n)
+        if (method === 'eth_call') return uint256Result(1n)
         if (method === 'eth_getBlockByNumber') {
           const [number] = params as [string]
           const blockNumber = BigInt(number)

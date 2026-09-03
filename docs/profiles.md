@@ -76,9 +76,9 @@ versioned IndexedDB resume cache keyed by chain and account. On a later check,
 an accepted tuple scans only appended events; an unreadable or rejected tuple
 is discarded and rebuilt. Failure to save this performance hint never changes
 the confirmed result. If a bounded projection finds older event-cache
-corruption, the reader clears that profile scope within the existing maintenance
-cap before offering a retry. A repair that exceeds the cap instead asks the user
-to clear disposable site data and reload. Wallet account, chain, or provider
+corruption, the reader clears that profile scope through the indexed reset path
+before offering a retry. Malformed primary keys outside the canonical range keep
+the fixed cleanup cap. Wallet account, chain, or provider
 changes abort and hide work from the old context. No hosted indexer or server
 database is part of the protocol.
 

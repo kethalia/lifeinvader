@@ -184,6 +184,7 @@ describe('browser event cache', () => {
     expect(await opened.cache.readLatest(seed)).toEqual({
       cursor: next,
       generation: initial.generation,
+      logCount: 2,
       logs: [eventLog(3n), eventLog(1n)],
       reset: false,
       revision: 1n,
@@ -226,10 +227,15 @@ describe('browser event cache', () => {
   it('aborts a rollback before it exceeds the configured local work budget', async () => {
     const { cache: opened } = await createCache(new IDBFactory(), FILTER, 2)
     const seed = seedCursor()
-    const original = cursorAt(seed, 4n)
+    const original = cursorAt(seed, 5n)
     await opened.apply(
       await opened.readLatest(seed),
-      syncResult(original, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+      syncResult(original, [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+        eventLog(4n),
+      ]),
     )
     const active = await opened.readLatest(seed)
 
@@ -237,20 +243,20 @@ describe('browser event cache', () => {
       opened.apply(
         active,
         syncResult(
-          cursorAt(seed, 4n, 'b'),
-          [eventLog(2n, { branch: 'b' })],
-          2n,
+          cursorAt(seed, 5n, 'b'),
+          [eventLog(1n, { branch: 'b' })],
+          1n,
         ),
       ),
     ).rejects.toThrow(/rollback exceeded its 2-log work limit/i)
     expect(await opened.readLatest(seed)).toMatchObject({
       cursor: original,
-      logs: [eventLog(3n), eventLog(2n), eventLog(1n)],
+      logs: [eventLog(4n), eventLog(3n), eventLog(2n), eventLog(1n)],
       revision: 1n,
     })
   })
 
-  it('aborts a cache reset before deletion exceeds the local work budget', async () => {
+  it('bounds rollback work by the changed suffix instead of total history', async () => {
     const { cache: opened } = await createCache(new IDBFactory(), FILTER, 2)
     const seed = seedCursor()
     const original = cursorAt(seed, 4n)
@@ -259,13 +265,73 @@ describe('browser event cache', () => {
       syncResult(original, [eventLog(1n), eventLog(2n), eventLog(3n)]),
     )
 
-    await expect(opened.clear(seed)).rejects.toThrow(
-      /repair exceeded its 2-log work limit/i,
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 4n, 'b'), [eventLog(3n, { branch: 'b' })], 3n),
     )
+
     expect(await opened.readLatest(seed)).toMatchObject({
-      cursor: original,
-      logs: [eventLog(3n), eventLog(2n), eventLog(1n)],
-      revision: 1n,
+      logCount: 3,
+      logs: [eventLog(3n, { branch: 'b' }), eventLog(2n), eventLog(1n)],
+      revision: 2n,
+    })
+  })
+
+  it('rolls back and clears a 5,001-log scope without replaying its history', async () => {
+    const { cache: opened } = await createCache(new IDBFactory(), FILTER, 1)
+    const seed = seedCursor()
+    const historicalLogs = Array.from({ length: 5_000 }, (_, index) =>
+      eventLog(BigInt(index)),
+    )
+    const historicalCursor = cursorAt(seed, 5_000n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(historicalCursor, historicalLogs),
+    )
+    const original = cursorAt(seed, 5_001n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(original, [eventLog(5_000n)]),
+    )
+    expect(await opened.readLatest(seed)).toMatchObject({ logCount: 5_001 })
+
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(
+        cursorAt(seed, 5_001n, 'b'),
+        [eventLog(5_000n, { branch: 'b' })],
+        5_000n,
+      ),
+    )
+    expect(await opened.readLatest(seed, 1)).toMatchObject({
+      logCount: 5_001,
+      logs: [eventLog(5_000n, { branch: 'b' })],
+      revision: 3n,
+    })
+
+    await expect(opened.clear(seed)).resolves.toBeUndefined()
+    expect(await opened.readLatest(seed)).toMatchObject({
+      logCount: 0,
+      logs: [],
+      revision: 4n,
+    })
+  })
+
+  it('clears a scope with one indexed range deletion', async () => {
+    const { cache: opened } = await createCache(new IDBFactory(), FILTER, 2)
+    const seed = seedCursor()
+    const original = cursorAt(seed, 4n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(original, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+
+    await expect(opened.clear(seed)).resolves.toBeUndefined()
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      logCount: 0,
+      logs: [],
+      revision: 2n,
     })
   })
 
@@ -333,6 +399,7 @@ describe('browser event cache', () => {
     expect(await opened.readLatest(seed)).toEqual({
       cursor: seed,
       generation: initial.generation,
+      logCount: 0,
       logs: [],
       reset: true,
       revision: 2n,
@@ -340,6 +407,7 @@ describe('browser event cache', () => {
     expect(await opened.readLatest(seed)).toEqual({
       cursor: seed,
       generation: initial.generation,
+      logCount: 0,
       logs: [],
       reset: false,
       revision: 2n,
@@ -364,6 +432,7 @@ describe('browser event cache', () => {
     expect(await opened.readLatest(seed)).toEqual({
       cursor: seed,
       generation: initial.generation,
+      logCount: 0,
       logs: [],
       reset: true,
       revision: 2n,
@@ -413,6 +482,7 @@ describe('browser event cache', () => {
         value: {
           cursor: seed,
           generation: repairBase.generation,
+          logCount: 0,
           logs: [],
           reset: true,
           revision: 2n,
@@ -469,6 +539,7 @@ describe('browser event cache', () => {
     expect(await opened.readLatest(seed)).toEqual({
       cursor: seed,
       generation: initial.generation,
+      logCount: 0,
       logs: [],
       reset: true,
       revision: 3n,
@@ -516,6 +587,7 @@ describe('browser event cache', () => {
     expect(await opened.readLatest(seed)).toEqual({
       cursor: seed,
       generation: initial.generation,
+      logCount: 0,
       logs: [],
       reset: true,
       revision: 1n,

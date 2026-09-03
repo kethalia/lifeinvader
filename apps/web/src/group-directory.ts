@@ -1,3 +1,4 @@
+import { encodeFunctionData, toHex } from 'viem'
 import { openEventCache, type OpenEventCacheOptions } from './event-cache'
 import {
   createEventCursor,
@@ -12,7 +13,7 @@ import {
   GROUP_CREATED_FILTER,
   type PublishedGroup,
 } from './protocol-events'
-import { inspectProtocol } from './protocol'
+import { inspectProtocol, PROTOCOL_ADDRESS } from './protocol'
 import {
   beforeDeadline,
   parseChainId,
@@ -23,6 +24,21 @@ import {
 
 export const GROUP_DIRECTORY_PAGE_SIZE = 100
 export const GROUP_DIRECTORY_START_BLOCK = 0n
+
+const NEXT_GROUP_ID_ABI = [
+  {
+    type: 'function',
+    name: 'nextGroupId',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const
+
+const NEXT_GROUP_ID_CALL = encodeFunctionData({
+  abi: NEXT_GROUP_ID_ABI,
+  functionName: 'nextGroupId',
+})
 
 export type GroupDirectorySnapshot = {
   cacheReset: boolean
@@ -155,6 +171,36 @@ async function assertCanonicalCheckpoint(
   }
 }
 
+async function readNextGroupId(
+  provider: Eip1193Provider,
+  blockNumber: bigint,
+  signal: AbortSignal,
+) {
+  const value = await requestInContext(
+    provider,
+    {
+      method: 'eth_call',
+      params: [
+        { data: NEXT_GROUP_ID_CALL, to: PROTOCOL_ADDRESS },
+        toHex(blockNumber),
+      ],
+    },
+    signal,
+  )
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/i.test(value)) {
+    throw new Error(
+      'The wallet returned an invalid confirmed group-directory count.',
+    )
+  }
+  const nextGroupId = BigInt(value)
+  if (nextGroupId < 1n) {
+    throw new Error(
+      'The wallet returned an invalid confirmed group-directory count.',
+    )
+  }
+  return nextGroupId
+}
+
 function decodeGroupLogs(logs: readonly IndexedEventLog[]) {
   return logs.map((log) => {
     const group = decodePublishedGroup(log)
@@ -165,6 +211,39 @@ function decodeGroupLogs(logs: readonly IndexedEventLog[]) {
     }
     return group
   })
+}
+
+function assertRecentGroupSequence(
+  groups: readonly PublishedGroup[],
+  logCount: number,
+) {
+  if (groups.length > logCount) {
+    throw new Error('The group directory has an invalid event count.')
+  }
+  for (let index = 0; index < groups.length; index += 1) {
+    if (groups[index]!.groupId !== BigInt(logCount - index)) {
+      throw new Error(
+        'The group directory has a non-contiguous identifier sequence.',
+      )
+    }
+  }
+}
+
+function assertFreshGroupSequence(
+  groups: readonly PublishedGroup[],
+  logCount: number,
+) {
+  if (groups.length > logCount) {
+    throw new Error('The group directory has an invalid event count.')
+  }
+  const retainedCount = logCount - groups.length
+  for (let index = 0; index < groups.length; index += 1) {
+    if (groups[index]!.groupId !== BigInt(retainedCount + index + 1)) {
+      throw new Error(
+        'The group directory has a non-contiguous identifier sequence.',
+      )
+    }
+  }
 }
 
 function sameCursor(first: EventCursor, second: EventCursor) {
@@ -261,7 +340,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       assertContextActive()
       let cacheReset = before.reset
       try {
-        decodeGroupLogs(before.logs)
+        assertRecentGroupSequence(decodeGroupLogs(before.logs), before.logCount)
       } catch {
         assertContextActive()
         await cache.clear(seed)
@@ -277,7 +356,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
         { maxRanges: 1, signal: interruption.signal },
       )
       assertContextActive()
-      decodeGroupLogs(result.logs)
+      const freshGroups = decodeGroupLogs(result.logs)
       await cache.apply(before, result)
       assertContextActive()
       const after = await cache.readLatest(seed, GROUP_DIRECTORY_PAGE_SIZE)
@@ -294,6 +373,8 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       let decodedPage: readonly PublishedGroup[]
       try {
         decodedPage = decodeGroupLogs(after.logs)
+        assertFreshGroupSequence(freshGroups, after.logCount)
+        assertRecentGroupSequence(decodedPage, after.logCount)
       } catch (error) {
         assertContextActive()
         await cache.clear(seed)
@@ -329,6 +410,26 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
           'The wallet head moved behind the confirmed groups. Retry after the chain stabilizes.',
         )
       }
+      const safeHead =
+        finalHead >= POST_FEED_CONFIRMATION_DEPTH
+          ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+          : undefined
+      const caughtUp =
+        safeHead === undefined || after.cursor.nextBlock > safeHead
+      const confirmedNextGroupId =
+        caughtUp && safeHead !== undefined
+          ? await readNextGroupId(provider, safeHead, interruption.signal)
+          : 1n
+      assertContextActive()
+      if (
+        caughtUp &&
+        safeHead !== undefined &&
+        finalCheckpoint?.blockNumber !== safeHead
+      ) {
+        throw new Error(
+          'The group-directory stream did not anchor at the confirmed safe head.',
+        )
+      }
       if (finalCheckpoint) {
         await assertCanonicalCheckpoint(
           provider,
@@ -339,19 +440,11 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       }
       await assertSelectedChain(provider, chainId, interruption.signal)
       assertContextActive()
-      const safeHead =
-        finalHead >= POST_FEED_CONFIRMATION_DEPTH
-          ? finalHead - POST_FEED_CONFIRMATION_DEPTH
-          : undefined
-      const caughtUp =
-        safeHead === undefined || after.cursor.nextBlock > safeHead
-      if (
-        caughtUp &&
-        safeHead !== undefined &&
-        finalCheckpoint?.blockNumber !== safeHead
-      ) {
+      if (caughtUp && confirmedNextGroupId !== BigInt(after.logCount) + 1n) {
+        await cache.clear(seed)
+        assertContextActive()
         throw new Error(
-          'The group-directory stream did not anchor at the confirmed safe head.',
+          'The RPC returned an incomplete confirmed group directory. Its local cache was reset.',
         )
       }
       return {
