@@ -227,6 +227,7 @@ describe('post reaction projection run', () => {
     })
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
     expect(() => run.baselines).toThrow(/not complete/i)
+    expect(() => run.projectionSnapshot).toThrow(/not complete/i)
 
     await run.advance()
     expect(run.snapshot).toMatchObject({
@@ -264,6 +265,9 @@ describe('post reaction projection run', () => {
     })
     expect(run.baselines.likes.logCount).toBe(3)
     expect(run.baselines.reposts.logCount).toBe(2)
+    expect(run.projectionSnapshot.repostCounts).toEqual([
+      { count: 2n, postId: 7n },
+    ])
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
     expect(run.getSummary(7n).repostCount).toBe(2n)

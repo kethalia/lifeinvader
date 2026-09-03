@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   encodeAbiParameters,
+  getAddress,
   keccak256,
   padHex,
   stringToHex,
@@ -9,7 +10,9 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
+  getPostReactionProjectionSnapshotDigest,
   MAX_POST_REACTION_PROJECTION_PAGE_LOGS,
+  POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
   PostReactionProjection,
 } from './post-reaction-projection'
 import { POST_CONTENT_KIND_TOPIC } from './protocol-events'
@@ -138,6 +141,184 @@ describe('post reaction projection', () => {
       likeCount: 0n,
       repostCount: 1n,
     })
+  })
+
+  it('round-trips canonical state and resumes later event pages', () => {
+    const projection = new PostReactionProjection()
+    projection.applyLikeLogs([
+      likeLog(1n, { postId: 8n }),
+      likeLog(2n),
+      likeLog(3n, { account: ACCOUNT_B }),
+      likeLog(4n, { liked: false }),
+    ])
+    projection.applyRepostLogs([
+      repostLog(1n, { postId: 8n }),
+      repostLog(2n),
+      repostLog(3n),
+    ])
+
+    const snapshot = projection.snapshot
+    expect(snapshot).toEqual({
+      activeLikes: [
+        { account: getAddress(ACCOUNT_B), postId: 7n },
+        { account: getAddress(ACCOUNT_A), postId: 8n },
+      ],
+      progress: {
+        likes: {
+          blockHash: hash('block:4'),
+          blockNumber: 4n,
+          logIndex: 0,
+        },
+        reposts: {
+          blockHash: hash('block:3'),
+          blockNumber: 3n,
+          logIndex: 0,
+        },
+      },
+      repostCounts: [
+        { count: 2n, postId: 7n },
+        { count: 1n, postId: 8n },
+      ],
+      schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
+    })
+
+    const restored = PostReactionProjection.fromSnapshot(snapshot)
+    expect(restored.getSummary(7n, ACCOUNT_A)).toEqual({
+      likeCount: 1n,
+      likedByAccount: false,
+      repostCount: 2n,
+    })
+    expect(restored.getSummary(8n, ACCOUNT_A)).toEqual({
+      likeCount: 1n,
+      likedByAccount: true,
+      repostCount: 1n,
+    })
+    expect(() =>
+      restored.applyLikeLogs([likeLog(4n, { logIndex: 1 })]),
+    ).toThrow(/page boundary/i)
+    restored.applyLikeLogs([likeLog(5n)])
+    restored.applyRepostLogs([repostLog(4n, { postId: 8n })])
+    expect(restored.getSummary(7n, ACCOUNT_A).likeCount).toBe(2n)
+    expect(restored.getSummary(8n).repostCount).toBe(2n)
+  })
+
+  it('canonicalizes entry order into one deterministic digest', () => {
+    const first = new PostReactionProjection()
+    first.applyLikeLogs([
+      likeLog(1n),
+      likeLog(1n, { account: ACCOUNT_B, logIndex: 1 }),
+    ])
+    first.applyRepostLogs([
+      repostLog(2n, { postId: 7n }),
+      repostLog(2n, { logIndex: 1, postId: 8n }),
+    ])
+    const second = new PostReactionProjection()
+    second.applyLikeLogs([
+      likeLog(1n, { account: ACCOUNT_B }),
+      likeLog(1n, { account: ACCOUNT_A, logIndex: 1 }),
+    ])
+    second.applyRepostLogs([
+      repostLog(2n, { postId: 8n }),
+      repostLog(2n, { logIndex: 1, postId: 7n }),
+    ])
+
+    expect(second.snapshot).toEqual(first.snapshot)
+    expect(getPostReactionProjectionSnapshotDigest(second.snapshot)).toBe(
+      getPostReactionProjectionSnapshotDigest(first.snapshot),
+    )
+    const reversed = {
+      ...first.snapshot,
+      activeLikes: first.snapshot.activeLikes.toReversed(),
+      repostCounts: first.snapshot.repostCounts.toReversed(),
+    }
+    expect(getPostReactionProjectionSnapshotDigest(reversed)).toBe(
+      getPostReactionProjectionSnapshotDigest(first.snapshot),
+    )
+    expect(PostReactionProjection.fromSnapshot(reversed).snapshot).toEqual(
+      first.snapshot,
+    )
+  })
+
+  it('returns defensive snapshots and derives like counts on restore', () => {
+    const projection = new PostReactionProjection()
+    projection.applyLikeLogs([likeLog(1n), likeLog(2n, { account: ACCOUNT_B })])
+    projection.applyRepostLogs([repostLog(3n)])
+    const snapshot = projection.snapshot
+    const restored = PostReactionProjection.fromSnapshot(snapshot)
+
+    snapshot.activeLikes[0]!.postId = 99n
+    snapshot.progress.likes!.blockNumber = 99n
+    snapshot.repostCounts[0]!.count = 99n
+    expect(projection.snapshot.activeLikes[0]!.postId).toBe(7n)
+    expect(restored.getSummary(7n).likeCount).toBe(2n)
+    expect(restored.getSummary(7n).repostCount).toBe(1n)
+    expect(restored.progress.likes!.blockNumber).toBe(2n)
+  })
+
+  it('rejects malformed or internally inconsistent snapshots', () => {
+    const projection = new PostReactionProjection()
+    projection.applyLikeLogs([likeLog(1n)])
+    projection.applyRepostLogs([repostLog(2n)])
+    const valid = projection.snapshot
+    const invalid = [
+      undefined,
+      { ...valid, schemaVersion: 2 },
+      { ...valid, activeLikes: 'not-an-array' },
+      {
+        ...valid,
+        activeLikes: [...valid.activeLikes, valid.activeLikes[0]!],
+      },
+      {
+        ...valid,
+        activeLikes: [{ account: 'not-an-address', postId: 7n }],
+      },
+      { ...valid, activeLikes: [{ account: ACCOUNT_A, postId: 0n }] },
+      {
+        ...valid,
+        progress: { ...valid.progress, likes: undefined },
+      },
+      {
+        ...valid,
+        progress: {
+          ...valid.progress,
+          likes: { ...valid.progress.likes, blockHash: '0x01' },
+        },
+      },
+      { ...valid, repostCounts: [{ count: 0n, postId: 7n }] },
+      {
+        ...valid,
+        repostCounts: [...valid.repostCounts, valid.repostCounts[0]!],
+      },
+      {
+        ...valid,
+        progress: { ...valid.progress, reposts: undefined },
+      },
+      { ...valid, repostCounts: [] },
+      {
+        ...valid,
+        progress: {
+          likes: {
+            blockHash: hash('one fork'),
+            blockNumber: 3n,
+            logIndex: 0,
+          },
+          reposts: {
+            blockHash: hash('another fork'),
+            blockNumber: 3n,
+            logIndex: 1,
+          },
+        },
+      },
+    ]
+
+    for (const snapshot of invalid) {
+      expect(() => PostReactionProjection.fromSnapshot(snapshot)).toThrow(
+        /invalid post reaction projection/i,
+      )
+    }
+    expect(() => getPostReactionProjectionSnapshotDigest(null)).toThrow(
+      /invalid post reaction projection snapshot/i,
+    )
   })
 
   it('applies a page atomically when a later record is corrupt', () => {

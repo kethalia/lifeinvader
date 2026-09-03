@@ -14,6 +14,7 @@ import {
 import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
 import {
   PostReactionProjection,
+  type PostReactionProjectionSnapshot,
   type PostReactionSummary,
 } from './post-reaction-projection'
 import {
@@ -367,6 +368,13 @@ export class PostReactionProjectionRun {
       likes: copyBaseline(this.#likeBaseline),
       reposts: copyBaseline(this.#repostBaseline),
     }
+  }
+
+  get projectionSnapshot(): PostReactionProjectionSnapshot {
+    if (this.#phase !== 'complete') {
+      throw new Error('The post reaction projection is not complete.')
+    }
+    return this.#projection.snapshot
   }
 
   getSummary(postId: unknown, account?: unknown): PostReactionSummary {

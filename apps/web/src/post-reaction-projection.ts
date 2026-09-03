@@ -1,4 +1,11 @@
-import { getAddress, isAddress, type Address, type Hash } from 'viem'
+import {
+  getAddress,
+  isAddress,
+  keccak256,
+  stringToHex,
+  type Address,
+  type Hash,
+} from 'viem'
 import {
   eventTransactionsAreConsistent,
   validateIndexedEventLog,
@@ -12,6 +19,7 @@ import {
 } from './protocol-events'
 
 export const MAX_POST_REACTION_PROJECTION_PAGE_LOGS = 5_199
+export const POST_REACTION_PROJECTION_SNAPSHOT_VERSION = 1
 
 const MAX_UINT256 = (1n << 256n) - 1n
 
@@ -32,6 +40,23 @@ export type PostReactionSummary = {
   repostCount: bigint
 }
 
+export type PostReactionProjectionActiveLike = {
+  account: Address
+  postId: bigint
+}
+
+export type PostReactionProjectionRepostCount = {
+  count: bigint
+  postId: bigint
+}
+
+export type PostReactionProjectionSnapshot = {
+  activeLikes: readonly PostReactionProjectionActiveLike[]
+  progress: PostReactionProjectionProgress
+  repostCounts: readonly PostReactionProjectionRepostCount[]
+  schemaVersion: typeof POST_REACTION_PROJECTION_SNAPSHOT_VERSION
+}
+
 type DecodedPage<Event> = {
   events: readonly Event[]
   last?: PostReactionProjectionPosition
@@ -39,6 +64,10 @@ type DecodedPage<Event> = {
 
 function projectionError(message: string) {
   return new Error(`Invalid post reaction projection ${message}.`)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
@@ -58,6 +87,39 @@ function getPosition(log: IndexedEventLog): PostReactionProjectionPosition {
 
 function copyPosition(position: PostReactionProjectionPosition) {
   return { ...position }
+}
+
+function normalizePosition(
+  value: unknown,
+  label: string,
+): PostReactionProjectionPosition | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw projectionError(`${label} snapshot position`)
+  if (
+    typeof value.blockHash !== 'string' ||
+    !/^0x[0-9a-f]{64}$/i.test(value.blockHash)
+  ) {
+    throw projectionError(`${label} snapshot block hash`)
+  }
+  if (
+    typeof value.blockNumber !== 'bigint' ||
+    value.blockNumber < 0n ||
+    value.blockNumber > MAX_UINT256
+  ) {
+    throw projectionError(`${label} snapshot block number`)
+  }
+  if (
+    typeof value.logIndex !== 'number' ||
+    !Number.isSafeInteger(value.logIndex) ||
+    value.logIndex < 0
+  ) {
+    throw projectionError(`${label} snapshot log index`)
+  }
+  return {
+    blockHash: value.blockHash.toLowerCase() as Hash,
+    blockNumber: value.blockNumber,
+    logIndex: value.logIndex,
+  }
 }
 
 function decodePage<Event>(
@@ -141,6 +203,139 @@ function getLikeKey(postId: bigint, account: Address) {
   return `${getPostKey(postId)}:${account.toLowerCase()}`
 }
 
+function compareActiveLikes(
+  first: PostReactionProjectionActiveLike,
+  second: PostReactionProjectionActiveLike,
+) {
+  if (first.postId !== second.postId)
+    return first.postId < second.postId ? -1 : 1
+  const firstAccount = first.account.toLowerCase()
+  const secondAccount = second.account.toLowerCase()
+  if (firstAccount === secondAccount) return 0
+  return firstAccount < secondAccount ? -1 : 1
+}
+
+function compareRepostCounts(
+  first: PostReactionProjectionRepostCount,
+  second: PostReactionProjectionRepostCount,
+) {
+  if (first.postId === second.postId) return 0
+  return first.postId < second.postId ? -1 : 1
+}
+
+function decodeLikeKey(key: string): PostReactionProjectionActiveLike {
+  const separator = key.indexOf(':')
+  if (separator < 1) throw projectionError('internal like key')
+  return {
+    account: getAddress(key.slice(separator + 1)),
+    postId: BigInt(`0x${key.slice(0, separator)}`),
+  }
+}
+
+function normalizeActiveLikes(
+  value: unknown,
+): readonly PostReactionProjectionActiveLike[] {
+  if (!Array.isArray(value)) throw projectionError('active likes snapshot')
+  const likes = new Map<string, PostReactionProjectionActiveLike>()
+  for (const entryValue of value) {
+    if (!isRecord(entryValue)) throw projectionError('active like snapshot')
+    const postId = normalizePostId(entryValue.postId)
+    const account = normalizeAccount(entryValue.account)
+    const key = getLikeKey(postId, account)
+    if (likes.has(key)) throw projectionError('duplicate active like snapshot')
+    likes.set(key, { account, postId })
+  }
+  return [...likes.values()].toSorted(compareActiveLikes)
+}
+
+function normalizeRepostCounts(
+  value: unknown,
+): readonly PostReactionProjectionRepostCount[] {
+  if (!Array.isArray(value)) throw projectionError('repost counts snapshot')
+  const counts = new Map<string, PostReactionProjectionRepostCount>()
+  for (const entryValue of value) {
+    if (!isRecord(entryValue)) throw projectionError('repost count snapshot')
+    const postId = normalizePostId(entryValue.postId)
+    if (typeof entryValue.count !== 'bigint' || entryValue.count < 1n) {
+      throw projectionError('repost snapshot count')
+    }
+    const key = getPostKey(postId)
+    if (counts.has(key))
+      throw projectionError('duplicate repost count snapshot')
+    counts.set(key, { count: entryValue.count, postId })
+  }
+  return [...counts.values()].toSorted(compareRepostCounts)
+}
+
+function normalizeSnapshot(value: unknown): PostReactionProjectionSnapshot {
+  if (!isRecord(value)) throw projectionError('snapshot')
+  if (value.schemaVersion !== POST_REACTION_PROJECTION_SNAPSHOT_VERSION) {
+    throw projectionError('snapshot schema version')
+  }
+  if (!isRecord(value.progress)) throw projectionError('snapshot progress')
+  const progress = {
+    likes: normalizePosition(value.progress.likes, 'like'),
+    reposts: normalizePosition(value.progress.reposts, 'repost'),
+  }
+  const activeLikes = normalizeActiveLikes(value.activeLikes)
+  const repostCounts = normalizeRepostCounts(value.repostCounts)
+  if (activeLikes.length > 0 && !progress.likes) {
+    throw projectionError('active likes snapshot progress')
+  }
+  if (repostCounts.length > 0 && !progress.reposts) {
+    throw projectionError('repost counts snapshot progress')
+  }
+  if (progress.reposts && repostCounts.length === 0) {
+    throw projectionError('repost progress snapshot counts')
+  }
+  if (
+    progress.likes &&
+    progress.reposts &&
+    progress.likes.blockNumber === progress.reposts.blockNumber &&
+    progress.likes.blockHash !== progress.reposts.blockHash
+  ) {
+    throw projectionError('snapshot progress block hash')
+  }
+  return {
+    activeLikes,
+    progress,
+    repostCounts,
+    schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
+  }
+}
+
+function serializeSnapshot(snapshot: PostReactionProjectionSnapshot) {
+  return JSON.stringify([
+    'lifeinvader.post-reaction-projection.snapshot.v1',
+    snapshot.activeLikes.map(({ account, postId }) => [
+      postId.toString(16),
+      account.toLowerCase(),
+    ]),
+    snapshot.repostCounts.map(({ count, postId }) => [
+      postId.toString(16),
+      count.toString(16),
+    ]),
+    snapshot.progress.likes
+      ? [
+          snapshot.progress.likes.blockNumber.toString(16),
+          snapshot.progress.likes.logIndex.toString(16),
+          snapshot.progress.likes.blockHash,
+        ]
+      : null,
+    snapshot.progress.reposts
+      ? [
+          snapshot.progress.reposts.blockNumber.toString(16),
+          snapshot.progress.reposts.logIndex.toString(16),
+          snapshot.progress.reposts.blockHash,
+        ]
+      : null,
+  ])
+}
+
+export function getPostReactionProjectionSnapshotDigest(value: unknown) {
+  return keccak256(stringToHex(serializeSnapshot(normalizeSnapshot(value))))
+}
+
 export class PostReactionProjection {
   readonly #activeLikes = new Set<string>()
   readonly #likeCounts = new Map<string, bigint>()
@@ -148,10 +343,46 @@ export class PostReactionProjection {
   #lastLike?: PostReactionProjectionPosition
   #lastRepost?: PostReactionProjectionPosition
 
+  static fromSnapshot(value: unknown) {
+    const snapshot = normalizeSnapshot(value)
+    const projection = new PostReactionProjection()
+    for (const { account, postId } of snapshot.activeLikes) {
+      const postKey = getPostKey(postId)
+      projection.#activeLikes.add(getLikeKey(postId, account))
+      projection.#likeCounts.set(
+        postKey,
+        (projection.#likeCounts.get(postKey) ?? 0n) + 1n,
+      )
+    }
+    for (const { count, postId } of snapshot.repostCounts) {
+      projection.#repostCounts.set(getPostKey(postId), count)
+    }
+    projection.#lastLike = snapshot.progress.likes
+    projection.#lastRepost = snapshot.progress.reposts
+    return projection
+  }
+
   get progress(): PostReactionProjectionProgress {
     return {
       likes: this.#lastLike ? copyPosition(this.#lastLike) : undefined,
       reposts: this.#lastRepost ? copyPosition(this.#lastRepost) : undefined,
+    }
+  }
+
+  get snapshot(): PostReactionProjectionSnapshot {
+    const activeLikes = [...this.#activeLikes]
+      .map(decodeLikeKey)
+      .toSorted(compareActiveLikes)
+    const repostCounts = [...this.#repostCounts].map(([postKey, count]) => ({
+      count,
+      postId: BigInt(`0x${postKey}`),
+    }))
+    repostCounts.sort(compareRepostCounts)
+    return {
+      activeLikes,
+      progress: this.progress,
+      repostCounts,
+      schemaVersion: POST_REACTION_PROJECTION_SNAPSHOT_VERSION,
     }
   }
 
