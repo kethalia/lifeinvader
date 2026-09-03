@@ -9,6 +9,7 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import { createEventCursor, syncEventLogs } from './event-indexer'
 import {
   deployProtocol,
   inspectProtocol,
@@ -126,26 +127,23 @@ describe('wallet transaction helpers on Anvil', () => {
       provider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
-    const postBlock = `0x${postReceipt.blockNumber.toString(16)}`
-    const logs = await provider.request({
-      method: 'eth_getLogs',
-      params: [
-        {
-          address: PROTOCOL_ADDRESS,
-          fromBlock: postBlock,
-          toBlock: postBlock,
-        },
-      ],
-    })
-    expect(Array.isArray(logs)).toBe(true)
-    const firstLog = Array.isArray(logs) ? logs[0] : undefined
+    const topic = keccak256(
+      toHex('PostPublished(uint256,address,string,bytes)'),
+    )
+    const filter = { address: PROTOCOL_ADDRESS, topics: [topic] } as const
+    const indexed = await syncEventLogs(
+      provider,
+      filter,
+      createEventCursor(LOCAL_CHAIN_ID, filter, 1n, 1),
+      { finalityDepth: 0n, maxRangeSize: 1, maxRanges: 4 },
+    )
+    expect(indexed.caughtUp).toBe(true)
+    expect(indexed.logs).toHaveLength(1)
+    const firstLog = indexed.logs[0]
     expect(firstLog).toMatchObject({
-      address: PROTOCOL_ADDRESS.toLowerCase(),
-      topics: [
-        keccak256(toHex('PostPublished(uint256,address,string,bytes)')),
-        expect.any(String),
-        expect.any(String),
-      ],
+      address: PROTOCOL_ADDRESS,
+      blockNumber: postReceipt.blockNumber,
+      topics: [topic, expect.any(String), expect.any(String)],
     })
   })
 })

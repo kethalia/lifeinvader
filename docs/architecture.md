@@ -28,7 +28,7 @@ Injected wallets are discovered through EIP-6963 and submit writes through their
 
 ## Browser indexing
 
-The browser indexer will request logs in bounded block ranges, persist finalized checkpoints locally, or discard and rebuild them, and roll back data affected by reorgs. Screens should request only the event families and indexed topics they need. A new device can always reconstruct its view from RPC without trusting a Lifeinvader service.
+The browser indexer requests logs in bounded block ranges, persists finalized checkpoints locally or discards and rebuilds them, and rolls back data affected by reorgs. Screens request only the event families and indexed topics they need. A new device can always reconstruct its view from RPC without trusting a Lifeinvader service. The synchronization and rollback contract is specified in [`indexing.md`](./indexing.md).
 
 The initial interface is allowed to contain fixture content while protocol and indexer work proceeds, but fixtures must be visibly identified and isolated from chain-derived models.
 
