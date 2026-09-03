@@ -14,19 +14,30 @@ import {
   COMMENT_PUBLISHED_EVENT_ABI,
   COMMENT_PUBLISHED_TOPIC,
   getPostBodyByteLength,
+  getUtf8ByteLength,
   MAX_MEDIA_CID_BYTES,
   MAX_POST_BODY_BYTES,
+  MAX_PROFILE_BIO_BYTES,
+  MAX_PROFILE_DISPLAY_NAME_BYTES,
   LIKE_SET_EVENT_ABI,
   LIKE_SET_TOPIC,
   POST_CONTENT_KIND,
   POST_PUBLISHED_EVENT_ABI,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
+  PROFILE_SET_EVENT_ABI,
+  PROFILE_SET_TOPIC,
   REPOST_PUBLISHED_EVENT_ABI,
   REPOST_PUBLISHED_TOPIC,
 } from './protocol'
 
 const PUBLICATION_DATA_PARAMETERS = [
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+
+const PROFILE_DATA_PARAMETERS = [
+  { type: 'string' },
   { type: 'string' },
   { type: 'bytes' },
 ] as const
@@ -53,6 +64,11 @@ export const PUBLISHED_REPOST_FILTER = {
 export const PUBLISHED_POST_FILTER = {
   address: PROTOCOL_ADDRESS,
   topics: [POST_PUBLISHED_TOPIC],
+} as const satisfies EventLogFilter
+
+export const PROFILE_SET_FILTER = {
+  address: PROTOCOL_ADDRESS,
+  topics: [PROFILE_SET_TOPIC],
 } as const satisfies EventLogFilter
 
 export type PublishedPost = {
@@ -101,6 +117,18 @@ export type PublishedRepost = {
   transactionIndex: number
 }
 
+export type ProfileSet = {
+  account: Address
+  avatarCid: Hex
+  bio: string
+  blockHash: Hash
+  blockNumber: bigint
+  displayName: string
+  logIndex: number
+  transactionHash: Hash
+  transactionIndex: number
+}
+
 function invalidPostEvent() {
   return new Error('The chain returned an invalid PostPublished event.')
 }
@@ -115,6 +143,10 @@ function invalidPostLikeEvent() {
 
 function invalidRepostEvent() {
   return new Error('The chain returned an invalid RepostPublished event.')
+}
+
+function invalidProfileEvent() {
+  return new Error('The chain returned an invalid ProfileSet event.')
 }
 
 export function decodePublishedPost(
@@ -306,5 +338,53 @@ export function decodePublishedRepost(
     }
   } catch {
     throw invalidRepostEvent()
+  }
+}
+
+export function decodeProfileSet(log: IndexedEventLog): ProfileSet | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== PROFILE_SET_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 2) throw invalidProfileEvent()
+  try {
+    const decoded = decodeEventLog({
+      abi: PROFILE_SET_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { account, avatarCid, bio, displayName } = decoded.args
+    const normalizedAccount = getAddress(account)
+    if (
+      getUtf8ByteLength(displayName) > MAX_PROFILE_DISPLAY_NAME_BYTES ||
+      getUtf8ByteLength(bio) > MAX_PROFILE_BIO_BYTES ||
+      size(avatarCid) > MAX_MEDIA_CID_BYTES ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(PROFILE_DATA_PARAMETERS, [
+          displayName,
+          bio,
+          avatarCid,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !==
+        padHex(normalizedAccount, { size: 32 }).toLowerCase()
+    ) {
+      throw invalidProfileEvent()
+    }
+    return {
+      account: normalizedAccount,
+      avatarCid,
+      bio,
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      displayName,
+      logIndex: log.logIndex,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidProfileEvent()
   }
 }

@@ -24,6 +24,7 @@ import {
   publishComment,
   publishRepost,
   publishPost,
+  setProfile,
   setPostLike,
 } from './protocol'
 const MEDIA_CID = parseMediaCid(
@@ -130,6 +131,20 @@ describe('wallet transaction helpers on Anvil', () => {
       deployProtocol(provider, account, LOCAL_CHAIN_ID, undefined, provider),
     ).resolves.toMatchObject({ blockNumber: 1n })
     await expect(inspectProtocol(provider)).resolves.toEqual({ kind: 'ready' })
+    await expect(
+      setProfile(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        {
+          avatarCid: MEDIA_CID.bytes,
+          bio: 'Every detail is on-chain.',
+          displayName: 'Tracey',
+        },
+        undefined,
+        provider,
+      ),
+    ).resolves.toMatchObject({ blockNumber: 2n })
     const postReceipt = await publishPost(
       provider,
       account,
@@ -138,7 +153,7 @@ describe('wallet transaction helpers on Anvil', () => {
       undefined,
       provider,
     )
-    expect(postReceipt).toMatchObject({ blockNumber: 2n })
+    expect(postReceipt).toMatchObject({ blockNumber: 3n })
     await expect(
       publishComment(
         provider,
@@ -149,7 +164,7 @@ describe('wallet transaction helpers on Anvil', () => {
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 3n })
+    ).resolves.toMatchObject({ blockNumber: 4n })
     await expect(
       setPostLike(
         provider,
@@ -160,7 +175,7 @@ describe('wallet transaction helpers on Anvil', () => {
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 4n })
+    ).resolves.toMatchObject({ blockNumber: 5n })
     await expect(
       setPostLike(
         provider,
@@ -171,10 +186,20 @@ describe('wallet transaction helpers on Anvil', () => {
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 5n })
+    ).resolves.toMatchObject({ blockNumber: 6n })
     await expect(
       publishRepost(provider, account, LOCAL_CHAIN_ID, 1n, undefined, provider),
-    ).resolves.toMatchObject({ blockNumber: 6n })
+    ).resolves.toMatchObject({ blockNumber: 7n })
+    await expect(
+      setProfile(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        { avatarCid: '0x', bio: '', displayName: '' },
+        undefined,
+        provider,
+      ),
+    ).resolves.toMatchObject({ blockNumber: 8n })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,
