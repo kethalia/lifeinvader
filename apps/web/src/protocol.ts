@@ -10,6 +10,7 @@ import {
 
 import {
   getRpcErrorCode,
+  parseAccounts,
   parseChainId,
   parseTransactionHash,
   type Eip1193Provider,
@@ -292,60 +293,106 @@ export async function switchToLocalChain(
   await verifyLocalChain(provider, localProvider)
 }
 
-type ChainGuard = {
-  assertCurrent(): Promise<void>
+type TransactionGuard = {
+  assertChain(): Promise<void>
+  assertSubmission(): Promise<void>
   chainId: bigint
   release(): void
 }
 
 function chainChangedError() {
   return new Error(
-    'The wallet network changed during this action. Check the submitted transaction in your wallet before trying again.',
+    'The wallet network changed during this action. If the wallet showed a transaction, check it before trying again.',
   )
 }
 
-async function createChainGuard(
+function accountChangedError() {
+  return new Error(
+    'The selected wallet account changed during this action. If the wallet showed a transaction, check it before trying again.',
+  )
+}
+
+async function createTransactionGuard(
   provider: Eip1193Provider,
-): Promise<ChainGuard> {
+  account: Address,
+): Promise<TransactionGuard> {
   const chainId = parseChainId(
     await provider.request({ method: 'eth_chainId' }),
   )
-  let changed = false
+  let chainChanged = false
+  let accountChanged = false
   const handleChainChanged = (value: unknown) => {
     try {
-      if (parseChainId(value) !== chainId) changed = true
+      if (parseChainId(value) !== chainId) chainChanged = true
     } catch {
-      changed = true
+      chainChanged = true
+    }
+  }
+  const handleAccountsChanged = (value: unknown) => {
+    try {
+      const selectedAccount = parseAccounts(value)[0]
+      if (selectedAccount?.toLowerCase() !== account.toLowerCase()) {
+        accountChanged = true
+      }
+    } catch {
+      accountChanged = true
     }
   }
   provider.on?.('chainChanged', handleChainChanged)
+  provider.on?.('accountsChanged', handleAccountsChanged)
 
-  const release = () =>
+  const release = () => {
     provider.removeListener?.('chainChanged', handleChainChanged)
-  const assertCurrent = async () => {
-    const currentChainId = parseChainId(
-      await provider.request({ method: 'eth_chainId' }),
-    )
-    if (changed || currentChainId !== chainId) throw chainChangedError()
+    provider.removeListener?.('accountsChanged', handleAccountsChanged)
+  }
+  const assertChain = async () => {
+    let currentChainId: bigint
+    try {
+      currentChainId = parseChainId(
+        await provider.request({ method: 'eth_chainId' }),
+      )
+    } catch {
+      throw chainChangedError()
+    }
+    if (chainChanged || currentChainId !== chainId) throw chainChangedError()
+  }
+  const assertSender = async () => {
+    let selectedAccount: Address | undefined
+    try {
+      selectedAccount = parseAccounts(
+        await provider.request({ method: 'eth_accounts' }),
+      )[0]
+    } catch {
+      throw accountChangedError()
+    }
+    if (
+      accountChanged ||
+      selectedAccount?.toLowerCase() !== account.toLowerCase()
+    ) {
+      throw accountChangedError()
+    }
+  }
+  const assertSubmission = async () => {
+    await Promise.all([assertChain(), assertSender()])
   }
 
   try {
-    await assertCurrent()
+    await assertSubmission()
   } catch (error) {
     release()
     throw error
   }
 
-  return { assertCurrent, chainId, release }
+  return { assertChain, assertSubmission, chainId, release }
 }
 
 async function sendTransaction(
   provider: Eip1193Provider,
   transaction: { data: Hex; from: Address; to: Address },
-  guard: ChainGuard,
+  guard: TransactionGuard,
   onSubmitted?: TransactionSubmitted,
 ): Promise<Hash> {
-  await guard.assertCurrent()
+  await guard.assertSubmission()
   const hash = parseTransactionHash(
     await provider.request({
       method: 'eth_sendTransaction',
@@ -358,7 +405,7 @@ async function sendTransaction(
     }),
   )
   onSubmitted?.(hash)
-  await guard.assertCurrent()
+  await guard.assertSubmission()
   return hash
 }
 
@@ -379,9 +426,22 @@ function parseReceipt(
   if (typeof blockNumber !== 'string' || !/^0x[0-9a-f]+$/i.test(blockNumber)) {
     throw new Error('The wallet returned an invalid receipt block number.')
   }
-  if (status === '0x0') throw new Error('The transaction reverted on-chain.')
+  if (status === '0x0') throw new TransactionRevertedError(hash)
 
   return { blockNumber: BigInt(blockNumber), hash }
+}
+
+class TransactionRevertedError extends Error {
+  constructor(hash: Hash) {
+    super(`Transaction ${hash} reverted on-chain.`)
+    this.name = 'TransactionRevertedError'
+  }
+}
+
+export function isTransactionRevertedError(
+  error: unknown,
+): error is TransactionRevertedError {
+  return error instanceof TransactionRevertedError
 }
 
 function delay(milliseconds: number) {
@@ -400,16 +460,11 @@ export async function waitForTransactionReceipt(
 
   while (true) {
     await options.assertCurrentChain?.()
-    let receiptValue: unknown
-    try {
-      receiptValue = await provider.request({
-        method: 'eth_getTransactionReceipt',
-        params: [hash],
-      })
-    } catch {
-      await delay(pollIntervalMs)
-      continue
-    }
+    const receiptValue = await provider.request({
+      method: 'eth_getTransactionReceipt',
+      params: [hash],
+    })
+    await options.assertCurrentChain?.()
 
     const receipt = parseReceipt(receiptValue, hash)
     if (receipt) return receipt
@@ -423,7 +478,7 @@ export async function deployProtocol(
   onSubmitted?: TransactionSubmitted,
 ): Promise<TransactionReceipt> {
   assertProtocolConfiguration()
-  const guard = await createChainGuard(provider)
+  const guard = await createTransactionGuard(provider, account)
   try {
     const inspection = await inspectProtocol(provider)
     if (inspection.kind === 'ready') {
@@ -444,7 +499,7 @@ export async function deployProtocol(
       onSubmitted,
     )
     return await waitForTransactionReceipt(provider, hash, {
-      assertCurrentChain: guard.assertCurrent,
+      assertCurrentChain: guard.assertChain,
     })
   } finally {
     guard.release()
@@ -466,7 +521,7 @@ export async function publishPost(
   if (bodyLength > MAX_POST_BODY_BYTES) {
     throw new Error(`Posts are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`)
   }
-  const guard = await createChainGuard(provider)
+  const guard = await createTransactionGuard(provider, account)
   try {
     if ((await inspectProtocol(provider)).kind !== 'ready') {
       throw new Error(
@@ -489,7 +544,7 @@ export async function publishPost(
       onSubmitted,
     )
     return await waitForTransactionReceipt(provider, hash, {
-      assertCurrentChain: guard.assertCurrent,
+      assertCurrentChain: guard.assertChain,
     })
   } finally {
     guard.release()

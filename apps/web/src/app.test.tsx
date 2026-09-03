@@ -21,6 +21,10 @@ const FACTORY_RUNTIME_CODE =
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
 const TRANSACTION_HASH =
   '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const REVERTED_TRANSACTION_HASH =
+  '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+const UNKNOWN_TRANSACTION_HASH =
+  '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 
 afterEach(() => {
   cleanup()
@@ -56,6 +60,9 @@ describe('App', () => {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
           if (method === 'eth_requestAccounts') {
+            return ['0x000000000000000000000000000000000000a11c']
+          }
+          if (method === 'eth_accounts') {
             return ['0x000000000000000000000000000000000000a11c']
           }
           if (method === 'eth_chainId') return '0x1'
@@ -162,6 +169,7 @@ describe('App', () => {
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
     let deployed = false
     let failNextInspection = false
+    let transactionNumber = 0
     let resolveReceipt: ((value: unknown) => void) | undefined
     const receiptResponse = new Promise<unknown>((resolve) => {
       resolveReceipt = resolve
@@ -170,6 +178,9 @@ describe('App', () => {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
           if (method === 'eth_requestAccounts') {
+            return ['0x000000000000000000000000000000000000a11c']
+          }
+          if (method === 'eth_accounts') {
             return ['0x000000000000000000000000000000000000a11c']
           }
           if (method === 'eth_chainId') return '0x1'
@@ -184,12 +195,25 @@ describe('App', () => {
             }
             if (address === FACTORY_ADDRESS) return FACTORY_RUNTIME_CODE
           }
-          if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+          if (method === 'eth_sendTransaction') {
+            transactionNumber += 1
+            return [
+              TRANSACTION_HASH,
+              REVERTED_TRANSACTION_HASH,
+              UNKNOWN_TRANSACTION_HASH,
+            ][transactionNumber - 1]
+          }
           if (method === 'eth_getTransactionReceipt') {
-            const result = await receiptResponse
-            deployed = true
-            failNextInspection = true
-            return result
+            if (transactionNumber === 1) {
+              const result = await receiptResponse
+              deployed = true
+              failNextInspection = true
+              return result
+            }
+            if (transactionNumber === 2) {
+              return { blockNumber: '0x2b', status: '0x0' }
+            }
+            throw new Error('Wallet disconnected.')
           }
           throw new Error(`Unexpected method: ${method}`)
         },
@@ -237,6 +261,42 @@ describe('App', () => {
     expect(
       await screen.findByText(/verified Lifeinvader v1 code is ready/i),
     ).toBeTruthy()
+
+    const textarea = screen.getByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Try, try again.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /reverted on-chain/i,
+    )
+    expect(screen.getByTitle(REVERTED_TRANSACTION_HASH)).toBeTruthy()
+    expect(
+      screen
+        .getByRole('button', { name: /publish on-chain/i })
+        .hasAttribute('disabled'),
+    ).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
+    expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
+    expect(
+      screen
+        .getByRole('button', { name: /publish on-chain/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
+    expect(
+      screen
+        .getByRole('button', { name: /connect pending wallet/i })
+        .hasAttribute('disabled'),
+    ).toBe(false)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked this hash/i }),
+    )
+    expect(
+      screen
+        .getByRole('button', { name: /publish on-chain/i })
+        .hasAttribute('disabled'),
+    ).toBe(false)
 
     window.removeEventListener('eip6963:requestProvider', announce)
   })

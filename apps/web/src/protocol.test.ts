@@ -8,6 +8,7 @@ import {
   FACTORY_CODE_HASH,
   getPostBodyByteLength,
   inspectProtocol,
+  isTransactionRevertedError,
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
   publishPost,
@@ -128,9 +129,43 @@ describe('post transactions', () => {
       status: '0x0',
     }))
 
+    const error = await waitForTransactionReceipt(
+      provider,
+      TRANSACTION_HASH,
+    ).catch((error: unknown) => error)
+
+    expect(isTransactionRevertedError(error)).toBe(true)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/reverted on-chain/i)
+  })
+
+  it('stops polling when the receipt provider rejects', async () => {
+    const request = vi.fn(async () => {
+      throw new Error('Wallet disconnected.')
+    })
+
     await expect(
-      waitForTransactionReceipt(provider, TRANSACTION_HASH),
-    ).rejects.toThrow(/reverted on-chain/i)
+      waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH),
+    ).rejects.toThrow(/wallet disconnected/i)
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks the selected chain after reading a receipt', async () => {
+    let changed = false
+    const assertCurrentChain = vi.fn(async () => {
+      if (changed) throw new Error('Wallet network changed.')
+    })
+    const provider = providerFrom(async () => {
+      changed = true
+      return { blockNumber: '0x2a', status: '0x1' }
+    })
+
+    await expect(
+      waitForTransactionReceipt(provider, TRANSACTION_HASH, {
+        assertCurrentChain,
+      }),
+    ).rejects.toThrow(/network changed/i)
+    expect(assertCurrentChain).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -139,6 +174,7 @@ describe('transaction chain binding', () => {
     let handleChainChanged: ((...args: unknown[]) => void) | undefined
     const request = vi.fn(async ({ method, params }: ProviderRequest) => {
       if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_accounts') return [ACCOUNT]
       if (method === 'eth_getCode') {
         const [address] = params as readonly string[]
         if (address === PROTOCOL_ADDRESS) return '0x'
@@ -155,11 +191,11 @@ describe('transaction chain binding', () => {
       deployProtocol(
         {
           request,
-          on: (_event, listener) => {
-            handleChainChanged = listener
+          on: (event, listener) => {
+            if (event === 'chainChanged') handleChainChanged = listener
           },
-          removeListener: () => {
-            handleChainChanged = undefined
+          removeListener: (event) => {
+            if (event === 'chainChanged') handleChainChanged = undefined
           },
         },
         ACCOUNT,
@@ -177,6 +213,7 @@ describe('transaction chain binding', () => {
     const onSubmitted = vi.fn()
     const request = vi.fn(async ({ method, params }: ProviderRequest) => {
       if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_accounts') return [ACCOUNT]
       if (method === 'eth_getCode') {
         const [address] = params as readonly string[]
         return address === PROTOCOL_ADDRESS ? '0x' : FACTORY_RUNTIME_CODE
@@ -193,11 +230,11 @@ describe('transaction chain binding', () => {
       deployProtocol(
         {
           request,
-          on: (_event, listener) => {
-            handleChainChanged = listener
+          on: (event, listener) => {
+            if (event === 'chainChanged') handleChainChanged = listener
           },
-          removeListener: () => {
-            handleChainChanged = undefined
+          removeListener: (event) => {
+            if (event === 'chainChanged') handleChainChanged = undefined
           },
         },
         ACCOUNT,
@@ -208,6 +245,42 @@ describe('transaction chain binding', () => {
     expect(
       request.mock.calls.some(
         ([request]) => request.method === 'eth_getTransactionReceipt',
+      ),
+    ).toBe(false)
+  })
+
+  it('does not submit after the selected account changes', async () => {
+    let handleAccountsChanged: ((...args: unknown[]) => void) | undefined
+    const request = vi.fn(async ({ method, params }: ProviderRequest) => {
+      if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_accounts') return [ACCOUNT]
+      if (method === 'eth_getCode') {
+        const [address] = params as readonly string[]
+        if (address === PROTOCOL_ADDRESS) return '0x'
+        handleAccountsChanged?.(['0x000000000000000000000000000000000000b0b0'])
+        return FACTORY_RUNTIME_CODE
+      }
+      if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+      throw new Error(`Unexpected method: ${method}`)
+    })
+
+    await expect(
+      deployProtocol(
+        {
+          request,
+          on: (event, listener) => {
+            if (event === 'accountsChanged') handleAccountsChanged = listener
+          },
+          removeListener: (event) => {
+            if (event === 'accountsChanged') handleAccountsChanged = undefined
+          },
+        },
+        ACCOUNT,
+      ),
+    ).rejects.toThrow(/account changed/i)
+    expect(
+      request.mock.calls.some(
+        ([request]) => request.method === 'eth_sendTransaction',
       ),
     ).toBe(false)
   })
