@@ -49,14 +49,22 @@ function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
     </p>
   )
 }
-type TransactionContext = {
+type WalletContext = {
   account: Address
-  action: 'deploy' | 'post'
   chainId: bigint
-  postBody: string
-  postMediaCid: Hex
   provider: Eip1193Provider
   walletName: string
+}
+type TransactionContext = WalletContext & {
+  action: 'deploy' | 'post'
+  postBody: string
+  postMediaCid: Hex
+}
+type BusyOperation = {
+  action: 'chain' | 'deploy' | 'post' | 'receipt'
+  context?: WalletContext
+  id: number
+  scope: 'context' | 'provider'
 }
 type SubmittedTransaction = TransactionContext & {
   hash?: TransactionReceipt['hash']
@@ -71,7 +79,7 @@ type TransactionResultState = TransactionContext & {
   receipt: TransactionReceipt
 }
 function transactionContextMatchesSession(
-  transaction: TransactionContext,
+  transaction: WalletContext,
   session: WalletSession,
 ) {
   return (
@@ -80,6 +88,16 @@ function transactionContextMatchesSession(
     transaction.chainId === session.chainId &&
     transaction.account.toLowerCase() === session.account?.toLowerCase()
   )
+}
+function busyOperationMatchesSession(
+  operation: BusyOperation,
+  session: WalletSession,
+) {
+  if (!operation.context) return true
+  if (operation.scope === 'provider') {
+    return operation.context.provider === session.provider
+  }
+  return transactionContextMatchesSession(operation.context, session)
 }
 function sameTransactionContext(
   first: TransactionContext,
@@ -172,9 +190,7 @@ export function WalletPanel({
   const [localChainState, setLocalChainState] = useState<
     'not-selected' | 'checking' | 'verified' | 'mismatch'
   >('not-selected')
-  const [busyAction, setBusyAction] = useState<
-    'chain' | 'deploy' | 'post' | 'receipt'
-  >()
+  const [busyOperations, setBusyOperations] = useState<BusyOperation[]>([])
   const [actionProblem, setActionProblem] = useState<TransactionProblem>()
   const [result, setResult] = useState<TransactionResultState>()
   const [submittedTransactions, setSubmittedTransactions] = useState<
@@ -191,6 +207,7 @@ export function WalletPanel({
       error instanceof Error ? error.message : 'The media CID is invalid.'
   }
   const inspectionSequence = useRef(0)
+  const operationSequence = useRef(0)
   const transactionSequence = useRef(0)
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
@@ -257,24 +274,36 @@ export function WalletPanel({
     ) => Promise<TransactionReceipt | void>,
   ) => {
     let submittedHash: TransactionReceipt['hash'] | undefined
-    const submittedContext =
-      action !== 'chain' &&
-      session.account &&
-      session.chainId !== undefined &&
-      session.provider
+    const walletContext =
+      session.account && session.chainId !== undefined && session.provider
         ? {
             account: session.account,
-            action,
             chainId: session.chainId,
-            id: ++transactionSequence.current,
-            postBody: action === 'post' ? body : '',
-            postMediaCid:
-              action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
             provider: session.provider,
             walletName: session.name ?? 'Injected wallet',
           }
         : undefined
-    setBusyAction(action)
+    const submittedContext =
+      action !== 'chain' && walletContext
+        ? {
+            ...walletContext,
+            action,
+            id: ++transactionSequence.current,
+            postBody: action === 'post' ? body : '',
+            postMediaCid:
+              action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
+          }
+        : undefined
+    const operationId = ++operationSequence.current
+    setBusyOperations((current) => [
+      ...current,
+      {
+        action,
+        context: walletContext,
+        id: operationId,
+        scope: action === 'chain' ? 'provider' : 'context',
+      },
+    ])
     setActionProblem(undefined)
     setResult(undefined)
     if (submittedContext) {
@@ -355,7 +384,9 @@ export function WalletPanel({
         message: describeRpcError(error, 'The wallet action failed.'),
       })
     } finally {
-      setBusyAction(undefined)
+      setBusyOperations((current) =>
+        current.filter((operation) => operation.id !== operationId),
+      )
     }
   }
   const handleLocalChain = () => {
@@ -411,8 +442,17 @@ export function WalletPanel({
       return
     }
     const provider = transaction.provider
+    const operationId = ++operationSequence.current
     void (async () => {
-      setBusyAction('receipt')
+      setBusyOperations((current) => [
+        ...current,
+        {
+          action: 'receipt',
+          context: transaction,
+          id: operationId,
+          scope: 'context',
+        },
+      ])
       setActionProblem(undefined)
       setResult(undefined)
       setSubmittedTransactions((current) =>
@@ -488,7 +528,9 @@ export function WalletPanel({
           ),
         })
       } finally {
-        setBusyAction(undefined)
+        setBusyOperations((current) =>
+          current.filter((operation) => operation.id !== operationId),
+        )
       }
     })()
   }
@@ -508,6 +550,9 @@ export function WalletPanel({
   const activeSubmittedTransactions = submittedTransactions.filter(
     (transaction) => transactionContextMatchesSession(transaction, session),
   )
+  const busyAction = busyOperations.findLast((operation) =>
+    busyOperationMatchesSession(operation, session),
+  )?.action
   const transactionWriteLocked = activeSubmittedTransactions.some(
     (transaction) => transaction.status !== 'failed',
   )

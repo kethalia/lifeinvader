@@ -1,4 +1,11 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
@@ -52,6 +59,15 @@ function announceWallet(name: string, uuid: string, provider: unknown) {
 }
 function buttonDisabled(name: RegExp) {
   return screen.getByRole('button', { name }).hasAttribute('disabled')
+}
+function deferred<T>() {
+  let reject!: (reason?: unknown) => void
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next, fail) => {
+    reject = fail
+    resolve = next
+  })
+  return { promise, reject, resolve }
 }
 afterEach(() => {
   cleanup()
@@ -274,6 +290,79 @@ describe('App', () => {
 
     fireEvent.click(acknowledge)
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
+    stop()
+  })
+  it('scopes concurrent busy writes to their original wallet context', async () => {
+    let chainId = '0x1'
+    let submissions = 0
+    const firstSubmission = deferred<string>()
+    const secondSubmission = deferred<string>()
+    const listeners = new Map<string, Set<(value: unknown) => void>>()
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return chainId
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') {
+          submissions += 1
+          return submissions === 1
+            ? firstSubmission.promise
+            : secondSubmission.promise
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+      on: vi.fn((event: string, listener: (value: unknown) => void) => {
+        const registered = listeners.get(event) ?? new Set()
+        registered.add(listener)
+        listeners.set(event, registered)
+      }),
+      removeListener: vi.fn(
+        (event: string, listener: (value: unknown) => void) => {
+          listeners.get(event)?.delete(listener)
+        },
+      ),
+    }
+    const emitChain = (value: string) => {
+      chainId = value
+      listeners.get('chainChanged')?.forEach((listener) => listener(value))
+    }
+    const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })
+    const stop = announceWallet('Busy Wallet', 'busy-context', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', { name: /connect busy wallet/i }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Waiting on chain A.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    await waitFor(() => expect(submissions).toBe(1))
+
+    await act(async () => emitChain('0x2'))
+    const chainBPublish = await screen.findByRole('button', {
+      name: /publish on-chain/i,
+    })
+    expect(chainBPublish.hasAttribute('disabled')).toBe(false)
+    fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
+    fireEvent.click(chainBPublish)
+    await waitFor(() => expect(submissions).toBe(2))
+    expect(buttonDisabled(/publishing/i)).toBe(true)
+
+    await act(async () => {
+      firstSubmission.reject(rejection)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(buttonDisabled(/publishing/i)).toBe(true)
+
+    await act(async () => {
+      secondSubmission.reject(rejection)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(
+      await screen.findByRole('button', { name: /publish on-chain/i }),
+    ).toBeTruthy()
     stop()
   })
   it('preserves an unknown post while another chain starts a write', async () => {
