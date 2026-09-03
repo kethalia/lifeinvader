@@ -1,3 +1,4 @@
+import { keccak256, stringToHex, type Hash } from 'viem'
 import {
   eventTransactionsAreConsistent,
   indexedEventLogMatchesFilter,
@@ -11,7 +12,7 @@ import {
   type NormalizedEventLogFilter,
 } from './event-indexer'
 
-const CACHE_SCHEMA_VERSION = 6
+const CACHE_SCHEMA_VERSION = 7
 const DEFAULT_DATABASE_NAME = 'lifeinvader-event-cache'
 const SCOPE_STORE = 'scopes'
 const CURSOR_STORE = 'cursors'
@@ -32,6 +33,9 @@ type CursorRecord = {
 type ScopeRecord = {
   filter: unknown
   generation: string
+  lastLog?: unknown
+  logCount: number
+  logDigest: unknown
   revision: bigint
   schemaVersion: number
   scope: string
@@ -39,14 +43,29 @@ type ScopeRecord = {
 type ScopeState = {
   filter: NormalizedEventLogFilter
   generation: string
+  lastLog?: EventCacheLogPosition
+  logCount: number
+  logDigest: Hash
   revision: bigint
 }
 type LogRecord = {
+  digest: Hash
   identity: string
   log: unknown
+  ordinal: number
   position: string
   schemaVersion: number
   scope: string
+}
+type StoredLogRecord = {
+  digest: Hash
+  log: IndexedEventLog
+  ordinal: number
+}
+type LogIntegrity = {
+  digest: Hash
+  lastLog?: EventCacheLogPosition
+  logCount: number
 }
 export type EventCachePosition = {
   cursor: EventCursor
@@ -63,17 +82,25 @@ export type EventCacheLogPosition = {
 }
 export type EventCacheScanCursor = EventCachePosition & {
   after: EventCacheLogPosition
+  digest: Hash
   fromBlock: bigint
+  logCount: number
+}
+export type EventCacheScanBaseline = EventCachePosition & {
+  digest: Hash
+  last?: EventCacheLogPosition
+  logCount: number
 }
 export type EventCacheScanPage = EventCachePosition & {
+  baseline?: EventCacheScanBaseline
   complete: boolean
   logs: readonly IndexedEventLog[]
   next?: EventCacheScanCursor
   reset: boolean
 }
 export type EventCacheScanOptions = {
+  baseline?: EventCacheScanBaseline
   continuation?: EventCacheScanCursor
-  fromBlock?: bigint
   limit?: number
 }
 export type OpenEventCacheOptions = {
@@ -84,6 +111,10 @@ export type OpenEventCacheOptions = {
 }
 
 class EventCacheCorruptionError extends Error {}
+
+const EMPTY_LOG_DIGEST = keccak256(
+  stringToHex('lifeinvader.event-cache.log-chain.v1'),
+)
 
 function cacheError(message: string) {
   return new Error(message)
@@ -232,6 +263,89 @@ function sameLogPosition(
 function getPublicLogPosition(log: IndexedEventLog): EventCacheLogPosition {
   return { blockNumber: log.blockNumber, logIndex: log.logIndex }
 }
+function isLogDigest(value: unknown): value is Hash {
+  return typeof value === 'string' && /^0x[0-9a-f]{64}$/.test(value)
+}
+function normalizeLogIntegrity(
+  value: {
+    digest?: unknown
+    last?: unknown
+    logCount?: unknown
+  },
+  field: string,
+): LogIntegrity {
+  if (
+    !isLogDigest(value.digest) ||
+    typeof value.logCount !== 'number' ||
+    !Number.isSafeInteger(value.logCount) ||
+    value.logCount < 0
+  ) {
+    throw cacheError(`Invalid event cache ${field} integrity.`)
+  }
+  if (value.logCount === 0) {
+    if (value.digest !== EMPTY_LOG_DIGEST || value.last !== undefined) {
+      throw cacheError(`Invalid event cache ${field} integrity.`)
+    }
+    return { digest: value.digest, logCount: 0 }
+  }
+  if (value.last === undefined) {
+    throw cacheError(`Invalid event cache ${field} integrity.`)
+  }
+  return {
+    digest: value.digest,
+    lastLog: normalizeLogPosition(value.last),
+    logCount: value.logCount,
+  }
+}
+function advanceLogIntegrity(
+  integrity: LogIntegrity,
+  log: IndexedEventLog,
+): LogIntegrity {
+  if (integrity.logCount === Number.MAX_SAFE_INTEGER) {
+    throw new EventCacheCorruptionError()
+  }
+  const digest = keccak256(
+    stringToHex(
+      JSON.stringify([
+        integrity.digest,
+        log.address.toLowerCase(),
+        log.blockHash,
+        log.blockNumber.toString(16),
+        log.data,
+        log.logIndex.toString(16),
+        log.topics,
+        log.transactionHash,
+        log.transactionIndex.toString(16),
+      ]),
+    ),
+  )
+  return {
+    digest,
+    lastLog: getPublicLogPosition(log),
+    logCount: integrity.logCount + 1,
+  }
+}
+function storedRecordMatchesIntegrity(
+  record: StoredLogRecord,
+  integrity: LogIntegrity,
+) {
+  return (
+    record.digest === integrity.digest &&
+    record.ordinal === integrity.logCount &&
+    integrity.lastLog !== undefined &&
+    sameLogPosition(getPublicLogPosition(record.log), integrity.lastLog)
+  )
+}
+function stateMatchesIntegrity(state: ScopeState, integrity: LogIntegrity) {
+  return (
+    state.logDigest === integrity.digest &&
+    state.logCount === integrity.logCount &&
+    (state.lastLog === undefined
+      ? integrity.lastLog === undefined
+      : integrity.lastLog !== undefined &&
+        sameLogPosition(state.lastLog, integrity.lastLog))
+  )
+}
 function normalizeScanCursor(
   value: unknown,
   seedCursor: EventCursor,
@@ -246,7 +360,16 @@ function normalizeScanCursor(
   }
   assertScanBlock(source.fromBlock, 'scan start block')
   const after = normalizeLogPosition(source.after)
+  const integrity = normalizeLogIntegrity(
+    {
+      digest: source.digest,
+      last: source.after,
+      logCount: source.logCount,
+    },
+    'scan cursor',
+  )
   if (
+    integrity.logCount === 0 ||
     source.fromBlock < seedCursor.startBlock ||
     source.fromBlock > position.cursor.nextBlock ||
     after.blockNumber < source.fromBlock ||
@@ -254,7 +377,50 @@ function normalizeScanCursor(
   ) {
     throw cacheError('Invalid event cache scan boundary.')
   }
-  return { ...position, after, fromBlock: source.fromBlock }
+  return {
+    ...position,
+    after,
+    digest: integrity.digest,
+    fromBlock: source.fromBlock,
+    logCount: integrity.logCount,
+  }
+}
+function normalizeScanBaseline(
+  value: unknown,
+  seedCursor: EventCursor,
+): EventCacheScanBaseline {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw cacheError('Invalid event cache scan baseline.')
+  }
+  const source = value as Partial<EventCacheScanBaseline>
+  const position = asCachePosition(value)
+  if (!sameCursorIdentity(position.cursor, seedCursor)) {
+    throw cacheError('The event cache scan baseline belongs to another scope.')
+  }
+  const integrity = normalizeLogIntegrity(
+    {
+      digest: source.digest,
+      last: source.last,
+      logCount: source.logCount,
+    },
+    'scan baseline',
+  )
+  if (
+    integrity.lastLog !== undefined &&
+    (integrity.lastLog.blockNumber < seedCursor.startBlock ||
+      integrity.lastLog.blockNumber >= position.cursor.nextBlock)
+  ) {
+    throw cacheError('Invalid event cache scan baseline boundary.')
+  }
+  if (isSeedCursor(position.cursor) && integrity.logCount !== 0) {
+    throw cacheError('Invalid event cache scan baseline boundary.')
+  }
+  return {
+    ...position,
+    digest: integrity.digest,
+    last: integrity.lastLog,
+    logCount: integrity.logCount,
+  }
 }
 function assertRollbackTo(value: unknown, cursor: EventCursor) {
   if (value === undefined) return undefined
@@ -298,14 +464,33 @@ function asScopeRecord(
     record.scope !== scope ||
     !isGeneration(record.generation) ||
     typeof record.revision !== 'bigint' ||
-    record.revision < 0n
+    record.revision < 0n ||
+    typeof record.logCount !== 'number' ||
+    !Number.isSafeInteger(record.logCount) ||
+    record.logCount < 0 ||
+    !isLogDigest(record.logDigest)
   ) {
     throw new EventCacheCorruptionError()
   }
   try {
     const filter = normalizeEventLogFilter(record.filter)
     if (filter.id !== expectedFilter.id) throw new EventCacheCorruptionError()
-    return { filter, generation: record.generation, revision: record.revision }
+    const integrity = normalizeLogIntegrity(
+      {
+        digest: record.logDigest,
+        last: record.lastLog,
+        logCount: record.logCount,
+      },
+      'scope',
+    )
+    return {
+      filter,
+      generation: record.generation,
+      lastLog: integrity.lastLog,
+      logCount: integrity.logCount,
+      logDigest: integrity.digest,
+      revision: record.revision,
+    }
   } catch {
     throw new EventCacheCorruptionError()
   }
@@ -328,7 +513,7 @@ function asCursorRecord(value: unknown, scope: string) {
     throw new EventCacheCorruptionError()
   }
 }
-function asLogRecord(value: unknown, scope: string) {
+function asStoredLogRecord(value: unknown, scope: string): StoredLogRecord {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new EventCacheCorruptionError()
   }
@@ -336,8 +521,12 @@ function asLogRecord(value: unknown, scope: string) {
   if (
     record.schemaVersion !== CACHE_SCHEMA_VERSION ||
     record.scope !== scope ||
+    !isLogDigest(record.digest) ||
     typeof record.identity !== 'string' ||
-    typeof record.position !== 'string'
+    typeof record.position !== 'string' ||
+    typeof record.ordinal !== 'number' ||
+    !Number.isSafeInteger(record.ordinal) ||
+    record.ordinal < 1
   ) {
     throw new EventCacheCorruptionError()
   }
@@ -349,10 +538,13 @@ function asLogRecord(value: unknown, scope: string) {
     ) {
       throw new EventCacheCorruptionError()
     }
-    return log
+    return { digest: record.digest, log, ordinal: record.ordinal }
   } catch {
     throw new EventCacheCorruptionError()
   }
+}
+function asLogRecord(value: unknown, scope: string) {
+  return asStoredLogRecord(value, scope).log
 }
 export function getEventCacheScope(value: unknown) {
   const cursor = validateEventCursor(value)
@@ -480,24 +672,28 @@ export class BrowserEventCache {
     ) {
       throw cacheError('Invalid event cache scan options.')
     }
+    if ('fromBlock' in optionsValue) {
+      throw cacheError(
+        'An event cache delta scan requires a completed scan baseline.',
+      )
+    }
     const options = optionsValue as EventCacheScanOptions
     const limit = options.limit ?? DEFAULT_PAGE_SIZE
     assertPageSize(limit)
     let continuation: EventCacheScanCursor | undefined
-    let fromBlock: bigint
+    let baseline: EventCacheScanBaseline | undefined
     if (options.continuation !== undefined) {
-      if (options.fromBlock !== undefined) {
+      if (options.baseline !== undefined) {
         throw cacheError('The event cache scan has conflicting boundaries.')
       }
       continuation = normalizeScanCursor(options.continuation, seedCursor)
-      fromBlock = continuation.fromBlock
-    } else {
-      fromBlock = options.fromBlock ?? seedCursor.startBlock
-      assertScanBlock(fromBlock, 'scan start block')
-      if (fromBlock < seedCursor.startBlock) {
-        throw cacheError('Invalid event cache scan boundary.')
-      }
+    } else if (options.baseline !== undefined) {
+      baseline = normalizeScanBaseline(options.baseline, seedCursor)
     }
+    const fromBlock =
+      continuation?.fromBlock ??
+      baseline?.cursor.nextBlock ??
+      seedCursor.startBlock
     const scope = getEventCacheScope(seedCursor)
     return this.#scanTransaction(
       seedCursor,
@@ -505,6 +701,7 @@ export class BrowserEventCache {
       fromBlock,
       limit,
       continuation,
+      baseline,
     )
   }
 
@@ -569,7 +766,13 @@ export class BrowserEventCache {
     state: ScopeState | undefined,
   ) {
     const nextState = state
-      ? { ...state, revision: state.revision + 1n }
+      ? {
+          ...state,
+          lastLog: undefined,
+          logCount: 0,
+          logDigest: EMPTY_LOG_DIGEST,
+          revision: state.revision + 1n,
+        }
       : this.#createScopeState(1n)
     this.#deleteScopeLogs(logStore, scope)
     cursorStore.put({
@@ -599,7 +802,13 @@ export class BrowserEventCache {
     if (!isGeneration(generation)) {
       throw cacheError('The event cache generated an invalid scope token.')
     }
-    return { filter: this.#filter, generation, revision }
+    return {
+      filter: this.#filter,
+      generation,
+      logCount: 0,
+      logDigest: EMPTY_LOG_DIGEST,
+      revision,
+    }
   }
 
   #putScopeState(scopeStore: IDBObjectStore, scope: string, state: ScopeState) {
@@ -609,6 +818,9 @@ export class BrowserEventCache {
         topics: state.filter.topics,
       },
       generation: state.generation,
+      lastLog: state.lastLog,
+      logCount: state.logCount,
+      logDigest: state.logDigest,
       revision: state.revision,
       schemaVersion: CACHE_SCHEMA_VERSION,
       scope,
@@ -633,6 +845,7 @@ export class BrowserEventCache {
       let boundaryBlock: bigint | undefined
       let boundaryLogCount = 0
       let boundaryOverflow = false
+      let reachedStart = false
       let scopeDone = false
       let cursorDone = false
       let logsDone = false
@@ -675,7 +888,10 @@ export class BrowserEventCache {
               ? asCursorRecord(cursorRecord, scope)
               : seedCursor
           if (boundaryOverflow) throw new EventCacheCorruptionError()
-          const logs = logRecords.map((record) => asLogRecord(record, scope))
+          const records = logRecords.map((record) =>
+            asStoredLogRecord(record, scope),
+          )
+          const logs = records.map((record) => record.log)
           for (let index = 0; index < logs.length; index += 1) {
             const log = logs[index]!
             if (
@@ -688,6 +904,51 @@ export class BrowserEventCache {
           }
           if (getLogStreamProblem(logs, cursor, state.filter)) {
             throw new EventCacheCorruptionError()
+          }
+          if (state.logCount === 0) {
+            if (records.length > 0) throw new EventCacheCorruptionError()
+          } else {
+            const newest = records[0]
+            if (
+              newest === undefined ||
+              !storedRecordMatchesIntegrity(newest, {
+                digest: state.logDigest,
+                lastLog: state.lastLog,
+                logCount: state.logCount,
+              })
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+          }
+          for (let index = records.length - 2; index >= 0; index -= 1) {
+            const older = records[index + 1]!
+            const newer = records[index]!
+            const expectedIntegrity = advanceLogIntegrity(
+              {
+                digest: older.digest,
+                lastLog: getPublicLogPosition(older.log),
+                logCount: older.ordinal,
+              },
+              newer.log,
+            )
+            if (!storedRecordMatchesIntegrity(newer, expectedIntegrity)) {
+              throw new EventCacheCorruptionError()
+            }
+          }
+          if (reachedStart) {
+            let integrity: LogIntegrity = {
+              digest: EMPTY_LOG_DIGEST,
+              logCount: 0,
+            }
+            for (const record of records.toReversed()) {
+              integrity = advanceLogIntegrity(integrity, record.log)
+              if (!storedRecordMatchesIntegrity(record, integrity)) {
+                throw new EventCacheCorruptionError()
+              }
+            }
+            if (!stateMatchesIntegrity(state, integrity)) {
+              throw new EventCacheCorruptionError()
+            }
           }
           page = {
             cursor,
@@ -742,6 +1003,7 @@ export class BrowserEventCache {
       logRequest.onsuccess = () => {
         const cursor = logRequest.result
         if (!cursor) {
+          reachedStart = true
           logsDone = true
           finalize()
           return
@@ -808,6 +1070,7 @@ export class BrowserEventCache {
     fromBlock: bigint,
     limit: number,
     continuation: EventCacheScanCursor | undefined,
+    baseline: EventCacheScanBaseline | undefined,
   ) {
     return new Promise<EventCacheScanPage>((resolve, reject) => {
       const transaction = this.#database.transaction(
@@ -819,8 +1082,9 @@ export class BrowserEventCache {
       let scopeRecord: unknown
       let cursorRecord: unknown
       let anchorRecord: unknown
-      let scopeLogCount = 0
-      let canonicalLogCount = 0
+      let baselineTailRecord: unknown
+      let firstEdgeRecord: unknown
+      let lastEdgeRecord: unknown
       const logRecords: unknown[] = []
       let boundaryBlock: bigint | undefined
       let currentBlock: bigint | undefined
@@ -830,8 +1094,9 @@ export class BrowserEventCache {
       let scopeDone = false
       let cursorDone = false
       let anchorDone = continuation === undefined
-      let scopeCountDone = false
-      let canonicalCountDone = false
+      let baselineTailDone = baseline === undefined
+      let firstEdgeDone = false
+      let lastEdgeDone = false
       let logsDone = false
       let finalized = false
       const scopeStore = transaction.objectStore(SCOPE_STORE)
@@ -853,8 +1118,9 @@ export class BrowserEventCache {
           !scopeDone ||
           !cursorDone ||
           !anchorDone ||
-          !scopeCountDone ||
-          !canonicalCountDone ||
+          !baselineTailDone ||
+          !firstEdgeDone ||
+          !lastEdgeDone ||
           !logsDone
         ) {
           return
@@ -862,13 +1128,17 @@ export class BrowserEventCache {
         finalized = true
         let state: ScopeState | undefined
         try {
-          const hasLogs = scopeLogCount > 0
+          const hasLogs = firstEdgeRecord !== undefined
+          if (hasLogs !== (lastEdgeRecord !== undefined)) {
+            throw new EventCacheCorruptionError()
+          }
           if (scopeRecord !== undefined) {
             state = asScopeRecord(scopeRecord, scope, this.#filter)
           } else if (
             cursorRecord !== undefined ||
             hasLogs ||
-            continuation !== undefined
+            continuation !== undefined ||
+            baseline !== undefined
           ) {
             throw new EventCacheCorruptionError()
           } else {
@@ -882,13 +1152,45 @@ export class BrowserEventCache {
           ) {
             throw new EventCacheCorruptionError()
           }
-          if (scopeLogCount !== canonicalLogCount) {
-            throw new EventCacheCorruptionError()
-          }
           const cursor =
             cursorRecord !== undefined
               ? asCursorRecord(cursorRecord, scope)
               : seedCursor
+          if (hasLogs !== state.logCount > 0) {
+            throw new EventCacheCorruptionError()
+          }
+          if (hasLogs) {
+            const firstEdge = asStoredLogRecord(firstEdgeRecord, scope)
+            const lastEdge = asStoredLogRecord(lastEdgeRecord, scope)
+            const firstIntegrity = advanceLogIntegrity(
+              { digest: EMPTY_LOG_DIGEST, logCount: 0 },
+              firstEdge.log,
+            )
+            if (
+              !storedRecordMatchesIntegrity(firstEdge, firstIntegrity) ||
+              !storedRecordMatchesIntegrity(lastEdge, {
+                digest: state.logDigest,
+                lastLog: state.lastLog,
+                logCount: state.logCount,
+              }) ||
+              (state.logCount === 1
+                ? compareLogs(firstEdge.log, lastEdge.log) !== 0
+                : compareLogs(firstEdge.log, lastEdge.log) >= 0)
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+            const edgeLogs =
+              state.logCount === 1
+                ? [firstEdge.log]
+                : [firstEdge.log, lastEdge.log]
+            if (
+              firstEdge.log.blockNumber < cursor.startBlock ||
+              lastEdge.log.blockNumber >= cursor.nextBlock ||
+              getLogStreamProblem(edgeLogs, cursor, state.filter)
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+          }
           if (continuation) {
             if (
               state.generation !== continuation.generation ||
@@ -904,27 +1206,90 @@ export class BrowserEventCache {
             throw cacheError('Invalid event cache scan boundary.')
           }
           if (pageCorrupt) throw new EventCacheCorruptionError()
-          let anchor: IndexedEventLog | undefined
+          let integrity: LogIntegrity = {
+            digest: EMPTY_LOG_DIGEST,
+            logCount: 0,
+          }
+          let anchor: StoredLogRecord | undefined
           if (continuation) {
             if (anchorRecord === undefined) {
               throw new EventCacheCorruptionError()
             }
-            anchor = asLogRecord(anchorRecord, scope)
+            anchor = asStoredLogRecord(anchorRecord, scope)
             if (
               !sameLogPosition(
-                getPublicLogPosition(anchor),
+                getPublicLogPosition(anchor.log),
                 continuation.after,
               ) ||
-              anchor.blockNumber < fromBlock ||
-              anchor.blockNumber >= cursor.nextBlock ||
-              getLogStreamProblem([anchor], cursor, state.filter)
+              anchor.log.blockNumber < fromBlock ||
+              anchor.log.blockNumber >= cursor.nextBlock ||
+              getLogStreamProblem([anchor.log], cursor, state.filter)
             ) {
               throw new EventCacheCorruptionError()
             }
+            integrity = {
+              digest: continuation.digest,
+              lastLog: continuation.after,
+              logCount: continuation.logCount,
+            }
+            if (!storedRecordMatchesIntegrity(anchor, integrity)) {
+              throw cacheError('Invalid event cache scan continuation.')
+            }
+          } else if (baseline) {
+            if (
+              state.generation !== baseline.generation ||
+              baseline.revision > state.revision ||
+              !sameCursorIdentity(cursor, baseline.cursor) ||
+              baseline.cursor.nextBlock > cursor.nextBlock ||
+              (baseline.revision === state.revision &&
+                !sameCursor(cursor, baseline.cursor))
+            ) {
+              throw cacheError(
+                'The event cache scan baseline is no longer canonical.',
+              )
+            }
+            const checkpoint = baseline.cursor.checkpoints.at(-1)
+            if (
+              checkpoint !== undefined &&
+              !cursor.checkpoints.some(
+                (current) =>
+                  current.blockNumber === checkpoint.blockNumber &&
+                  current.blockHash === checkpoint.blockHash,
+              )
+            ) {
+              throw cacheError(
+                'The event cache scan baseline is no longer canonical.',
+              )
+            }
+            integrity = {
+              digest: baseline.digest,
+              lastLog: baseline.last,
+              logCount: baseline.logCount,
+            }
+            if (baseline.logCount === 0) {
+              if (baselineTailRecord !== undefined) {
+                throw cacheError(
+                  'The event cache scan baseline is no longer canonical.',
+                )
+              }
+            } else {
+              if (baselineTailRecord === undefined) {
+                throw cacheError(
+                  'The event cache scan baseline is no longer canonical.',
+                )
+              }
+              const baselineTail = asStoredLogRecord(baselineTailRecord, scope)
+              if (!storedRecordMatchesIntegrity(baselineTail, integrity)) {
+                throw cacheError(
+                  'The event cache scan baseline is no longer canonical.',
+                )
+              }
+            }
           }
-          const observedLogs = logRecords.map((record) =>
-            asLogRecord(record, scope),
+          const observedRecords = logRecords.map((record) =>
+            asStoredLogRecord(record, scope),
           )
+          const observedLogs = observedRecords.map((record) => record.log)
           for (let index = 0; index < observedLogs.length; index += 1) {
             const log = observedLogs[index]!
             if (
@@ -938,17 +1303,54 @@ export class BrowserEventCache {
           if (
             anchor !== undefined &&
             observedLogs[0] !== undefined &&
-            anchor.blockNumber >= observedLogs[0].blockNumber
+            anchor.log.blockNumber >= observedLogs[0].blockNumber
           ) {
             throw cacheError('Invalid event cache scan continuation.')
           }
           if (getLogStreamProblem(observedLogs, cursor, state.filter)) {
             throw new EventCacheCorruptionError()
           }
-          const logs = hasMore ? observedLogs.slice(0, -1) : observedLogs
+          const observedIntegrity: LogIntegrity[] = []
+          for (const record of observedRecords) {
+            integrity = advanceLogIntegrity(integrity, record.log)
+            if (!storedRecordMatchesIntegrity(record, integrity)) {
+              throw new EventCacheCorruptionError()
+            }
+            observedIntegrity.push(integrity)
+          }
+          const returnedCount = observedLogs.length - Number(hasMore)
+          const logs = observedLogs.slice(0, returnedCount)
           const last = logs.at(-1)
           if (hasMore && !last) throw new EventCacheCorruptionError()
+          const returnedIntegrity =
+            observedIntegrity[returnedCount - 1] ??
+            (continuation
+              ? {
+                  digest: continuation.digest,
+                  lastLog: continuation.after,
+                  logCount: continuation.logCount,
+                }
+              : baseline
+                ? {
+                    digest: baseline.digest,
+                    lastLog: baseline.last,
+                    logCount: baseline.logCount,
+                  }
+                : { digest: EMPTY_LOG_DIGEST, logCount: 0 })
+          if (!hasMore && !stateMatchesIntegrity(state, integrity)) {
+            throw new EventCacheCorruptionError()
+          }
           page = {
+            baseline: !hasMore
+              ? {
+                  cursor,
+                  digest: state.logDigest,
+                  generation: state.generation,
+                  last: state.lastLog,
+                  logCount: state.logCount,
+                  revision: state.revision,
+                }
+              : undefined,
             complete: !hasMore,
             cursor,
             generation: state.generation,
@@ -958,8 +1360,10 @@ export class BrowserEventCache {
                 ? {
                     after: getPublicLogPosition(last),
                     cursor,
+                    digest: returnedIntegrity.digest,
                     fromBlock,
                     generation: state.generation,
+                    logCount: returnedIntegrity.logCount,
                     revision: state.revision,
                   }
                 : undefined,
@@ -981,7 +1385,7 @@ export class BrowserEventCache {
               state,
             )
             page = {
-              complete: true,
+              complete: false,
               cursor: seedCursor,
               generation: nextState.generation,
               logs: [],
@@ -1021,26 +1425,44 @@ export class BrowserEventCache {
       }
       const minimumPosition = `${fixedHex(seedCursor.startBlock, 64)}:${'0'.repeat(16)}`
       const upperPosition = `${'f'.repeat(64)}:${'f'.repeat(16)}`
-      const canonicalKeyRange = this.#keyRange.bound(
-        [scope, minimumPosition],
-        [scope, upperPosition],
-      )
-      const scopeCountRequest = logStore
+      const firstEdgeRequest = logStore
         .index(LOG_SCOPE_INDEX)
-        .count(this.#keyRange.only(scope))
-      scopeCountRequest.onsuccess = () => {
-        scopeLogCount = scopeCountRequest.result
-        scopeCountDone = true
+        .openCursor(this.#keyRange.only(scope))
+      firstEdgeRequest.onsuccess = () => {
+        firstEdgeRecord = firstEdgeRequest.result?.value
+        firstEdgeDone = true
         finalize()
       }
-      scopeCountRequest.onerror = () => fail(scopeCountRequest.error)
-      const canonicalCountRequest = logStore.count(canonicalKeyRange)
-      canonicalCountRequest.onsuccess = () => {
-        canonicalLogCount = canonicalCountRequest.result
-        canonicalCountDone = true
+      firstEdgeRequest.onerror = () => fail(firstEdgeRequest.error)
+      const lastEdgeRequest = logStore
+        .index(LOG_SCOPE_INDEX)
+        .openCursor(this.#keyRange.only(scope), 'prev')
+      lastEdgeRequest.onsuccess = () => {
+        lastEdgeRecord = lastEdgeRequest.result?.value
+        lastEdgeDone = true
         finalize()
       }
-      canonicalCountRequest.onerror = () => fail(canonicalCountRequest.error)
+      lastEdgeRequest.onerror = () => fail(lastEdgeRequest.error)
+      if (baseline) {
+        if (fromBlock === seedCursor.startBlock) {
+          baselineTailDone = true
+        } else {
+          const baselineUpperPosition = `${fixedHex(fromBlock - 1n, 64)}:${'f'.repeat(16)}`
+          const baselineTailRequest = logStore.openCursor(
+            this.#keyRange.bound(
+              [scope, minimumPosition],
+              [scope, baselineUpperPosition],
+            ),
+            'prev',
+          )
+          baselineTailRequest.onsuccess = () => {
+            baselineTailRecord = baselineTailRequest.result?.value
+            baselineTailDone = true
+            finalize()
+          }
+          baselineTailRequest.onerror = () => fail(baselineTailRequest.error)
+        }
+      }
       const lowerPosition = continuation
         ? `${fixedHex(continuation.after.blockNumber, 64)}:${fixedHex(
             continuation.after.logIndex,
@@ -1139,6 +1561,7 @@ export class BrowserEventCache {
       let reset = false
       let scopeRecord: unknown
       let cursorRecord: unknown
+      let latestLogRecord: unknown
       let scopeDone = false
       let cursorDone = false
       let hasLogs = false
@@ -1176,12 +1599,19 @@ export class BrowserEventCache {
             fail(resetError)
           }
         }
-        const commitUpdate = (currentState: ScopeState) => {
+        const commitUpdate = (
+          currentState: ScopeState,
+          startingIntegrity: LogIntegrity,
+        ) => {
           try {
+            let integrity = startingIntegrity
             for (const log of logs) {
+              integrity = advanceLogIntegrity(integrity, log)
               logStore.put({
+                digest: integrity.digest,
                 identity: getLogIdentity(log),
                 log,
+                ordinal: integrity.logCount,
                 position: getLogPosition(log),
                 schemaVersion: CACHE_SCHEMA_VERSION,
                 scope,
@@ -1194,6 +1624,9 @@ export class BrowserEventCache {
             } satisfies CursorRecord)
             this.#putScopeState(scopeStore, scope, {
               ...currentState,
+              lastLog: integrity.lastLog,
+              logCount: integrity.logCount,
+              logDigest: integrity.digest,
               revision: currentState.revision + 1n,
             })
           } catch (error) {
@@ -1211,6 +1644,21 @@ export class BrowserEventCache {
           ) {
             throw new EventCacheCorruptionError()
           }
+          if (hasLogs !== currentState.logCount > 0) {
+            throw new EventCacheCorruptionError()
+          }
+          if (hasLogs) {
+            const latest = asStoredLogRecord(latestLogRecord, scope)
+            if (
+              !storedRecordMatchesIntegrity(latest, {
+                digest: currentState.logDigest,
+                lastLog: currentState.lastLog,
+                logCount: currentState.logCount,
+              })
+            ) {
+              throw new EventCacheCorruptionError()
+            }
+          }
           const storedCursor =
             cursorRecord !== undefined
               ? asCursorRecord(cursorRecord, scope)
@@ -1224,6 +1672,11 @@ export class BrowserEventCache {
           }
           if (rollbackTo !== undefined) {
             let blockLogs: IndexedEventLog[] = []
+            let integrity: LogIntegrity = {
+              digest: EMPTY_LOG_DIGEST,
+              logCount: 0,
+            }
+            let retainedIntegrity = integrity
             let previousLog: IndexedEventLog | undefined
             const validateBlock = () => {
               if (
@@ -1245,10 +1698,14 @@ export class BrowserEventCache {
               try {
                 if (!rollbackCursor) {
                   validateBlock()
-                  commitUpdate(currentState)
+                  if (!stateMatchesIntegrity(currentState, integrity)) {
+                    throw new EventCacheCorruptionError()
+                  }
+                  commitUpdate(currentState, retainedIntegrity)
                   return
                 }
-                const log = asLogRecord(rollbackCursor.value, scope)
+                const record = asStoredLogRecord(rollbackCursor.value, scope)
+                const log = record.log
                 if (
                   log.blockNumber < storedCursor.startBlock ||
                   log.blockNumber >= storedCursor.nextBlock ||
@@ -1264,6 +1721,10 @@ export class BrowserEventCache {
                   validateBlock()
                   blockLogs = []
                 }
+                integrity = advanceLogIntegrity(integrity, log)
+                if (!storedRecordMatchesIntegrity(record, integrity)) {
+                  throw new EventCacheCorruptionError()
+                }
                 blockLogs.push(log)
                 if (blockLogs.length > MAX_BATCH_LOGS) {
                   throw new EventCacheCorruptionError()
@@ -1271,6 +1732,8 @@ export class BrowserEventCache {
                 previousLog = log
                 if (log.blockNumber >= rollbackTo) {
                   logStore.delete(rollbackCursor.primaryKey)
+                } else {
+                  retainedIntegrity = integrity
                 }
                 rollbackCursor.continue()
               } catch (error) {
@@ -1283,7 +1746,11 @@ export class BrowserEventCache {
             }
             rollbackRequest.onerror = () => fail(rollbackRequest.error)
           } else {
-            commitUpdate(currentState)
+            commitUpdate(currentState, {
+              digest: currentState.logDigest,
+              lastLog: currentState.lastLog,
+              logCount: currentState.logCount,
+            })
           }
         } catch (error) {
           if (error instanceof EventCacheCorruptionError) {
@@ -1309,9 +1776,10 @@ export class BrowserEventCache {
       cursorRequest.onerror = () => fail(cursorRequest.error)
       const logRequest = logStore
         .index(LOG_SCOPE_INDEX)
-        .openKeyCursor(this.#keyRange.only(scope))
+        .openCursor(this.#keyRange.only(scope), 'prev')
       logRequest.onsuccess = () => {
-        hasLogs = Boolean(logRequest.result)
+        latestLogRecord = logRequest.result?.value
+        hasLogs = latestLogRecord !== undefined
         logsDone = true
         finalize()
       }
