@@ -31,7 +31,10 @@ export function ProfileComposer({
   const bioBytes = getUtf8ByteLength(bio)
   const displayNameBytes = getUtf8ByteLength(displayName)
   const clearsProfile =
-    bioBytes === 0 && displayNameBytes === 0 && avatarCidInput.length === 0
+    bioBytes === 0 &&
+    displayNameBytes === 0 &&
+    avatarCidError === undefined &&
+    parsedAvatarCid === undefined
   const invalid =
     avatarCidError !== undefined ||
     displayNameBytes > MAX_PROFILE_DISPLAY_NAME_BYTES ||

@@ -87,6 +87,9 @@ describe('wallet profile publisher', () => {
       />,
     )
     await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    fireEvent.change(screen.getByLabelText(/IPFS avatar CID/i), {
+      target: { value: '   ' },
+    })
     const publish = screen.getByRole('button', {
       name: /publish empty profile snapshot/i,
     })
@@ -265,6 +268,15 @@ describe('wallet profile publisher', () => {
     )
 
     expect(await screen.findByText(/its final status is unknown/i)).toBeTruthy()
+    expect(
+      (screen.getByLabelText(/^display name$/i) as HTMLInputElement).value,
+    ).toBe(displayName)
+    expect((screen.getByLabelText(/^bio$/i) as HTMLTextAreaElement).value).toBe(
+      bio,
+    )
+    expect(
+      (screen.getByLabelText(/IPFS avatar CID/i) as HTMLInputElement).value,
+    ).toBe(MEDIA_CID_V0)
     fireEvent.click(
       screen.getByRole('button', { name: /check receipt again/i }),
     )

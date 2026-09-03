@@ -865,17 +865,26 @@ export function WalletPanel({
         </div>
         <div className="wallet-profile">
           <h3>4. Publish a profile snapshot</h3>
-          {!connected || inspection?.kind !== 'ready' ? (
+          {!connected ? (
+            <p>
+              Connect first. A verified v1 deployment is required before setting
+              a profile.
+            </p>
+          ) : inspection?.kind !== 'ready' ? (
             <p>
               A verified v1 deployment is required before setting a profile.
             </p>
-          ) : (
-            <ProfileComposer
-              disabled={busyAction !== undefined || transactionWriteLocked}
-              publishing={busyAction === 'profile'}
-              onSubmit={handleProfile}
-            />
-          )}
+          ) : null}
+          <ProfileComposer
+            disabled={
+              !connected ||
+              inspection?.kind !== 'ready' ||
+              busyAction !== undefined ||
+              transactionWriteLocked
+            }
+            publishing={busyAction === 'profile'}
+            onSubmit={handleProfile}
+          />
         </div>
       </div>
       {activeActionProblem ? (
