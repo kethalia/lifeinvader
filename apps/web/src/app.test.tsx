@@ -28,8 +28,14 @@ const synchronizeEmptyFeed = vi.fn(async () => ({
   safeHead: 0n,
   scannedRanges: 0,
 }))
+const waitForSafePost = vi.fn(async () => undefined)
 function renderApp() {
-  return render(<App synchronizePostFeed={synchronizeEmptyFeed} />)
+  return render(
+    <App
+      synchronizePostFeed={synchronizeEmptyFeed}
+      waitForPostConfirmation={waitForSafePost}
+    />,
+  )
 }
 function announceWallet(name: string, uuid: string, provider: unknown) {
   const announce = () =>
@@ -48,6 +54,7 @@ afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
   synchronizeEmptyFeed.mockClear()
+  waitForSafePost.mockClear()
   vi.unstubAllGlobals()
 })
 describe('App', () => {
@@ -204,7 +211,13 @@ describe('App', () => {
     fireEvent.change(textarea, { target: { value: body } })
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
 
-    expect(await screen.findByText(/confirmed in block 42/i)).toBeTruthy()
+    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+    expect(waitForSafePost).toHaveBeenCalledWith(
+      provider,
+      1n,
+      42n,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
     expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(2)
     stop()
   })
@@ -303,7 +316,7 @@ describe('App', () => {
         transactionHash: TRANSACTION_HASH,
       })
     })
-    expect(await screen.findByText(/confirmed in block 42/i)).toBeTruthy()
+    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
     const retryButton = await screen.findByRole('button', {
       name: /retry verification/i,
     })

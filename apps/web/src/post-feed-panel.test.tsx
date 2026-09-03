@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Eip1193Provider } from './ethereum'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSnapshot } from './post-feed'
+import type { PostFeedConfirmationWaiter } from './post-feed-confirmation'
 import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
@@ -110,35 +111,89 @@ describe('PostFeedPanel', () => {
     expect(synchronize).toHaveBeenCalledTimes(2)
   })
 
+  it('refreshes automatically only after an included post reaches feed depth', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const confirmation = deferred<void>()
+    const waitForConfirmation = vi.fn<PostFeedConfirmationWaiter>(
+      () => confirmation.promise,
+    )
+    const synchronize = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot([]))
+      .mockResolvedValueOnce(snapshot([post('Now safely confirmed.')]))
+
+    render(
+      <PostFeedPanel
+        includedPost={{
+          blockNumber: 8n,
+          chainId: 1n,
+          hash: TRANSACTION_HASH,
+          provider,
+        }}
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+        waitForConfirmation={waitForConfirmation}
+      />,
+    )
+
+    expect(await screen.findByText(/included in block 8/i)).toBeTruthy()
+    expect(screen.getByText(/once it is 12 blocks deep/i)).toBeTruthy()
+    expect(synchronize).toHaveBeenCalledTimes(1)
+    await act(async () => confirmation.resolve())
+    expect(await screen.findByText('Now safely confirmed.')).toBeTruthy()
+    expect(synchronize).toHaveBeenCalledTimes(2)
+  })
+
   it('aborts stale chain work and ignores its result', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const first = deferred<PostFeedSnapshot>()
     const second = deferred<PostFeedSnapshot>()
+    const pendingConfirmation = deferred<void>()
+    const waitForConfirmation = vi.fn<PostFeedConfirmationWaiter>(
+      () => pendingConfirmation.promise,
+    )
     const synchronize = vi
       .fn()
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise)
     const { rerender } = render(
       <PostFeedPanel
+        includedPost={{
+          blockNumber: 8n,
+          chainId: 1n,
+          hash: TRANSACTION_HASH,
+          provider,
+        }}
         session={connectedSession(provider)}
         synchronize={synchronize}
+        waitForConfirmation={waitForConfirmation}
       />,
     )
     await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(1))
     const firstSignal = synchronize.mock.calls[0]?.[2]?.signal
+    const confirmationSignal = waitForConfirmation.mock.calls[0]?.[3]?.signal
 
     rerender(
       <PostFeedPanel
+        includedPost={{
+          blockNumber: 8n,
+          chainId: 1n,
+          hash: TRANSACTION_HASH,
+          provider,
+        }}
         session={connectedSession(provider, 2n)}
         synchronize={synchronize}
+        waitForConfirmation={waitForConfirmation}
       />,
     )
     await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
     expect(firstSignal?.aborted).toBe(true)
+    expect(confirmationSignal?.aborted).toBe(true)
 
     await act(async () => {
       first.resolve(snapshot([post('Wrong chain.')]))
       second.resolve(snapshot([post('Canonical chain.', 2n)]))
+      pendingConfirmation.resolve(undefined)
     })
     expect(await screen.findByText('Canonical chain.')).toBeTruthy()
     expect(screen.queryByText('Wrong chain.')).toBeNull()

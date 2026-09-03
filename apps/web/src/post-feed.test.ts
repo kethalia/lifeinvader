@@ -1,5 +1,5 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   encodeAbiParameters,
   keccak256,
@@ -9,8 +9,10 @@ import {
   type Address,
 } from 'viem'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
+import { BrowserEventCache } from './event-cache'
 import { synchronizePostFeed } from './post-feed'
 import {
+  LIFEINVADER_INIT_CODE,
   LOCAL_CHAIN_ID,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
@@ -18,6 +20,7 @@ import {
 
 const AUTHOR = '0x000000000000000000000000000000000000b0b0' as Address
 const DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
+const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
 
 function blockHash(blockNumber: bigint) {
   return keccak256(stringToHex(`block:${blockNumber.toString()}`))
@@ -53,11 +56,14 @@ function storage(factory = new IDBFactory()) {
   }
 }
 
+afterEach(() => vi.restoreAllMocks())
+
 describe('post feed synchronization', () => {
   it('resumes through exactly one bounded RPC range per invocation', async () => {
     const logRanges: Array<{ fromBlock: string; toBlock: string }> = []
     const provider: Eip1193Provider = {
       request: vi.fn(async ({ method, params }: ProviderRequest) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return toHex(5_000n)
         if (method === 'eth_getBlockByNumber') {
@@ -108,6 +114,7 @@ describe('post feed synchronization', () => {
     ]
     const provider: Eip1193Provider = {
       async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return toHex(LOCAL_CHAIN_ID)
         if (method === 'eth_blockNumber') return '0x14'
         if (method === 'eth_getBlockByNumber') {
@@ -136,6 +143,7 @@ describe('post feed synchronization', () => {
     const fromBlocks: string[] = []
     const provider: Eip1193Provider = {
       async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
         if (method === 'eth_chainId') return '0x1'
         if (method === 'eth_blockNumber') return '0x14'
         if (method === 'eth_getBlockByNumber') {
@@ -161,6 +169,49 @@ describe('post feed synchronization', () => {
       synchronizePostFeed(provider, 1n, { storage: cacheStorage }),
     ).resolves.toMatchObject({ posts: [{ body: 'A valid post.' }] })
     expect(fromBlocks).toEqual(['0x0', '0x0'])
+  })
+
+  it('rejects an unverified contract without requesting its logs', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_getCode') return '0x01'
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/verified Lifeinvader v1/i)
+    expect(provider.request).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a post-apply page from a newer cache position', async () => {
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const readLatest = BrowserEventCache.prototype.readLatest
+    let reads = 0
+    vi.spyOn(BrowserEventCache.prototype, 'readLatest').mockImplementation(
+      async function (this: BrowserEventCache, seed, limit) {
+        const page = await readLatest.call(this, seed, limit)
+        reads += 1
+        return reads === 2 ? { ...page, revision: page.revision + 1n } : page
+      },
+    )
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).rejects.toThrow(/cache changed after synchronization/i)
   })
 
   it('does no storage or RPC work for an already cancelled request', async () => {

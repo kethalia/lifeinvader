@@ -26,6 +26,7 @@ import {
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
 import type { WalletSessionController } from './wallet-session'
+import type { IncludedPost } from './post-feed-confirmation'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -41,7 +42,7 @@ function shortAddress(value: string) {
 function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
   return (
     <p className="transaction-result">
-      Confirmed in block {receipt.blockNumber.toString()} ·{' '}
+      Included in block {receipt.blockNumber.toString()} ·{' '}
       <code title={receipt.hash}>{shortAddress(receipt.hash)}</code>
     </p>
   )
@@ -95,7 +96,7 @@ export function WalletPanel({
   onPostConfirmed,
   walletSession,
 }: {
-  onPostConfirmed(): void
+  onPostConfirmed(post: IncludedPost): void
   walletSession: WalletSessionController
 }) {
   const wallets = useWalletProviders()
@@ -209,7 +210,14 @@ export function WalletPanel({
       if (nextReceipt) {
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
-        if (action === 'post') onPostConfirmed()
+        if (action === 'post' && submittedContext) {
+          onPostConfirmed({
+            blockNumber: nextReceipt.blockNumber,
+            chainId: submittedContext.chainId,
+            hash: nextReceipt.hash,
+            provider: submittedContext.provider,
+          })
+        }
       }
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
@@ -300,7 +308,12 @@ export function WalletPanel({
         setSubmittedTransaction(undefined)
         if (transaction.action === 'post') {
           setBody('')
-          onPostConfirmed()
+          onPostConfirmed({
+            blockNumber: nextReceipt.blockNumber,
+            chainId: transaction.chainId,
+            hash: nextReceipt.hash,
+            provider: transaction.provider,
+          })
         } else await refreshInspection()
       } catch (error) {
         setSubmittedTransaction({

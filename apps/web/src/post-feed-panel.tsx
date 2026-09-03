@@ -5,6 +5,12 @@ import {
   type PostFeedSnapshot,
   type PostFeedSynchronizer,
 } from './post-feed'
+import {
+  POST_FEED_CONFIRMATION_DEPTH,
+  waitForPostFeedConfirmation,
+  type IncludedPost,
+  type PostFeedConfirmationWaiter,
+} from './post-feed-confirmation'
 import type { WalletSession } from './wallet-session'
 
 function shortValue(value: string) {
@@ -23,24 +29,68 @@ function syncStatus(snapshot: PostFeedSnapshot) {
 }
 
 export function PostFeedPanel({
-  refreshRevision = 0,
+  includedPost,
   session,
   synchronize = synchronizePostFeed,
+  waitForConfirmation = waitForPostFeedConfirmation,
 }: {
-  refreshRevision?: number
+  includedPost?: IncludedPost
   session: WalletSession
   synchronize?: PostFeedSynchronizer
+  waitForConfirmation?: PostFeedConfirmationWaiter
 }) {
-  const [snapshot, setSnapshot] = useState<PostFeedSnapshot>()
-  const [error, setError] = useState<string>()
-  const [loading, setLoading] = useState(false)
+  const [loaded, setLoaded] = useState<{
+    chainId: bigint
+    provider: NonNullable<WalletSession['provider']>
+    snapshot: PostFeedSnapshot
+  }>()
+  const [syncError, setSyncError] = useState<{
+    chainId: bigint
+    message: string
+    provider: NonNullable<WalletSession['provider']>
+  }>()
+  const [loadingContext, setLoadingContext] = useState<{
+    chainId: bigint
+    provider: NonNullable<WalletSession['provider']>
+  }>()
+  const [confirmation, setConfirmation] = useState<{
+    hash: IncludedPost['hash']
+    message?: string
+    status: 'waiting' | 'stopped'
+  }>()
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const requestSequence = useRef(0)
-  const handledRefreshRevision = useRef(refreshRevision)
   const connected =
     session.status === 'connected' &&
     session.provider !== undefined &&
     session.chainId !== undefined
+  const snapshot =
+    connected &&
+    loaded !== undefined &&
+    loaded.provider === session.provider &&
+    loaded.chainId === session.chainId
+      ? loaded.snapshot
+      : undefined
+  const error =
+    connected &&
+    syncError !== undefined &&
+    syncError.provider === session.provider &&
+    syncError.chainId === session.chainId
+      ? syncError.message
+      : undefined
+  const loading =
+    connected &&
+    loadingContext !== undefined &&
+    loadingContext.provider === session.provider &&
+    loadingContext.chainId === session.chainId
+  const activeConfirmation =
+    connected &&
+    includedPost !== undefined &&
+    includedPost.provider === session.provider &&
+    includedPost.chainId === session.chainId &&
+    confirmation?.hash === includedPost.hash
+      ? confirmation
+      : undefined
 
   const runSynchronization = useCallback(() => {
     const provider = session.provider
@@ -56,33 +106,39 @@ export function PostFeedPanel({
     const controller = new AbortController()
     const requestId = ++requestSequence.current
     activeRequest.current = controller
-    setLoading(true)
-    setError(undefined)
+    setLoadingContext({ chainId, provider })
+    setSyncError(undefined)
     void synchronize(provider, chainId, { signal: controller.signal })
       .then((nextSnapshot) => {
-        if (requestId === requestSequence.current) setSnapshot(nextSnapshot)
+        if (requestId === requestSequence.current) {
+          setLoaded({ chainId, provider, snapshot: nextSnapshot })
+        }
       })
       .catch((syncError: unknown) => {
         if (controller.signal.aborted || requestId !== requestSequence.current)
           return
-        setError(
-          describeRpcError(
+        setSyncError({
+          chainId,
+          message: describeRpcError(
             syncError,
             'The public post feed could not be synchronized.',
           ),
-        )
+          provider,
+        })
       })
       .finally(() => {
-        if (requestId === requestSequence.current) setLoading(false)
+        if (requestId === requestSequence.current) {
+          setLoadingContext(undefined)
+        }
       })
   }, [session.chainId, session.provider, session.status, synchronize])
 
   useEffect(() => {
     requestSequence.current += 1
     activeRequest.current?.abort()
-    setSnapshot(undefined)
-    setError(undefined)
-    setLoading(false)
+    setLoaded(undefined)
+    setSyncError(undefined)
+    setLoadingContext(undefined)
     if (connected) runSynchronization()
     return () => {
       requestSequence.current += 1
@@ -91,10 +147,48 @@ export function PostFeedPanel({
   }, [connected, runSynchronization])
 
   useEffect(() => {
-    if (handledRefreshRevision.current === refreshRevision) return
-    handledRefreshRevision.current = refreshRevision
-    if (connected) runSynchronization()
-  }, [connected, refreshRevision, runSynchronization])
+    if (
+      !connected ||
+      includedPost === undefined ||
+      includedPost.provider !== session.provider ||
+      includedPost.chainId !== session.chainId
+    ) {
+      setConfirmation(undefined)
+      return
+    }
+    const controller = new AbortController()
+    setConfirmation({ hash: includedPost.hash, status: 'waiting' })
+    void waitForConfirmation(
+      includedPost.provider,
+      includedPost.chainId,
+      includedPost.blockNumber,
+      { signal: controller.signal },
+    )
+      .then(() => {
+        if (controller.signal.aborted) return
+        setConfirmation(undefined)
+        runSynchronization()
+      })
+      .catch((confirmationError: unknown) => {
+        if (controller.signal.aborted) return
+        setConfirmation({
+          hash: includedPost.hash,
+          message: describeRpcError(
+            confirmationError,
+            'Automatic post confirmation monitoring stopped.',
+          ),
+          status: 'stopped',
+        })
+      })
+    return () => controller.abort()
+  }, [
+    connected,
+    includedPost,
+    runSynchronization,
+    session.chainId,
+    session.provider,
+    waitForConfirmation,
+  ])
 
   return (
     <section className="post-feed" aria-labelledby="post-feed-title">
@@ -137,6 +231,16 @@ export function PostFeedPanel({
       {snapshot?.cacheReset ? (
         <p className="feed-feedback" role="status">
           The disposable local cache was rebuilt before this range was read.
+        </p>
+      ) : null}
+      {activeConfirmation ? (
+        <p
+          className={`feed-feedback${activeConfirmation.status === 'stopped' ? ' error-message' : ''}`}
+          role={activeConfirmation.status === 'stopped' ? 'alert' : 'status'}
+        >
+          {activeConfirmation.status === 'waiting'
+            ? `Post ${shortValue(includedPost!.hash)} was included in block ${includedPost!.blockNumber.toString()}. The feed will refresh once it is ${POST_FEED_CONFIRMATION_DEPTH.toString()} blocks deep.`
+            : activeConfirmation.message}
         </p>
       ) : null}
 

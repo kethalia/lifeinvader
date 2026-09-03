@@ -10,6 +10,7 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
+import { waitForPostFeedConfirmation } from './post-feed-confirmation'
 import {
   deployProtocol,
   inspectProtocol,
@@ -126,7 +127,14 @@ describe('wallet transaction helpers on Anvil', () => {
       provider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
+    const confirmation = waitForPostFeedConfirmation(
+      provider,
+      LOCAL_CHAIN_ID,
+      postReceipt.blockNumber,
+      { pollIntervalMs: 1, timeoutMs: 2_000 },
+    )
     await provider.request({ method: 'anvil_mine', params: ['0xc'] })
+    await confirmation
     const feed = await synchronizePostFeed(provider, LOCAL_CHAIN_ID, {
       storage: {
         databaseName: 'lifeinvader-anvil-post-feed',

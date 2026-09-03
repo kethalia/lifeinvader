@@ -4,7 +4,7 @@ The first chain-derived screen is the global `PostPublished` feed. It is impleme
 
 ## Read transport and scope
 
-The initial UI reads through the connected wallet's EIP-1193 provider. This makes the selected chain explicit and avoids shipping a vendor endpoint or API key. A later transport picker can provide a separate user-selected RPC without changing the feed synchronizer.
+The initial UI reads through the connected wallet's EIP-1193 provider. This makes the selected chain explicit and avoids shipping a vendor endpoint or API key. Before any cache or log work, the synchronizer requires the exact Lifeinvader v1 runtime code at the predetermined address; an ABI-compatible event from conflicting bytecode is never presented as protocol history. A later transport picker can provide a separate user-selected RPC without changing the feed synchronizer.
 
 The feed cursor starts at block zero because permissionless deterministic deployment can happen at a different height on every chain. Supported-chain metadata may later provide a verified deployment block as an optimization. Until then, progress is honest and resumable rather than assuming an unverified boundary.
 
@@ -12,16 +12,16 @@ Every chain uses a twelve-block confirmation depth, including chain ID `31337`. 
 
 ## Work budget
 
-One feed synchronization invocation permits exactly one bounded indexer range. Connecting a wallet performs one invocation. Publishing a confirmed post performs one more. If history remains, the interface exposes a **Load next block range** button; it does not automatically loop toward the head on page load.
+One feed synchronization invocation permits exactly one bounded indexer range. Connecting a wallet performs one invocation. After a post receipt arrives, a separate confirmation monitor reads only chain ID and head height every twelve seconds, for at most 30 minutes and 240 attempts. It triggers one feed invocation when the inclusion block reaches the twelve-block depth. If history remains, the interface exposes a **Load next block range** button; it does not automatically loop toward the head on page load.
 
 Each invocation follows one compare-and-swap cycle:
 
 1. Read the chain/filter-scoped cursor and newest cached page.
 2. Run one bounded `syncEventLogs` call through the selected provider.
 3. Atomically apply additions or rollback data to IndexedDB.
-4. Read and strictly decode at most 50 newest cached posts.
+4. Read and strictly decode at most 50 newest cached posts, accepting the snapshot only if its generation, revision, and cursor still identify the commit from step 3.
 
-Changing provider or chain aborts the active RPC work and clears the rendered snapshot before starting the new scope. A late result from an old scope cannot replace the new view. Cross-tab cache conflicts are surfaced for an explicit retry rather than hidden behind an unbounded retry loop.
+Changing provider or chain aborts active synchronization and confirmation monitoring and clears the rendered snapshot before starting the new scope. A late result from an old scope cannot replace the new view. Cross-tab cache conflicts—including a change between apply and the final read—are surfaced for an explicit retry rather than hidden behind an unbounded retry loop.
 
 ## Presentation boundary
 

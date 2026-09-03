@@ -1,15 +1,17 @@
 import { openEventCache, type OpenEventCacheOptions } from './event-cache'
 import {
   createEventCursor,
-  DEFAULT_FINALITY_DEPTH,
   syncEventLogs,
+  type EventCursor,
   type IndexedEventLog,
 } from './event-indexer'
+import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
 import {
   decodePublishedPost,
   PUBLISHED_POST_FILTER,
   type PublishedPost,
 } from './protocol-events'
+import { inspectProtocol } from './protocol'
 import type { Eip1193Provider } from './ethereum'
 
 const POST_FEED_PAGE_SIZE = 50
@@ -54,6 +56,23 @@ function decodePostLogs(logs: readonly IndexedEventLog[]) {
   })
 }
 
+function sameCursor(first: EventCursor, second: EventCursor) {
+  return (
+    first.chainId === second.chainId &&
+    first.finalityDepth === second.finalityDepth &&
+    first.filterId === second.filterId &&
+    first.nextBlock === second.nextBlock &&
+    first.rangeSize === second.rangeSize &&
+    first.startBlock === second.startBlock &&
+    first.checkpoints.length === second.checkpoints.length &&
+    first.checkpoints.every(
+      (checkpoint, index) =>
+        checkpoint.blockHash === second.checkpoints[index]?.blockHash &&
+        checkpoint.blockNumber === second.checkpoints[index]?.blockNumber,
+    )
+  )
+}
+
 export const synchronizePostFeed: PostFeedSynchronizer = async (
   provider,
   chainId,
@@ -62,10 +81,17 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
   const seed = createEventCursor({
     chainId,
     filter: PUBLISHED_POST_FILTER,
-    finalityDepth: DEFAULT_FINALITY_DEPTH,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
     startBlock: POST_FEED_START_BLOCK,
   })
   assertActive(options.signal)
+  const inspection = await inspectProtocol(provider)
+  assertActive(options.signal)
+  if (inspection.kind !== 'ready') {
+    throw new Error(
+      'Verified Lifeinvader v1 is required before this chain can provide a feed.',
+    )
+  }
   const cache = await openEventCache({
     ...options.storage,
     filter: PUBLISHED_POST_FILTER,
@@ -95,6 +121,15 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
     await cache.apply(before, result)
     assertActive(options.signal)
     const after = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+    if (
+      after.generation !== before.generation ||
+      after.revision !== before.revision + 1n ||
+      !sameCursor(after.cursor, result.cursor)
+    ) {
+      throw new Error(
+        'The post feed cache changed after synchronization. Retry the bounded range.',
+      )
+    }
     let posts: readonly PublishedPost[]
     try {
       posts = decodePostLogs(after.logs)

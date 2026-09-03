@@ -1,6 +1,10 @@
-import { useReducer } from 'react'
+import { useState } from 'react'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSynchronizer } from './post-feed'
+import type {
+  IncludedPost,
+  PostFeedConfirmationWaiter,
+} from './post-feed-confirmation'
 import { WalletPanel } from './wallet-panel'
 import { useWalletSession } from './wallet-session'
 
@@ -30,14 +34,13 @@ const networkFacts = [
 
 export function App({
   synchronizePostFeed,
+  waitForPostConfirmation,
 }: {
   synchronizePostFeed?: PostFeedSynchronizer
+  waitForPostConfirmation?: PostFeedConfirmationWaiter
 } = {}) {
   const walletSession = useWalletSession()
-  const [feedRevision, refreshFeed] = useReducer(
-    (revision: number) => revision + 1,
-    0,
-  )
+  const [includedPost, setIncludedPost] = useState<IncludedPost>()
   return (
     <div className="site-shell">
       <a className="skip-link" href="#main-content">
@@ -93,14 +96,15 @@ export function App({
         </section>
 
         <WalletPanel
-          onPostConfirmed={refreshFeed}
+          onPostConfirmed={setIncludedPost}
           walletSession={walletSession}
         />
 
         <PostFeedPanel
-          refreshRevision={feedRevision}
+          includedPost={includedPost}
           session={walletSession.session}
           synchronize={synchronizePostFeed}
+          waitForConfirmation={waitForPostConfirmation}
         />
 
         <section className="principles" aria-labelledby="principles-title">
