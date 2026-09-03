@@ -525,6 +525,35 @@ describe('sync lifetime', () => {
     ).rejects.toThrow(/timed out/i)
   })
 
+  it('interrupts an in-flight request when the provider disconnects', async () => {
+    const listeners = new Map<string, () => void>()
+    const removeListener = vi.fn((event: string) => listeners.delete(event))
+    let markStarted: (() => void) | undefined
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    const request = vi.fn(({ method }: ProviderRequest) => {
+      if (method === 'eth_blockNumber') return Promise.resolve('0x0')
+      markStarted?.()
+      return new Promise<unknown>(() => undefined)
+    })
+    const synchronization = syncEventLogs(
+      {
+        on: (event, listener) => listeners.set(event, listener),
+        removeListener,
+        request,
+      },
+      FILTER,
+      eventCursor(),
+      { timeoutMs: 60_000 },
+    )
+    const rejected = expect(synchronization).rejects.toThrow(/chain changed/i)
+    await started
+    listeners.get('disconnect')?.()
+    await rejected
+    expect(removeListener).toHaveBeenCalledTimes(2)
+  })
+
   it('removes chain listeners after a mid-sync network change', async () => {
     const listeners = new Map<string, () => void>()
     const removeListener = vi.fn((event: string) => listeners.delete(event))

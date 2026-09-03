@@ -34,6 +34,8 @@ When an RPC explicitly reports that a block range or result set is too large, th
 
 The engine returns `caughtUp: false` when its work budget ends before the safe head. A caller schedules another bounded invocation rather than turning one page load into an unbounded history scan.
 
+The entire invocation shares one timeout and supports `AbortSignal` cancellation. Wallet chain changes and disconnects interrupt any in-flight RPC request and invalidate the invocation. Provider and cancellation listeners are always removed when synchronization settles.
+
 ## Canonical snapshots and rollback
 
 The default safe head trails the reported head by twelve blocks. Chain integrations may choose a different finality depth when creating the cursor, including zero for isolated Anvil testing. If a sampled safe head is temporarily behind the cursor's newest checkpoint, synchronization fails without issuing a rollback. This protects the cache from a lagging load-balanced RPC node; a later sample can resume normally.

@@ -531,11 +531,15 @@ export async function syncEventLogs(
   )
   const deadline = Date.now() + timeoutMs
   let chainChanged = false
+  const requestInterruption = new AbortController()
   const handleChainChanged = () => {
     chainChanged = true
+    requestInterruption.abort()
   }
+  const handleCancellation = () => requestInterruption.abort()
   provider.on?.('chainChanged', handleChainChanged)
   provider.on?.('disconnect', handleChainChanged)
+  options.signal?.addEventListener('abort', handleCancellation, { once: true })
   const assertActive = () => {
     if (options.signal?.aborted) {
       throw new Error('Event synchronization was cancelled.')
@@ -546,7 +550,19 @@ export async function syncEventLogs(
   }
   const request: RpcRequest = async (rpcRequest) => {
     assertActive()
-    return requestBeforeDeadline(provider, rpcRequest, deadline, options.signal)
+    try {
+      const result = await requestBeforeDeadline(
+        provider,
+        rpcRequest,
+        deadline,
+        requestInterruption.signal,
+      )
+      assertActive()
+      return result
+    } catch (error) {
+      assertActive()
+      throw error
+    }
   }
   try {
     const [chainValue, headValue] = await Promise.all([
@@ -703,6 +719,8 @@ export async function syncEventLogs(
       scannedRanges,
     }
   } finally {
+    requestInterruption.abort()
+    options.signal?.removeEventListener('abort', handleCancellation)
     provider.removeListener?.('chainChanged', handleChainChanged)
     provider.removeListener?.('disconnect', handleChainChanged)
   }
