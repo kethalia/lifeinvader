@@ -24,12 +24,18 @@ same canonical CID policy as post media; an empty avatar is valid.
 
 ## Writes and reads
 
+The wallet console publishes one complete profile snapshot at a time. It counts
+display names and bios in UTF-8 bytes, canonicalizes an optional already-uploaded
+avatar CID, and explains that blank fields replace earlier derived values rather
+than deleting history. Publishing an all-empty clear snapshot requires a
+separate acknowledgment.
+
 Before submitting, the profile transaction helper verifies the exact
 Lifeinvader v1 runtime at the predetermined address. It confirms success only
 when the canonical transaction receipt contains the exact `ProfileSet` account
 and payload requested by the user. Wallet network and account changes
-invalidate the operation. Profile editing UI is staged separately from this
-protocol foundation.
+invalidate the operation, and uncertain submissions retain their exact payload
+for an authenticated receipt retry.
 
 Profile history is independently queryable through the `ProfileSet` signature
 and indexed account topic. The browser's global profile stream verifies the
@@ -60,8 +66,8 @@ Every profile read remains withheld until the resulting full baseline and
 canonical provider checkpoint have been reauthenticated. Cache movement,
 corruption, reorgs, cancellation, or a wallet-context change fail closed and
 discard the partial projection. A completed run returns only defensive copies;
-wiring that result and its resume tuple into the UI is a separate slice. No
-hosted indexer or server database is part of the protocol.
+wiring that result and its resume tuple into profile display UI is a separate
+slice. No hosted indexer or server database is part of the protocol.
 
 Avatar CIDs identify content; they do not pay for or prove persistence. See
 [`media.md`](./media.md) for the storage boundary.

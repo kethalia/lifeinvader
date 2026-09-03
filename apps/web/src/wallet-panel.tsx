@@ -18,10 +18,12 @@ import {
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
   publishPost,
+  setProfile,
   switchToLocalChain,
   verifyLocalChain,
   waitForTransactionReceipt,
   type ProtocolInspection,
+  type ProfilePayload,
   type TransactionReceipt,
   type TransactionSubmitted,
 } from './protocol'
@@ -29,6 +31,7 @@ import { useWalletProviders } from './wallet-providers'
 import type { WalletSession, WalletSessionController } from './wallet-session'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
+import { ProfileComposer } from './profile-composer'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -56,13 +59,16 @@ type WalletContext = {
   walletName: string
 }
 type TransactionContext = WalletContext & {
-  action: 'deploy' | 'post'
+  action: 'deploy' | 'post' | 'profile'
   composeRevision: number
   postBody: string
   postMediaCid: Hex
+  profileAvatarCid: Hex
+  profileBio: string
+  profileDisplayName: string
 }
 type BusyOperation = {
-  action: 'chain' | 'deploy' | 'post' | 'receipt'
+  action: 'chain' | 'deploy' | 'post' | 'profile' | 'receipt'
   context?: WalletContext
   id: number
   scope: 'context' | 'provider'
@@ -120,7 +126,12 @@ function TransactionStatus({
   onRetry(): void
   transaction: SubmittedTransaction
 }) {
-  const label = transaction.action === 'deploy' ? 'Deployment' : 'Post'
+  const label =
+    transaction.action === 'deploy'
+      ? 'Deployment'
+      : transaction.action === 'profile'
+        ? 'Profile'
+        : 'Post'
   const statusCopy =
     transaction.status === 'pending'
       ? 'Waiting for an on-chain receipt…'
@@ -179,10 +190,12 @@ function TransactionStatus({
 export function WalletPanel({
   onPostConfirmed,
   publishPostAction = publishPost,
+  setProfileAction = setProfile,
   walletSession,
 }: {
   onPostConfirmed(post: IncludedPost): void
   publishPostAction?: typeof publishPost
+  setProfileAction?: typeof setProfile
   walletSession: WalletSessionController
 }) {
   const wallets = useWalletProviders()
@@ -269,10 +282,11 @@ export function WalletPanel({
     void refreshInspection()
   }, [refreshInspection, session.chainId])
   const runAction = async (
-    action: 'chain' | 'deploy' | 'post',
+    action: 'chain' | 'deploy' | 'post' | 'profile',
     operation: (
       onSubmitted: TransactionSubmitted,
     ) => Promise<TransactionReceipt | void>,
+    profilePayload?: ProfilePayload,
   ) => {
     let submittedHash: TransactionReceipt['hash'] | undefined
     const walletContext =
@@ -294,6 +308,11 @@ export function WalletPanel({
             postBody: action === 'post' ? body : '',
             postMediaCid:
               action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
+            profileAvatarCid:
+              action === 'profile' ? (profilePayload?.avatarCid ?? '0x') : '0x',
+            profileBio: action === 'profile' ? (profilePayload?.bio ?? '') : '',
+            profileDisplayName:
+              action === 'profile' ? (profilePayload?.displayName ?? '') : '',
           }
         : undefined
     const operationId = ++operationSequence.current
@@ -464,6 +483,25 @@ export function WalletPanel({
       )
     })
   }
+  const handleProfile = (payload: ProfilePayload) => {
+    const provider = session.provider
+    const account = session.account
+    const chainId = session.chainId
+    if (!provider || !account || chainId === undefined) return
+    void runAction(
+      'profile',
+      async (onSubmitted) => {
+        return await setProfileAction(
+          provider,
+          account,
+          chainId,
+          payload,
+          onSubmitted,
+        )
+      },
+      payload,
+    )
+  }
   const handleRetryReceipt = (transaction: SubmittedTransaction) => {
     const hash = transaction.hash
     if (
@@ -524,6 +562,15 @@ export function WalletPanel({
                   mediaCid: transaction.postMediaCid,
                 }
               : undefined,
+          expectedProfile:
+            transaction.action === 'profile'
+              ? {
+                  account: transaction.account,
+                  avatarCid: transaction.profileAvatarCid,
+                  bio: transaction.profileBio,
+                  displayName: transaction.profileDisplayName,
+                }
+              : undefined,
           expectProtocol: transaction.action === 'deploy',
           selectedChainId: transaction.chainId,
         }).finally(guard.release)
@@ -560,7 +607,9 @@ export function WalletPanel({
               provider: transaction.provider,
             })
           }
-        } else await refreshInspection()
+        } else if (transaction.action === 'deploy') {
+          await refreshInspection()
+        }
       } catch (error) {
         setSubmittedTransactions((current) =>
           current.map((candidate) =>
@@ -812,6 +861,20 @@ export function WalletPanel({
                 </button>
               </div>
             </form>
+          )}
+        </div>
+        <div className="wallet-profile">
+          <h3>4. Publish a profile snapshot</h3>
+          {!connected || inspection?.kind !== 'ready' ? (
+            <p>
+              A verified v1 deployment is required before setting a profile.
+            </p>
+          ) : (
+            <ProfileComposer
+              disabled={busyAction !== undefined || transactionWriteLocked}
+              publishing={busyAction === 'profile'}
+              onSubmit={handleProfile}
+            />
           )}
         </div>
       </div>

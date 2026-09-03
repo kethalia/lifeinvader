@@ -117,7 +117,7 @@ afterAll(async () => {
   })
 })
 describe('wallet transaction helpers on Anvil', () => {
-  it('deploys v1 and verifies post, comment, and reaction transactions', async () => {
+  it('deploys v1 and verifies profile, post, comment, and reaction transactions', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
     )
