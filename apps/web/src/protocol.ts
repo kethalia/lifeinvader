@@ -33,6 +33,8 @@ export const DEPLOYMENT_SALT =
 export const INIT_CODE_HASH =
   '0xa9bdddbbb0824a6b64f118b0eeb6b2c6051394933c5593ace3ee9495f4cc805e'
 export const MAX_POST_BODY_BYTES = 4_096
+export const MAX_PROFILE_DISPLAY_NAME_BYTES = 64
+export const MAX_PROFILE_BIO_BYTES = 1_024
 export const LOCAL_CHAIN_ID = 31_337n
 export const LOCAL_RPC_URL = 'http://127.0.0.1:8545'
 export const LIFEINVADER_INIT_CODE =
@@ -80,6 +82,19 @@ const SET_LIKE_ABI = [
       { name: 'contentKind', type: 'uint8' },
       { name: 'contentId', type: 'uint256' },
       { name: 'liked', type: 'bool' },
+    ],
+    outputs: [],
+  },
+] as const
+const SET_PROFILE_ABI = [
+  {
+    type: 'function',
+    name: 'setProfile',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'displayName', type: 'string' },
+      { name: 'bio', type: 'string' },
+      { name: 'avatarCid', type: 'bytes' },
     ],
     outputs: [],
   },
@@ -135,6 +150,19 @@ export const LIKE_SET_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const PROFILE_SET_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'account', type: 'address' },
+      { indexed: false, name: 'displayName', type: 'string' },
+      { indexed: false, name: 'bio', type: 'string' },
+      { indexed: false, name: 'avatarCid', type: 'bytes' },
+    ],
+    name: 'ProfileSet',
+    type: 'event',
+  },
+] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
 export const COMMENT_PUBLISHED_TOPIC =
@@ -143,7 +171,14 @@ export const REPOST_PUBLISHED_TOPIC =
   '0x48b2667530535dfe389ce140bb7872ab9a922083158958ed14099b3565381b99'
 export const LIKE_SET_TOPIC =
   '0xa6fa55005fe0b190111a9abc7df43c5e4b986d6332d5971d6fe809390bb97aa0'
+export const PROFILE_SET_TOPIC =
+  '0x033f4d6cdbbae83b8a59446e605fd37762898192566e447aed006d0d815842a7'
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
+const PROFILE_DATA_PARAMETERS = [
+  { type: 'string' },
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
 const MAX_UINT256 = (1n << 256n) - 1n
 export const POST_CONTENT_KIND = 0
@@ -602,6 +637,12 @@ function parseReceipt(
 }
 export type PostPayload = { body: string; mediaCid: Hex }
 export type ExpectedPost = PostPayload & { author: Address }
+export type ProfilePayload = {
+  avatarCid: Hex
+  bio: string
+  displayName: string
+}
+export type ExpectedProfile = ProfilePayload & { account: Address }
 export type ExpectedPostAction =
   | (PostPayload & {
       account: Address
@@ -684,6 +725,28 @@ export function assertExpectedPost(
   }
 }
 
+export function assertExpectedProfile(
+  logs: unknown,
+  expected: ExpectedProfile,
+  receipt: TransactionReceipt,
+) {
+  const expectedData = encodeAbiParameters(PROFILE_DATA_PARAMETERS, [
+    expected.displayName,
+    expected.bio,
+    expected.avatarCid,
+  ])
+  if (
+    !hasExpectedProtocolLog(
+      logs,
+      receipt,
+      [PROFILE_SET_TOPIC, expectedTopic(expected.account)],
+      expectedData,
+    )
+  ) {
+    throw new Error('The receipt did not contain the expected profile event.')
+  }
+}
+
 export function assertExpectedPostAction(
   logs: unknown,
   expected: ExpectedPostAction,
@@ -748,6 +811,7 @@ export async function waitForTransactionReceipt(
     assertUnchanged?: () => void
     expectedPost?: ExpectedPost
     expectedPostAction?: ExpectedPostAction
+    expectedProfile?: ExpectedProfile
     expectProtocol?: boolean
     localProvider?: Eip1193Provider
     pollIntervalMs?: number
@@ -818,6 +882,9 @@ export async function waitForTransactionReceipt(
           if (!reverted && options.expectedPostAction) {
             assertExpectedPostAction(logs, options.expectedPostAction, receipt)
           }
+          if (!reverted && options.expectedProfile) {
+            assertExpectedProfile(logs, options.expectedProfile, receipt)
+          }
           if (reverted) throw new TransactionRevertedError(hash)
           return receipt
         }
@@ -866,8 +933,11 @@ export async function deployProtocol(
     guard.release()
   }
 }
+export function getUtf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length
+}
 export function getPostBodyByteLength(body: string): number {
-  return new TextEncoder().encode(body).length
+  return getUtf8ByteLength(body)
 }
 export async function publishPost(
   provider: Eip1193Provider,
@@ -1051,4 +1121,66 @@ export async function setPostLike(
     onSubmitted,
     localProvider,
   )
+}
+
+export async function setProfile(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  payload: ProfilePayload,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+): Promise<TransactionReceipt> {
+  const { avatarCid, bio, displayName } = payload
+  const displayNameLength =
+    displayName.length > MAX_PROFILE_DISPLAY_NAME_BYTES
+      ? MAX_PROFILE_DISPLAY_NAME_BYTES + 1
+      : getUtf8ByteLength(displayName)
+  if (displayNameLength > MAX_PROFILE_DISPLAY_NAME_BYTES) {
+    throw new Error(
+      `Profile display names are limited to ${MAX_PROFILE_DISPLAY_NAME_BYTES} UTF-8 bytes.`,
+    )
+  }
+  const bioLength =
+    bio.length > MAX_PROFILE_BIO_BYTES
+      ? MAX_PROFILE_BIO_BYTES + 1
+      : getUtf8ByteLength(bio)
+  if (bioLength > MAX_PROFILE_BIO_BYTES) {
+    throw new Error(
+      `Profile bios are limited to ${MAX_PROFILE_BIO_BYTES} UTF-8 bytes.`,
+    )
+  }
+  if (avatarCid !== '0x') decodeMediaCid(avatarCid)
+  const guard = await createTransactionGuard(provider, account, chainId)
+  try {
+    if ((await inspectProtocol(provider)).kind !== 'ready') {
+      throw new Error(
+        'Verified Lifeinvader v1 code is required before setting a profile.',
+      )
+    }
+    const hash = await sendTransaction(
+      provider,
+      {
+        data: encodeFunctionData({
+          abi: SET_PROFILE_ABI,
+          functionName: 'setProfile',
+          args: [displayName, bio, avatarCid],
+        }),
+        from: account,
+        to: PROTOCOL_ADDRESS,
+      },
+      guard,
+      onSubmitted,
+      localProvider,
+    )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
+      expectedProfile: { account, avatarCid, bio, displayName },
+      localProvider,
+      selectedChainId: chainId,
+    })
+  } finally {
+    guard.release()
+  }
 }

@@ -11,12 +11,14 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
+  decodeProfileSet,
   decodePostLikeSet,
   decodePublishedComment,
   decodePublishedPost,
   decodePublishedRepost,
   POST_CONTENT_KIND_TOPIC,
   POST_LIKE_SET_FILTER,
+  PROFILE_SET_FILTER,
   PUBLISHED_COMMENT_FILTER,
   PUBLISHED_REPOST_FILTER,
 } from './protocol-events'
@@ -25,6 +27,7 @@ import {
   LIKE_SET_TOPIC,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
+  PROFILE_SET_TOPIC,
   REPOST_PUBLISHED_TOPIC,
 } from './protocol'
 
@@ -32,6 +35,11 @@ const AUTHOR = '0x000000000000000000000000000000000000b0b0' as Address
 const ACCOUNT = '0x000000000000000000000000000000000000c0c0' as Address
 const DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
+const PROFILE_DATA_PARAMETERS = [
+  { type: 'string' },
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
 
 function postLog(
   options: {
@@ -138,6 +146,36 @@ function repostLog(
   }
 }
 
+function profileLog(
+  options: {
+    accountTopic?: Hex
+    avatarCid?: Hex
+    bio?: string
+    data?: Hex
+    displayName?: string
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const avatarCid = options.avatarCid ?? '0x01701220'
+  const bio = options.bio ?? 'Deliberately public since block one.'
+  const displayName = options.displayName ?? 'Tracey'
+  return {
+    ...postLog(),
+    data:
+      options.data ??
+      encodeAbiParameters(PROFILE_DATA_PARAMETERS, [
+        displayName,
+        bio,
+        avatarCid,
+      ]),
+    topics: options.topics ?? [
+      options.topic ?? PROFILE_SET_TOPIC,
+      options.accountTopic ?? padHex(ACCOUNT, { size: 32 }),
+    ],
+  }
+}
+
 describe('PostPublished decoding', () => {
   it('decodes indexed identity and bounded publication data', () => {
     expect(decodePublishedPost(postLog())).toEqual({
@@ -191,6 +229,79 @@ describe('PostPublished decoding', () => {
     ],
   ])('rejects %s', (_description, log) => {
     expect(() => decodePublishedPost(log)).toThrow(/invalid PostPublished/i)
+  })
+})
+
+describe('ProfileSet decoding', () => {
+  it('decodes a complete bounded profile snapshot', () => {
+    expect(decodeProfileSet(profileLog())).toEqual({
+      account: getAddress(ACCOUNT),
+      avatarCid: '0x01701220',
+      bio: 'Deliberately public since block one.',
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      displayName: 'Tracey',
+      logIndex: 2,
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it('accepts the all-empty snapshot used to clear a profile', () => {
+    expect(
+      decodeProfileSet(
+        profileLog({ avatarCid: '0x', bio: '', displayName: '' }),
+      ),
+    ).toMatchObject({ avatarCid: '0x', bio: '', displayName: '' })
+  })
+
+  it.each([
+    ['another event family', profileLog({ topic: POST_PUBLISHED_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...profileLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodeProfileSet(log)).toBeUndefined()
+  })
+
+  it.each([
+    ['missing indexed topics', profileLog({ topics: [PROFILE_SET_TOPIC] })],
+    [
+      'surplus indexed topics',
+      profileLog({
+        topics: [...profileLog().topics, keccak256(stringToHex('surplus'))],
+      }),
+    ],
+    [
+      'oversized UTF-8 display name',
+      profileLog({ displayName: '🫥'.repeat(17) }),
+    ],
+    ['oversized UTF-8 bio', profileLog({ bio: '🫥'.repeat(257) })],
+    [
+      'oversized avatar CID',
+      profileLog({ avatarCid: `0x${'00'.repeat(129)}` as Hex }),
+    ],
+    [
+      'non-canonical account padding',
+      profileLog({ accountTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed ABI data', profileLog({ data: '0x01' })],
+    [
+      'surplus ABI data',
+      profileLog({
+        data: `${profileLog().data}${'00'.repeat(32)}` as Hex,
+      }),
+    ],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodeProfileSet(log)).toThrow(/invalid ProfileSet/i)
+  })
+
+  it('uses one global event-family filter', () => {
+    expect(PROFILE_SET_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [PROFILE_SET_TOPIC],
+    })
   })
 })
 

@@ -7,6 +7,7 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import {
+  assertExpectedProfile,
   assertExpectedPostAction,
   assertProtocolConfiguration,
   COMMENT_PUBLISHED_TOPIC,
@@ -20,12 +21,16 @@ import {
   LIFEINVADER_INIT_CODE,
   LIKE_SET_TOPIC,
   MAX_POST_BODY_BYTES,
+  MAX_PROFILE_BIO_BYTES,
+  MAX_PROFILE_DISPLAY_NAME_BYTES,
   PROTOCOL_ADDRESS,
+  PROFILE_SET_TOPIC,
   publishComment,
   publishRepost,
   publishPost,
   REPOST_PUBLISHED_TOPIC,
   setPostLike,
+  setProfile,
   switchToLocalChain,
   verifyLocalChain,
   waitForTransactionReceipt,
@@ -148,7 +153,7 @@ describe('protocol configuration', () => {
     expect(request).toHaveBeenCalledTimes(1)
   })
 })
-describe('post transactions', () => {
+describe('protocol transactions', () => {
   it('measures the same UTF-8 bytes the contract limits', () => {
     expect(getPostBodyByteLength('invade')).toBe(6)
     expect(getPostBodyByteLength('👁️')).toBe(7)
@@ -196,6 +201,86 @@ describe('post transactions', () => {
       }),
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
+  })
+  it('rejects invalid profile fields before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+    await expect(
+      setProfile(provider, ACCOUNT, 1n, {
+        avatarCid: '0x',
+        bio: '',
+        displayName: '🫥'.repeat(MAX_PROFILE_DISPLAY_NAME_BYTES),
+      }),
+    ).rejects.toThrow(/64 UTF-8 bytes/i)
+    await expect(
+      setProfile(provider, ACCOUNT, 1n, {
+        avatarCid: '0x',
+        bio: '🫥'.repeat(MAX_PROFILE_BIO_BYTES),
+        displayName: '',
+      }),
+    ).rejects.toThrow(/1024 UTF-8 bytes/i)
+    await expect(
+      setProfile(provider, ACCOUNT, 1n, {
+        avatarCid: '0x01',
+        bio: '',
+        displayName: '',
+      }),
+    ).rejects.toThrow(/media CID/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('requires the exact complete profile snapshot in its receipt', () => {
+    const profileReceipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const profileLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: encodeAbiParameters(
+        [{ type: 'string' }, { type: 'string' }, { type: 'bytes' }],
+        ['Tracey', 'Everything is public.', '0x'],
+      ),
+      topics: [PROFILE_SET_TOPIC, padHex(ACCOUNT, { size: 32 })],
+      transactionHash: TRANSACTION_HASH,
+    }
+    expect(() =>
+      assertExpectedProfile(
+        [profileLog],
+        {
+          account: ACCOUNT,
+          avatarCid: '0x',
+          bio: 'Everything is public.',
+          displayName: 'Tracey',
+        },
+        profileReceipt,
+      ),
+    ).not.toThrow()
+    expect(() =>
+      assertExpectedProfile(
+        [profileLog],
+        {
+          account: ACCOUNT,
+          avatarCid: '0x',
+          bio: 'A substituted bio.',
+          displayName: 'Tracey',
+        },
+        profileReceipt,
+      ),
+    ).toThrow(/expected profile event/i)
+    expect(() =>
+      assertExpectedProfile(
+        [{ ...profileLog, blockHash: OTHER_BLOCK_HASH }],
+        {
+          account: ACCOUNT,
+          avatarCid: '0x',
+          bio: 'Everything is public.',
+          displayName: 'Tracey',
+        },
+        profileReceipt,
+      ),
+    ).toThrow(/expected profile event/i)
   })
   it('rejects invalid reaction targets before opening the wallet', async () => {
     const request = vi.fn()
