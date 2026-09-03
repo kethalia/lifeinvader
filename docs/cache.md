@@ -36,6 +36,8 @@ A completed scan returns an authenticated baseline for a later append-only delta
 
 The cache can also bind a canonical digest of derived state to an exact completed baseline with the same unexposed scope key. On a later startup, verifying that binding establishes which projection belonged to the saved baseline; the subsequent delta scan separately proves that the baseline remains a canonical prefix of the current cache. Binding a new derived state requires an exact current baseline, while authenticating an existing binding permits an older revision so append-only progress does not invalidate resumable state.
 
+The connected-account profile reader persists its completed projection, baseline, and binding in a separate versioned IndexedDB database keyed by chain and account. That record is only a restart hint: its envelope is validated when loaded, its complete tuple is validated by the profile projection, and its keyed binding is authenticated against the event cache before any profile is displayed. An unreadable record or rejected binding is deleted when possible and replaced by a fresh bounded projection. If the resume database is unavailable or full, the authenticated profile remains usable but the next read may repeat local projection work.
+
 Normal scan work is proportional to the bounded page plus a constant number of edge and anchor reads. It performs no full-scope `count`, `getAll`, or unbounded local history load. A caller that must preserve this bound even after detecting corruption sets `resetOnCorruption: false`; the scan then aborts without deleting records and leaves cleanup to a later synchronization or explicit maintenance operation.
 
 ## Atomic synchronization

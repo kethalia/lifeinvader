@@ -65,9 +65,19 @@ trusting saved data.
 Every profile read remains withheld until the resulting full baseline and
 canonical provider checkpoint have been reauthenticated. Cache movement,
 corruption, reorgs, cancellation, or a wallet-context change fail closed and
-discard the partial projection. A completed run returns only defensive copies;
-wiring that result and its resume tuple into profile display UI is a separate
-slice. No hosted indexer or server database is part of the protocol.
+discard the partial projection.
+
+The wallet console exposes this flow for the connected account only. Nothing
+loads automatically: each explicit action advances at most one bounded RPC
+range or one complete-block local projection page, followed by a separate
+anchor-authentication step. Until that final step succeeds, no saved or partial
+profile is rendered. The completed authenticated tuple is stored in a separate
+versioned IndexedDB resume cache keyed by chain and account. On a later check,
+an accepted tuple scans only appended events; an unreadable or rejected tuple
+is discarded and rebuilt. Failure to save this performance hint never changes
+the confirmed result. Wallet account, chain, or provider changes abort and hide
+work from the old context. No hosted indexer or server database is part of the
+protocol.
 
 Avatar CIDs identify content; they do not pay for or prove persistence. See
 [`media.md`](./media.md) for the storage boundary.
