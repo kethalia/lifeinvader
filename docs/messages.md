@@ -25,7 +25,7 @@ The event-family-wide filter exists for future explicit indexing workflows. Norm
 
 The browser transaction helper accepts a nonzero recipient plus text, canonical CID bytes, or both. It applies the same byte limits as the contract before opening the wallet, binds the action to the selected chain and account, verifies the exact v1 runtime code, and submits `sendDirectMessage` through an EIP-1193 wallet such as MetaMask.
 
-Message identifiers are allocated by the contract and are shared with group messages, so the client cannot predict the next identifier safely. Confirmation instead requires a canonical receipt log with the exact protocol address, block, transaction, conversation, sender, recipient, body, and media CID, then accepts and returns the positive identifier emitted by the chain. A matching payload copied from another receipt or padded with surplus ABI data is not confirmation.
+Message identifiers are allocated by the contract and are shared with group messages, so the client cannot predict the next identifier safely. Confirmation instead requires a canonical receipt log with the exact protocol address, block, transaction, conversation, sender, recipient, body, and media CID; the verifier accepts the positive identifier emitted by the chain without trying to predict it. A matching payload copied from another receipt or padded with surplus ABI data is not confirmation.
 
 ## Current boundary
 
