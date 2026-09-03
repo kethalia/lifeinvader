@@ -9,6 +9,7 @@ import {
 import {
   assertExpectedPostAction,
   assertProtocolConfiguration,
+  COMMENT_PUBLISHED_TOPIC,
   deployProtocol,
   FACTORY_ADDRESS,
   FACTORY_CODE_HASH,
@@ -20,6 +21,7 @@ import {
   LIKE_SET_TOPIC,
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
+  publishComment,
   publishRepost,
   publishPost,
   REPOST_PUBLISHED_TOPIC,
@@ -204,9 +206,32 @@ describe('post transactions', () => {
     await expect(
       setPostLike(provider, ACCOUNT, 1n, 1n << 256n, true),
     ).rejects.toThrow(/post identifier is invalid/i)
+    await expect(
+      publishComment(provider, ACCOUNT, 1n, 0n, {
+        body: 'Nobody can comment on post zero.',
+        mediaCid: '0x',
+      }),
+    ).rejects.toThrow(/post identifier is invalid/i)
     expect(request).not.toHaveBeenCalled()
   })
-  it('requires exact like and repost events in action receipts', () => {
+  it('rejects invalid comment payloads before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+    await expect(
+      publishComment(provider, ACCOUNT, 1n, 1n, {
+        body: '',
+        mediaCid: '0x',
+      }),
+    ).rejects.toThrow(/before commenting/i)
+    await expect(
+      publishComment(provider, ACCOUNT, 1n, 1n, {
+        body: 'This attachment is not a CID.',
+        mediaCid: '0x01',
+      }),
+    ).rejects.toThrow(/media CID/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('requires exact comment, like, and repost events in action receipts', () => {
     const postId = 7n
     const actionReceipt = {
       blockHash: BLOCK_HASH,
@@ -236,7 +261,36 @@ describe('post transactions', () => {
       topics: [REPOST_PUBLISHED_TOPIC, postTopic, accountTopic],
       transactionHash: TRANSACTION_HASH,
     }
+    const commentLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: encodeAbiParameters(
+        [{ type: 'string' }, { type: 'bytes' }],
+        ['Everything is public.', '0x'],
+      ),
+      topics: [
+        COMMENT_PUBLISHED_TOPIC,
+        padHex(toHex(9n), { size: 32 }),
+        postTopic,
+        accountTopic,
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
 
+    expect(() =>
+      assertExpectedPostAction(
+        [commentLog],
+        {
+          account: ACCOUNT,
+          body: 'Everything is public.',
+          kind: 'comment',
+          mediaCid: '0x',
+          postId,
+        },
+        actionReceipt,
+      ),
+    ).not.toThrow()
     expect(() =>
       assertExpectedPostAction(
         [likeLog],
@@ -279,6 +333,19 @@ describe('post transactions', () => {
         actionReceipt,
       ),
     ).toThrow(/expected repost event/i)
+    expect(() =>
+      assertExpectedPostAction(
+        [commentLog],
+        {
+          account: ACCOUNT,
+          body: 'A substituted body.',
+          kind: 'comment',
+          mediaCid: '0x',
+          postId,
+        },
+        actionReceipt,
+      ),
+    ).toThrow(/expected comment event/i)
   })
   it('rejects matching event payloads copied from another receipt', () => {
     const actionReceipt = {

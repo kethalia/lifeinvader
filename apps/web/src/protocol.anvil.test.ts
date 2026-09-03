@@ -19,6 +19,7 @@ import {
   deployProtocol,
   inspectProtocol,
   LOCAL_CHAIN_ID,
+  publishComment,
   publishRepost,
   publishPost,
   setPostLike,
@@ -137,12 +138,12 @@ describe('wallet transaction helpers on Anvil', () => {
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
     await expect(
-      setPostLike(
+      publishComment(
         provider,
         account,
         LOCAL_CHAIN_ID,
         1n,
-        true,
+        { body: 'Nothing here is private.', mediaCid: '0x' },
         undefined,
         provider,
       ),
@@ -153,14 +154,25 @@ describe('wallet transaction helpers on Anvil', () => {
         account,
         LOCAL_CHAIN_ID,
         1n,
-        false,
+        true,
         undefined,
         provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 4n })
     await expect(
-      publishRepost(provider, account, LOCAL_CHAIN_ID, 1n, undefined, provider),
+      setPostLike(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        1n,
+        false,
+        undefined,
+        provider,
+      ),
     ).resolves.toMatchObject({ blockNumber: 5n })
+    await expect(
+      publishRepost(provider, account, LOCAL_CHAIN_ID, 1n, undefined, provider),
+    ).resolves.toMatchObject({ blockNumber: 6n })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,
