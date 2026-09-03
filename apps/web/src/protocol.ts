@@ -467,10 +467,9 @@ function parseReceipt(
     reverted: status === '0x0',
   }
 }
-function assertExpectedPost(
-  logs: unknown,
-  expected: { author: Address; body: string },
-) {
+export type ExpectedPost = { author: Address; body: string }
+
+export function assertExpectedPost(logs: unknown, expected: ExpectedPost) {
   if (!Array.isArray(logs) || logs.length > 1_000)
     throw new Error('The wallet returned invalid receipt logs.')
   const expectedData = encodeAbiParameters(POST_DATA_PARAMETERS, [
@@ -530,7 +529,7 @@ export async function waitForTransactionReceipt(
   options: {
     assertCurrentChain?: () => Promise<void>
     assertUnchanged?: () => void
-    expectedPost?: { author: Address; body: string }
+    expectedPost?: ExpectedPost
     expectProtocol?: boolean
     localProvider?: Eip1193Provider
     pollIntervalMs?: number

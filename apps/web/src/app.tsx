@@ -1,4 +1,12 @@
+import { useState } from 'react'
+import { PostFeedPanel } from './post-feed-panel'
+import type { PostFeedSynchronizer } from './post-feed'
+import type {
+  IncludedPost,
+  PostFeedConfirmationWaiter,
+} from './post-feed-confirmation'
 import { WalletPanel } from './wallet-panel'
+import { useWalletSession } from './wallet-session'
 
 const principles = [
   {
@@ -24,7 +32,15 @@ const networkFacts = [
   ['Privacy', 'Absolutely not'],
 ] as const
 
-export function App() {
+export function App({
+  synchronizePostFeed,
+  waitForPostConfirmation,
+}: {
+  synchronizePostFeed?: PostFeedSynchronizer
+  waitForPostConfirmation?: PostFeedConfirmationWaiter
+} = {}) {
+  const walletSession = useWalletSession()
+  const [includedPost, setIncludedPost] = useState<IncludedPost>()
   return (
     <div className="site-shell">
       <a className="skip-link" href="#main-content">
@@ -79,7 +95,17 @@ export function App() {
           </aside>
         </section>
 
-        <WalletPanel />
+        <WalletPanel
+          onPostConfirmed={setIncludedPost}
+          walletSession={walletSession}
+        />
+
+        <PostFeedPanel
+          includedPost={includedPost}
+          session={walletSession.session}
+          synchronize={synchronizePostFeed}
+          waitForConfirmation={waitForPostConfirmation}
+        />
 
         <section className="principles" aria-labelledby="principles-title">
           <div className="section-heading">

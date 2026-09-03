@@ -2,19 +2,19 @@
 /// <reference types="node" />
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   parseAccounts,
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
-import { createEventCursor, syncEventLogs } from './event-indexer'
-import { decodePublishedPost, PUBLISHED_POST_FILTER } from './protocol-events'
+import { synchronizePostFeed } from './post-feed'
+import { waitForPostFeedConfirmation } from './post-feed-confirmation'
 import {
   deployProtocol,
   inspectProtocol,
   LOCAL_CHAIN_ID,
-  PROTOCOL_ADDRESS,
   publishPost,
 } from './protocol'
 type JsonRpcResponse = {
@@ -127,30 +127,32 @@ describe('wallet transaction helpers on Anvil', () => {
       provider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 2n })
-    const filter = PUBLISHED_POST_FILTER
-    const indexed = await syncEventLogs(
+    const confirmation = waitForPostFeedConfirmation(
       provider,
-      filter,
-      createEventCursor({
-        chainId: LOCAL_CHAIN_ID,
-        filter,
-        finalityDepth: 0n,
-        rangeSize: 1,
-        startBlock: 1n,
-      }),
-      { maxRangeSize: 1, maxRanges: 4 },
+      LOCAL_CHAIN_ID,
+      {
+        ...postReceipt,
+        expectedPost: {
+          author: account,
+          body: 'Local chain, globally embarrassing.',
+        },
+      },
+      { pollIntervalMs: 1, timeoutMs: 2_000 },
     )
-    expect(indexed.caughtUp).toBe(true)
-    expect(indexed.logs).toHaveLength(1)
-    const firstLog = indexed.logs[0]
-    if (!firstLog) throw new Error('Expected the locally published post log.')
-    expect(firstLog).toMatchObject({
-      address: PROTOCOL_ADDRESS,
-      blockNumber: postReceipt.blockNumber,
-      topics: [filter.topics[0], expect.any(String), expect.any(String)],
+    await provider.request({ method: 'anvil_mine', params: ['0xc'] })
+    await confirmation
+    const feed = await synchronizePostFeed(provider, LOCAL_CHAIN_ID, {
+      storage: {
+        databaseName: 'lifeinvader-anvil-post-feed',
+        factory: new IDBFactory(),
+        keyRange: IDBKeyRange,
+      },
     })
-    expect(decodePublishedPost(firstLog)).toMatchObject({
+    expect(feed.caughtUp).toBe(true)
+    expect(feed.posts).toHaveLength(1)
+    expect(feed.posts[0]).toMatchObject({
       author: account,
+      blockNumber: postReceipt.blockNumber,
       body: 'Local chain, globally embarrassing.',
       mediaCid: '0x',
       postId: 1n,

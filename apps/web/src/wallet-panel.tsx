@@ -25,7 +25,8 @@ import {
   type TransactionSubmitted,
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
-import { useWalletSession } from './wallet-session'
+import type { WalletSessionController } from './wallet-session'
+import type { IncludedPost } from './post-feed-confirmation'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -41,7 +42,7 @@ function shortAddress(value: string) {
 function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
   return (
     <p className="transaction-result">
-      Confirmed in block {receipt.blockNumber.toString()} ·{' '}
+      Included in block {receipt.blockNumber.toString()} ·{' '}
       <code title={receipt.hash}>{shortAddress(receipt.hash)}</code>
     </p>
   )
@@ -91,9 +92,15 @@ function TransactionStatus({
     </div>
   )
 }
-export function WalletPanel() {
+export function WalletPanel({
+  onPostConfirmed,
+  walletSession,
+}: {
+  onPostConfirmed(post: IncludedPost): void
+  walletSession: WalletSessionController
+}) {
   const wallets = useWalletProviders()
-  const { connect, refresh, session } = useWalletSession()
+  const { connect, refresh, session } = walletSession
   const [inspection, setInspection] = useState<ProtocolInspection>()
   const [inspectionError, setInspectionError] = useState<string>()
   const [localChainState, setLocalChainState] = useState<
@@ -203,6 +210,19 @@ export function WalletPanel() {
       if (nextReceipt) {
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
+        if (action === 'post' && submittedContext) {
+          onPostConfirmed({
+            blockHash: nextReceipt.blockHash,
+            blockNumber: nextReceipt.blockNumber,
+            chainId: submittedContext.chainId,
+            expectedPost: {
+              author: submittedContext.account,
+              body: submittedContext.postBody,
+            },
+            hash: nextReceipt.hash,
+            provider: submittedContext.provider,
+          })
+        }
       }
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
@@ -291,8 +311,20 @@ export function WalletPanel() {
         ).finally(guard.release)
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
-        if (transaction.action === 'post') setBody('')
-        else await refreshInspection()
+        if (transaction.action === 'post') {
+          setBody('')
+          onPostConfirmed({
+            blockHash: nextReceipt.blockHash,
+            blockNumber: nextReceipt.blockNumber,
+            chainId: transaction.chainId,
+            expectedPost: {
+              author: transaction.account,
+              body: transaction.postBody,
+            },
+            hash: nextReceipt.hash,
+            provider: transaction.provider,
+          })
+        } else await refreshInspection()
       } catch (error) {
         setSubmittedTransaction({
           ...transaction,

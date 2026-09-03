@@ -1,9 +1,11 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
+  POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
 } from './protocol'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
@@ -18,6 +20,23 @@ const UNKNOWN_TRANSACTION_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 const RECEIPT_BLOCK_HASH = `0x${'dd'.repeat(32)}`
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
+const synchronizeEmptyFeed = vi.fn(async () => ({
+  cacheReset: false,
+  caughtUp: true,
+  head: 0n,
+  posts: [],
+  safeHead: 0n,
+  scannedRanges: 0,
+}))
+const waitForSafePost = vi.fn(async () => undefined)
+function renderApp() {
+  return render(
+    <App
+      synchronizePostFeed={synchronizeEmptyFeed}
+      waitForPostConfirmation={waitForSafePost}
+    />,
+  )
+}
 function announceWallet(name: string, uuid: string, provider: unknown) {
   const announce = () =>
     window.dispatchEvent(
@@ -34,11 +53,13 @@ function buttonDisabled(name: RegExp) {
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
+  synchronizeEmptyFeed.mockClear()
+  waitForSafePost.mockClear()
   vi.unstubAllGlobals()
 })
 describe('App', () => {
   it('states the deliberately public product boundary', () => {
-    render(<App />)
+    renderApp()
     expect(
       screen.getByRole('heading', { name: /privacy was a bug/i }),
     ).toBeTruthy()
@@ -46,7 +67,7 @@ describe('App', () => {
     expect(screen.getByText(/unofficial parody project/i)).toBeTruthy()
   })
   it('offers an honest wallet entry point without claiming a wallet exists', () => {
-    render(<App />)
+    renderApp()
     expect(
       screen.getByRole('link', {
         name: /invade with your wallet/i,
@@ -77,7 +98,7 @@ describe('App', () => {
       ),
     }
     const stop = announceWallet('Test Wallet', 'test-wallet', provider)
-    render(<App />)
+    renderApp()
     fireEvent.click(
       await screen.findByRole('button', { name: /connect test wallet/i }),
     )
@@ -123,7 +144,7 @@ describe('App', () => {
       }),
     }
     const stop = announceWallet('Other Local Wallet', 'other', provider)
-    render(<App />)
+    renderApp()
     fireEvent.click(
       await screen.findByRole('button', {
         name: /connect other local wallet/i,
@@ -134,6 +155,75 @@ describe('App', () => {
       screen.queryByRole('button', { name: /deploy protocol here/i }),
     ).toBeNull()
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
+    stop()
+  })
+  it('refreshes the feed only after a post receipt is confirmed', async () => {
+    const body = 'The feed should remember this.'
+    const provider = {
+      request: vi.fn(
+        async ({ method, params }: { method: string; params?: unknown }) => {
+          if (method === 'eth_requestAccounts') return [ACCOUNT]
+          if (method === 'eth_accounts') return [ACCOUNT]
+          if (method === 'eth_chainId') return '0x1'
+          if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+          if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+          if (method === 'eth_getTransactionReceipt') {
+            return {
+              blockHash: RECEIPT_BLOCK_HASH,
+              blockNumber: '0x2a',
+              logs: [
+                {
+                  address: PROTOCOL_ADDRESS,
+                  data: encodeAbiParameters(
+                    [{ type: 'string' }, { type: 'bytes' }],
+                    [body, '0x'],
+                  ),
+                  topics: [
+                    POST_PUBLISHED_TOPIC,
+                    padHex(toHex(1n), { size: 32 }),
+                    padHex(ACCOUNT, { size: 32 }),
+                  ],
+                },
+              ],
+              status: '0x1',
+              transactionHash: TRANSACTION_HASH,
+            }
+          }
+          if (method === 'eth_getBlockByNumber') {
+            return {
+              hash: RECEIPT_BLOCK_HASH,
+              number: (params as [string])[0],
+            }
+          }
+          throw new Error(`Unexpected method: ${method}`)
+        },
+      ),
+    }
+    const stop = announceWallet('Publishing Wallet', 'publishing', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect publishing wallet/i,
+      }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(1)
+    fireEvent.change(textarea, { target: { value: body } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+
+    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+    expect(waitForSafePost).toHaveBeenCalledWith(
+      provider,
+      1n,
+      expect.objectContaining({
+        blockHash: RECEIPT_BLOCK_HASH,
+        blockNumber: 42n,
+        expectedPost: { author: ACCOUNT, body },
+        hash: TRANSACTION_HASH,
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(2)
     stop()
   })
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
@@ -211,7 +301,7 @@ describe('App', () => {
       ),
     }
     const stop = announceWallet('Pending Wallet', 'pending', provider)
-    render(<App />)
+    renderApp()
     fireEvent.click(
       await screen.findByRole('button', {
         name: /connect pending wallet/i,
@@ -231,7 +321,7 @@ describe('App', () => {
         transactionHash: TRANSACTION_HASH,
       })
     })
-    expect(await screen.findByText(/confirmed in block 42/i)).toBeTruthy()
+    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
     const retryButton = await screen.findByRole('button', {
       name: /retry verification/i,
     })
