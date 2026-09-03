@@ -17,10 +17,12 @@ const ACCOUNT = '0x000000000000000000000000000000000000a11c' as Address
 const BODY = 'Public after every reorg.'
 const EMPTY_MEDIA_CID = '0x' as const
 
-function postLogs() {
+function postLogs(blockHash: Hash = BLOCK_HASH, blockNumber = '0x8') {
   return [
     {
       address: PROTOCOL_ADDRESS,
+      blockHash,
+      blockNumber,
       data: encodeAbiParameters(
         [{ type: 'string' }, { type: 'bytes' }],
         [BODY, '0x'],
@@ -30,6 +32,7 @@ function postLogs() {
         padHex(toHex(1n), { size: 32 }),
         padHex(ACCOUNT, { size: 32 }),
       ],
+      transactionHash: TRANSACTION_HASH,
     },
   ]
 }
@@ -37,13 +40,13 @@ function postLogs() {
 function receipt(
   blockHash: Hash = BLOCK_HASH,
   blockNumber = '0x8',
-  logs: unknown = postLogs(),
+  logs?: unknown,
   status = '0x1',
 ) {
   return {
     blockHash,
     blockNumber,
-    logs,
+    logs: logs ?? postLogs(blockHash, blockNumber),
     status,
     transactionHash: TRANSACTION_HASH,
   }

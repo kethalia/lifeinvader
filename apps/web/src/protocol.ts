@@ -5,6 +5,7 @@ import {
   getCreate2Address,
   keccak256,
   padHex,
+  toHex,
   type Address,
   type Hash,
   type Hex,
@@ -48,6 +49,28 @@ const PUBLISH_POST_ABI = [
     outputs: [{ name: 'postId', type: 'uint256' }],
   },
 ] as const
+const PUBLISH_REPOST_ABI = [
+  {
+    type: 'function',
+    name: 'publishRepost',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'postId', type: 'uint256' }],
+    outputs: [],
+  },
+] as const
+const SET_LIKE_ABI = [
+  {
+    type: 'function',
+    name: 'setLike',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'contentKind', type: 'uint8' },
+      { name: 'contentId', type: 'uint256' },
+      { name: 'liked', type: 'bool' },
+    ],
+    outputs: [],
+  },
+] as const
 export const POST_PUBLISHED_EVENT_ABI = [
   {
     anonymous: false,
@@ -63,7 +86,14 @@ export const POST_PUBLISHED_EVENT_ABI = [
 ] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
+export const REPOST_PUBLISHED_TOPIC =
+  '0x48b2667530535dfe389ce140bb7872ab9a922083158958ed14099b3565381b99'
+export const LIKE_SET_TOPIC =
+  '0xa6fa55005fe0b190111a9abc7df43c5e4b986d6332d5971d6fe809390bb97aa0'
 const POST_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
+const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
+const MAX_UINT256 = (1n << 256n) - 1n
+const POST_CONTENT_KIND = 0
 export type ProtocolInspection =
   | { kind: 'ready' }
   | { kind: 'deployable' }
@@ -177,6 +207,23 @@ async function getCode(
   const timeout = () => new Error('Contract code inspection timed out.')
   return parseCode(await beforeDeadline(request, deadline, timeout))
 }
+
+export class TransactionSubmissionUnknownError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'The wallet did not return a transaction hash. It may still have broadcast the action; check wallet activity before trying again.',
+      { cause },
+    )
+    this.name = 'TransactionSubmissionUnknownError'
+  }
+}
+
+export function isTransactionSubmissionUnknownError(
+  error: unknown,
+): error is TransactionSubmissionUnknownError {
+  return error instanceof TransactionSubmissionUnknownError
+}
+
 export function assertProtocolConfiguration() {
   if (keccak256(LIFEINVADER_INIT_CODE) !== INIT_CODE_HASH) {
     throw new Error('The bundled Lifeinvader creation code does not match v1.')
@@ -412,8 +459,9 @@ async function sendTransaction(
     await verifyLocalChain(provider, localProvider)
     await guard.assertSubmission()
   }
-  const hash = parseTransactionHash(
-    await provider.request({
+  let hashValue: unknown
+  try {
+    hashValue = await provider.request({
       method: 'eth_sendTransaction',
       params: [
         {
@@ -421,8 +469,17 @@ async function sendTransaction(
           chainId: `0x${guard.chainId.toString(16)}`,
         },
       ],
-    }),
-  )
+    })
+  } catch (error) {
+    if (getRpcErrorCode(error) === 4001) throw error
+    throw new TransactionSubmissionUnknownError(error)
+  }
+  let hash: Hash
+  try {
+    hash = parseTransactionHash(hashValue)
+  } catch (error) {
+    throw new TransactionSubmissionUnknownError(error)
+  }
   onSubmitted?.(hash)
   await guard.assertSubmission()
   return hash
@@ -470,40 +527,108 @@ function parseReceipt(
 }
 export type PostPayload = { body: string; mediaCid: Hex }
 export type ExpectedPost = PostPayload & { author: Address }
+export type ExpectedPostAction =
+  | { account: Address; kind: 'like'; liked: boolean; postId: bigint }
+  | { account: Address; kind: 'repost'; postId: bigint }
 
-export function assertExpectedPost(logs: unknown, expected: ExpectedPost) {
-  if (!Array.isArray(logs) || logs.length > 1_000)
+function expectedTopic(value: Address | bigint) {
+  return padHex(typeof value === 'bigint' ? toHex(value) : value, {
+    size: 32,
+  }).toLowerCase() as Hex
+}
+
+function hasExpectedProtocolLog(
+  logs: unknown,
+  receipt: TransactionReceipt,
+  expectedTopics: readonly (Hex | undefined)[],
+  expectedData: Hex,
+) {
+  if (!Array.isArray(logs) || logs.length > 1_000) {
     throw new Error('The wallet returned invalid receipt logs.')
+  }
+  const normalizedData = expectedData.toLowerCase()
+  return logs.some((log) => {
+    if (typeof log !== 'object' || log === null) return false
+    const { address, data, topics } = log as Record<string, unknown>
+    const blockHash = 'blockHash' in log ? log.blockHash : undefined
+    const blockNumber = 'blockNumber' in log ? log.blockNumber : undefined
+    const transactionHash =
+      'transactionHash' in log ? log.transactionHash : undefined
+    return (
+      typeof address === 'string' &&
+      /^0x[0-9a-f]{40}$/i.test(address) &&
+      address.toLowerCase() === PROTOCOL_ADDRESS.toLowerCase() &&
+      typeof blockHash === 'string' &&
+      blockHash.toLowerCase() === receipt.blockHash.toLowerCase() &&
+      typeof blockNumber === 'string' &&
+      blockNumber.length <= 66 &&
+      /^0x[0-9a-f]+$/i.test(blockNumber) &&
+      BigInt(blockNumber) === receipt.blockNumber &&
+      typeof transactionHash === 'string' &&
+      transactionHash.toLowerCase() === receipt.hash.toLowerCase() &&
+      Array.isArray(topics) &&
+      topics.length === expectedTopics.length &&
+      topics.every(
+        (topic, index) =>
+          typeof topic === 'string' &&
+          topic.length === 66 &&
+          /^0x[0-9a-f]{64}$/i.test(topic) &&
+          (expectedTopics[index] === undefined ||
+            topic.toLowerCase() === expectedTopics[index]?.toLowerCase()),
+      ) &&
+      typeof data === 'string' &&
+      data.length === normalizedData.length &&
+      data.toLowerCase() === normalizedData
+    )
+  })
+}
+
+export function assertExpectedPost(
+  logs: unknown,
+  expected: ExpectedPost,
+  receipt: TransactionReceipt,
+) {
   const expectedData = encodeAbiParameters(POST_DATA_PARAMETERS, [
     expected.body,
     expected.mediaCid,
-  ]).toLowerCase()
-  const expectedAuthor = padHex(expected.author, { size: 32 }).toLowerCase()
+  ])
   if (
-    !logs.some((log) => {
-      if (typeof log !== 'object' || log === null) return false
-      const { address, data, topics } = log as Record<string, unknown>
-      return (
-        typeof address === 'string' &&
-        /^0x[0-9a-f]{40}$/i.test(address) &&
-        address.toLowerCase() === PROTOCOL_ADDRESS.toLowerCase() &&
-        Array.isArray(topics) &&
-        topics.length === 3 &&
-        topics.every(
-          (topic) =>
-            typeof topic === 'string' &&
-            topic.length === 66 &&
-            /^0x[0-9a-f]{64}$/i.test(topic),
-        ) &&
-        topics[0].toLowerCase() === POST_PUBLISHED_TOPIC.toLowerCase() &&
-        topics[2].toLowerCase() === expectedAuthor &&
-        typeof data === 'string' &&
-        data.length === expectedData.length &&
-        data.toLowerCase() === expectedData
-      )
-    })
+    !hasExpectedProtocolLog(
+      logs,
+      receipt,
+      [POST_PUBLISHED_TOPIC, undefined, expectedTopic(expected.author)],
+      expectedData,
+    )
   ) {
     throw new Error('The receipt did not contain the expected post event.')
+  }
+}
+
+export function assertExpectedPostAction(
+  logs: unknown,
+  expected: ExpectedPostAction,
+  receipt: TransactionReceipt,
+) {
+  const account = expectedTopic(expected.account)
+  const postId = expectedTopic(expected.postId)
+  const found =
+    expected.kind === 'repost'
+      ? hasExpectedProtocolLog(
+          logs,
+          receipt,
+          [REPOST_PUBLISHED_TOPIC, postId, account],
+          '0x',
+        )
+      : hasExpectedProtocolLog(
+          logs,
+          receipt,
+          [LIKE_SET_TOPIC, expectedTopic(0n), postId, account],
+          encodeAbiParameters(LIKE_DATA_PARAMETERS, [expected.liked]),
+        )
+  if (!found) {
+    throw new Error(
+      `The receipt did not contain the expected ${expected.kind} event.`,
+    )
   }
 }
 class TransactionRevertedError extends Error {
@@ -532,6 +657,7 @@ export async function waitForTransactionReceipt(
     assertCurrentChain?: () => Promise<void>
     assertUnchanged?: () => void
     expectedPost?: ExpectedPost
+    expectedPostAction?: ExpectedPostAction
     expectProtocol?: boolean
     localProvider?: Eip1193Provider
     pollIntervalMs?: number
@@ -597,7 +723,10 @@ export async function waitForTransactionReceipt(
             throw new Error('The receipt did not deploy Lifeinvader v1.')
           }
           if (!reverted && options.expectedPost) {
-            assertExpectedPost(logs, options.expectedPost)
+            assertExpectedPost(logs, options.expectedPost, receipt)
+          }
+          if (!reverted && options.expectedPostAction) {
+            assertExpectedPostAction(logs, options.expectedPostAction, receipt)
           }
           if (reverted) throw new TransactionRevertedError(hash)
           return receipt
@@ -702,4 +831,95 @@ export async function publishPost(
   } finally {
     guard.release()
   }
+}
+
+function assertPostId(postId: bigint) {
+  if (postId < 1n || postId > MAX_UINT256) {
+    throw new Error('The selected post identifier is invalid.')
+  }
+}
+
+async function submitPostAction(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  data: Hex,
+  expectedPostAction: ExpectedPostAction,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertPostId(expectedPostAction.postId)
+  const guard = await createTransactionGuard(provider, account, chainId)
+  try {
+    if ((await inspectProtocol(provider)).kind !== 'ready') {
+      throw new Error(
+        'Verified Lifeinvader v1 code is required before reacting.',
+      )
+    }
+    const hash = await sendTransaction(
+      provider,
+      { data, from: account, to: PROTOCOL_ADDRESS },
+      guard,
+      onSubmitted,
+      localProvider,
+    )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
+      expectedPostAction,
+      localProvider,
+      selectedChainId: chainId,
+    })
+  } finally {
+    guard.release()
+  }
+}
+
+export async function publishRepost(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  postId: bigint,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertPostId(postId)
+  return await submitPostAction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: PUBLISH_REPOST_ABI,
+      functionName: 'publishRepost',
+      args: [postId],
+    }),
+    { account, kind: 'repost', postId },
+    onSubmitted,
+    localProvider,
+  )
+}
+
+export async function setPostLike(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  postId: bigint,
+  liked: boolean,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertPostId(postId)
+  return await submitPostAction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: SET_LIKE_ABI,
+      functionName: 'setLike',
+      args: [POST_CONTENT_KIND, postId, liked],
+    }),
+    { account, kind: 'like', liked, postId },
+    onSubmitted,
+    localProvider,
+  )
 }

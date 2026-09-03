@@ -337,6 +337,11 @@ export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
                 assertExpectedPost(
                   currentInclusion.logs,
                   inclusion.expectedPost,
+                  {
+                    blockHash: currentInclusion.blockHash,
+                    blockNumber: currentInclusion.blockNumber,
+                    hash: transactionHash,
+                  },
                 )
                 return
               }

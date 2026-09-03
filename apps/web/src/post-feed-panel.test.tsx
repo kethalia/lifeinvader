@@ -13,6 +13,14 @@ import { parseMediaCid } from './media-cid'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSnapshot } from './post-feed'
 import type { PostFeedConfirmationWaiter } from './post-feed-confirmation'
+import {
+  publishRepost,
+  setPostLike,
+  TransactionSubmissionUnknownError,
+  waitForTransactionReceipt,
+  type TransactionReceipt,
+  type TransactionSubmitted,
+} from './protocol'
 import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
@@ -139,6 +147,245 @@ describe('PostFeedPanel', () => {
     expect(screen.getByText(/availability is not guaranteed/i)).toBeTruthy()
     expect(screen.getByText(/invalid media CID bytes/i)).toBeTruthy()
     expect(screen.getByText('0x0102')).toBeTruthy()
+  })
+
+  it('submits explicit like, unlike, and repost events for a confirmed post', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    }
+    const setPostLikeAction = vi.fn<typeof setPostLike>(
+      async (_provider, _account, _chainId, _postId, _liked, onSubmitted) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        return receipt
+      },
+    )
+    const publishRepostAction = vi.fn<typeof publishRepost>(
+      async (_provider, _account, _chainId, _postId, onSubmitted) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        return receipt
+      },
+    )
+
+    render(
+      <PostFeedPanel
+        publishRepostAction={publishRepostAction}
+        session={connectedSession(provider)}
+        setPostLikeAction={setPostLikeAction}
+        synchronize={vi.fn().mockResolvedValue(snapshot([post('React.')]))}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /record like for post 1/i,
+      }),
+    )
+    expect(
+      await screen.findByText(/like for post #1 was included/i),
+    ).toBeTruthy()
+    expect(setPostLikeAction).toHaveBeenLastCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      1n,
+      true,
+      expect.any(Function),
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /record unlike for post 1/i }),
+    )
+    expect(
+      await screen.findByText(/unlike for post #1 was included/i),
+    ).toBeTruthy()
+    expect(setPostLikeAction).toHaveBeenLastCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      1n,
+      false,
+      expect.any(Function),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /repost post 1/i }))
+    expect(
+      await screen.findByText(/repost for post #1 was included/i),
+    ).toBeTruthy()
+    expect(publishRepostAction).toHaveBeenCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      1n,
+      expect.any(Function),
+    )
+  })
+
+  it('locks duplicate actions around an unknown hash and safely retries its receipt', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_accounts') return [ACCOUNT]
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const publishRepostAction = vi.fn<typeof publishRepost>(
+      async (_provider, _account, _chainId, _postId, onSubmitted) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        throw new Error('Receipt transport timed out.')
+      },
+    )
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    }
+    const waitForActionReceipt = vi.fn<typeof waitForTransactionReceipt>(
+      async () => receipt,
+    )
+
+    render(
+      <PostFeedPanel
+        publishRepostAction={publishRepostAction}
+        session={connectedSession(provider)}
+        synchronize={vi.fn().mockResolvedValue(snapshot([post('Again.')]))}
+        waitForActionReceipt={waitForActionReceipt}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /repost post 1/i }),
+    )
+    expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
+    expect(
+      screen
+        .getByRole('button', { name: /record like for post 1/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /check action receipt again/i }),
+    )
+    expect(
+      await screen.findByText(/repost for post #1 was included/i),
+    ).toBeTruthy()
+    expect(waitForActionReceipt).toHaveBeenCalledWith(
+      provider,
+      TRANSACTION_HASH,
+      expect.objectContaining({
+        assertCurrentChain: expect.any(Function),
+        assertUnchanged: expect.any(Function),
+        expectedPostAction: {
+          account: ACCOUNT,
+          kind: 'repost',
+          postId: 1n,
+        },
+        selectedChainId: 1n,
+      }),
+    )
+  })
+
+  it('requires wallet acknowledgment when a broadcast returns no hash', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const publishRepostAction = vi.fn<typeof publishRepost>(async () => {
+      throw new TransactionSubmissionUnknownError(
+        new Error('Provider response timed out.'),
+      )
+    })
+
+    render(
+      <PostFeedPanel
+        publishRepostAction={publishRepostAction}
+        session={connectedSession(provider)}
+        synchronize={vi
+          .fn()
+          .mockResolvedValue(snapshot([post('Maybe twice.')]))}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /repost post 1/i }),
+    )
+    const acknowledge = await screen.findByRole('button', {
+      name: /i checked my wallet/i,
+    })
+    expect(screen.getByText(/may have broadcast it/i)).toBeTruthy()
+    expect(
+      screen
+        .getByRole('button', { name: /record like for post 1/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
+
+    fireEvent.click(acknowledge)
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole('button', { name: /record like for post 1/i })
+          .hasAttribute('disabled'),
+      ).toBe(false),
+    )
+  })
+
+  it('retains delayed old-chain recovery without locking the new chain', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const delayedAction = deferred<TransactionReceipt>()
+    let reportSubmitted: TransactionSubmitted | undefined
+    const setPostLikeAction = vi.fn<typeof setPostLike>(
+      async (_provider, _account, _chainId, _postId, _liked, onSubmitted) => {
+        reportSubmitted = onSubmitted
+        return delayedAction.promise
+      },
+    )
+    const synchronize = vi.fn().mockResolvedValue(snapshot([post('Move.')]))
+    const { rerender } = render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        setPostLikeAction={setPostLikeAction}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /record like for post 1/i,
+      }),
+    )
+    await waitFor(() => expect(reportSubmitted).toBeDefined())
+    rerender(
+      <PostFeedPanel
+        session={connectedSession(provider, 2n)}
+        setPostLikeAction={setPostLikeAction}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
+    act(() => reportSubmitted?.(TRANSACTION_HASH))
+
+    expect(
+      await screen.findByText(/belongs to another wallet context/i),
+    ).toBeTruthy()
+    expect(screen.getByText(/post #1 on chain 1 from/i)).toBeTruthy()
+    expect(screen.getByText(/via Test Wallet/i)).toBeTruthy()
+    expect(
+      screen
+        .getByRole('button', { name: /record like for post 1/i })
+        .hasAttribute('disabled'),
+    ).toBe(false)
+
+    await act(async () =>
+      delayedAction.resolve({
+        blockHash: BLOCK_HASH,
+        blockNumber: 42n,
+        hash: TRANSACTION_HASH,
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/belongs to another wallet context/i),
+      ).toBeNull(),
+    )
   })
 
   it('refreshes automatically only after an included post reaches feed depth', async () => {

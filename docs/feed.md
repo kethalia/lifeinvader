@@ -28,4 +28,6 @@ Changing provider or chain aborts active synchronization and confirmation monito
 
 Posts are ordered newest first by canonical `(blockNumber, logIndex)` cache order. The interface shows author, post identifier, block number, transaction hash, text, and supported media commitments as canonical CIDv1 text. Invalid or unsupported on-chain CID bytes are visibly isolated instead of poisoning the feed. The client does not currently fetch media from a gateway, paginate beyond the newest 50 cached posts, or derive comments and reactions. Those are separate reviewable slices.
 
+Confirmed post cards can submit like, unlike, and repost events. These controls verify their exact receipt events but do not display optimistic counts or current-like state. The independent bounded read model required for those derived values is specified in [`reactions.md`](./reactions.md).
+
 The UI never labels cached data as authoritative. Cache corruption causes the disposable scope to rebuild; EVM logs remain the source of truth.

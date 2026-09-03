@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { encodeAbiParameters, padHex, toHex } from 'viem'
 import {
   parseAccounts,
   parseChainId,
@@ -6,6 +7,7 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import {
+  assertExpectedPostAction,
   assertProtocolConfiguration,
   deployProtocol,
   FACTORY_ADDRESS,
@@ -13,15 +15,22 @@ import {
   getPostBodyByteLength,
   inspectProtocol,
   isTransactionRevertedError,
+  isTransactionSubmissionUnknownError,
+  LIFEINVADER_INIT_CODE,
+  LIKE_SET_TOPIC,
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
+  publishRepost,
   publishPost,
+  REPOST_PUBLISHED_TOPIC,
+  setPostLike,
   switchToLocalChain,
   verifyLocalChain,
   waitForTransactionReceipt,
 } from './protocol'
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
+const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
 const TRANSACTION_HASH =
   '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 const BLOCK_HASH =
@@ -172,6 +181,149 @@ describe('post transactions', () => {
       }),
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
+  })
+  it('rejects invalid reaction targets before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+    await expect(publishRepost(provider, ACCOUNT, 1n, 0n)).rejects.toThrow(
+      /post identifier is invalid/i,
+    )
+    await expect(
+      setPostLike(provider, ACCOUNT, 1n, 1n << 256n, true),
+    ).rejects.toThrow(/post identifier is invalid/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('requires exact like and repost events in action receipts', () => {
+    const postId = 7n
+    const actionReceipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const accountTopic = padHex(ACCOUNT, { size: 32 })
+    const postTopic = padHex(toHex(postId), { size: 32 })
+    const likeLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: encodeAbiParameters([{ type: 'bool' }], [true]),
+      topics: [
+        LIKE_SET_TOPIC,
+        padHex(toHex(0n), { size: 32 }),
+        postTopic,
+        accountTopic,
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
+    const repostLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: '0x',
+      topics: [REPOST_PUBLISHED_TOPIC, postTopic, accountTopic],
+      transactionHash: TRANSACTION_HASH,
+    }
+
+    expect(() =>
+      assertExpectedPostAction(
+        [likeLog],
+        {
+          account: ACCOUNT,
+          kind: 'like',
+          liked: true,
+          postId,
+        },
+        actionReceipt,
+      ),
+    ).not.toThrow()
+    expect(() =>
+      assertExpectedPostAction(
+        [repostLog],
+        {
+          account: ACCOUNT,
+          kind: 'repost',
+          postId,
+        },
+        actionReceipt,
+      ),
+    ).not.toThrow()
+    expect(() =>
+      assertExpectedPostAction(
+        [likeLog],
+        {
+          account: ACCOUNT,
+          kind: 'like',
+          liked: false,
+          postId,
+        },
+        actionReceipt,
+      ),
+    ).toThrow(/expected like event/i)
+    expect(() =>
+      assertExpectedPostAction(
+        [{ ...repostLog, transactionHash: OTHER_BLOCK_HASH }],
+        { account: ACCOUNT, kind: 'repost', postId },
+        actionReceipt,
+      ),
+    ).toThrow(/expected repost event/i)
+  })
+  it('rejects matching event payloads copied from another receipt', () => {
+    const actionReceipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const expected = {
+      account: ACCOUNT,
+      kind: 'repost' as const,
+      postId: 7n,
+    } as const
+    const baseLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: '0x',
+      topics: [
+        REPOST_PUBLISHED_TOPIC,
+        padHex(toHex(7n), { size: 32 }),
+        padHex(ACCOUNT, { size: 32 }),
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
+
+    for (const log of [
+      { ...baseLog, blockHash: OTHER_BLOCK_HASH },
+      { ...baseLog, blockNumber: '0x29' },
+      { ...baseLog, transactionHash: OTHER_BLOCK_HASH },
+    ]) {
+      expect(() =>
+        assertExpectedPostAction([log], expected, actionReceipt),
+      ).toThrow(/expected repost event/i)
+    }
+  })
+  it('locks ambiguous wallet submission failures but preserves rejection', async () => {
+    const providerThatFailsSend = (failure: Error) =>
+      providerFrom(async ({ method }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') throw failure
+        throw new Error(`Unexpected method: ${method}`)
+      })
+    const transportFailure = new Error('Provider response timed out.')
+    const ambiguous = await publishRepost(
+      providerThatFailsSend(transportFailure),
+      ACCOUNT,
+      1n,
+      1n,
+    ).catch((error: unknown) => error)
+    expect(isTransactionSubmissionUnknownError(ambiguous)).toBe(true)
+    expect((ambiguous as Error).message).toMatch(/may still have broadcast/i)
+
+    const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })
+    await expect(
+      publishRepost(providerThatFailsSend(rejection), ACCOUNT, 1n, 1n),
+    ).rejects.toBe(rejection)
   })
   it('surfaces an on-chain revert from the receipt', async () => {
     const error = await waitForTransactionReceipt(

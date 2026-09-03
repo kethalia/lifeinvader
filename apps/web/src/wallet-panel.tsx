@@ -13,6 +13,7 @@ import {
   getPostBodyByteLength,
   inspectProtocol,
   isTransactionRevertedError,
+  isTransactionSubmissionUnknownError,
   LOCAL_CHAIN_ID,
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
@@ -25,7 +26,7 @@ import {
   type TransactionSubmitted,
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
-import type { WalletSessionController } from './wallet-session'
+import type { WalletSession, WalletSessionController } from './wallet-session'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
@@ -48,21 +49,73 @@ function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
     </p>
   )
 }
-type SubmittedTransaction = {
+type WalletContext = {
   account: Address
-  action: 'deploy' | 'post'
   chainId: bigint
-  hash: TransactionReceipt['hash']
+  provider: Eip1193Provider
+  walletName: string
+}
+type TransactionContext = WalletContext & {
+  action: 'deploy' | 'post'
+  composeRevision: number
   postBody: string
   postMediaCid: Hex
-  provider: Eip1193Provider
-  status: 'pending' | 'unknown' | 'failed'
+}
+type BusyOperation = {
+  action: 'chain' | 'deploy' | 'post' | 'receipt'
+  context?: WalletContext
+  id: number
+  scope: 'context' | 'provider'
+}
+type SubmittedTransaction = TransactionContext & {
+  hash?: TransactionReceipt['hash']
+  id: number
+  status: 'ambiguous' | 'failed' | 'pending' | 'unknown'
+}
+type TransactionProblem = {
+  context?: WalletContext
+  id: number
+  message: string
+}
+type TransactionResultState = TransactionContext & {
+  id: number
+  receipt: TransactionReceipt
+}
+function transactionContextMatchesSession(
+  transaction: WalletContext,
+  session: WalletSession,
+) {
+  return (
+    session.status === 'connected' &&
+    transaction.provider === session.provider &&
+    transaction.chainId === session.chainId &&
+    transaction.account.toLowerCase() === session.account?.toLowerCase()
+  )
+}
+function busyOperationMatchesSession(
+  operation: BusyOperation,
+  session: WalletSession,
+) {
+  if (!operation.context) return true
+  if (operation.scope === 'provider') {
+    return operation.context.provider === session.provider
+  }
+  return transactionContextMatchesSession(operation.context, session)
+}
+function sameWalletContext(first: WalletContext, second: WalletContext) {
+  return (
+    first.provider === second.provider &&
+    first.chainId === second.chainId &&
+    first.account.toLowerCase() === second.account.toLowerCase()
+  )
 }
 function TransactionStatus({
+  currentContext,
   onDismiss,
   onRetry,
   transaction,
 }: {
+  currentContext: boolean
   onDismiss(): void
   onRetry(): void
   transaction: SubmittedTransaction
@@ -73,21 +126,50 @@ function TransactionStatus({
       ? 'Waiting for an on-chain receipt…'
       : transaction.status === 'failed'
         ? 'Reverted on-chain. This hash is final; you can safely try again.'
-        : 'Its final status is unknown. Check this hash before trying again.'
+        : transaction.status === 'ambiguous'
+          ? 'The wallet returned no hash, but may have broadcast it. Check wallet activity before trying again.'
+          : 'Its final status is unknown. Check this hash before trying again.'
   return (
     <div className="transaction-pending action-feedback" role="status">
       <span>
-        {label} submitted ·{' '}
-        <code title={transaction.hash}>{shortAddress(transaction.hash)}</code>.{' '}
-        {statusCopy}
+        {transaction.hash ? (
+          <>
+            {label} submitted on chain {transaction.chainId.toString()} from{' '}
+            <code title={transaction.account}>
+              {shortAddress(transaction.account)}
+            </code>{' '}
+            via {transaction.walletName} ·{' '}
+            <code title={transaction.hash}>
+              {shortAddress(transaction.hash)}
+            </code>
+            .{' '}
+          </>
+        ) : (
+          <>
+            {label} submission is ambiguous on chain{' '}
+            {transaction.chainId.toString()} from{' '}
+            <code title={transaction.account}>
+              {shortAddress(transaction.account)}
+            </code>{' '}
+            via {transaction.walletName}.{' '}
+          </>
+        )}
+        {statusCopy}{' '}
+        {!currentContext
+          ? 'This belongs to another wallet context and does not lock the current console.'
+          : null}
       </span>
-      {transaction.status === 'unknown' ? (
+      {transaction.status === 'unknown' ||
+      transaction.status === 'ambiguous' ||
+      transaction.status === 'failed' ? (
         <div className="transaction-recovery-actions">
-          <button type="button" onClick={onRetry}>
-            Check receipt again
-          </button>
+          {transaction.status === 'unknown' && currentContext ? (
+            <button type="button" onClick={onRetry}>
+              Check receipt again
+            </button>
+          ) : null}
           <button type="button" onClick={onDismiss}>
-            I checked this hash
+            {transaction.hash ? 'I checked this hash' : 'I checked my wallet'}
           </button>
         </div>
       ) : null}
@@ -96,9 +178,11 @@ function TransactionStatus({
 }
 export function WalletPanel({
   onPostConfirmed,
+  publishPostAction = publishPost,
   walletSession,
 }: {
   onPostConfirmed(post: IncludedPost): void
+  publishPostAction?: typeof publishPost
   walletSession: WalletSessionController
 }) {
   const wallets = useWalletProviders()
@@ -108,13 +192,12 @@ export function WalletPanel({
   const [localChainState, setLocalChainState] = useState<
     'not-selected' | 'checking' | 'verified' | 'mismatch'
   >('not-selected')
-  const [busyAction, setBusyAction] = useState<
-    'chain' | 'deploy' | 'post' | 'receipt'
-  >()
-  const [actionError, setActionError] = useState<string>()
-  const [receipt, setReceipt] = useState<TransactionReceipt>()
-  const [submittedTransaction, setSubmittedTransaction] =
-    useState<SubmittedTransaction>()
+  const [busyOperations, setBusyOperations] = useState<BusyOperation[]>([])
+  const [actionProblems, setActionProblems] = useState<TransactionProblem[]>([])
+  const [results, setResults] = useState<TransactionResultState[]>([])
+  const [submittedTransactions, setSubmittedTransactions] = useState<
+    SubmittedTransaction[]
+  >([])
   const [body, setBody] = useState('')
   const [mediaCidInput, setMediaCidInput] = useState('')
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
@@ -125,7 +208,12 @@ export function WalletPanel({
     mediaCidError =
       error instanceof Error ? error.message : 'The media CID is invalid.'
   }
+  const composeRevision = useRef(0)
   const inspectionSequence = useRef(0)
+  const operationSequence = useRef(0)
+  const sessionRef = useRef(session)
+  const transactionSequence = useRef(0)
+  sessionRef.current = session
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
     const provider = session.provider
@@ -180,10 +268,6 @@ export function WalletPanel({
   useEffect(() => {
     void refreshInspection()
   }, [refreshInspection, session.chainId])
-  useEffect(() => {
-    setActionError(undefined)
-    setReceipt(undefined)
-  }, [session.account, session.chainId])
   const runAction = async (
     action: 'chain' | 'deploy' | 'post',
     operation: (
@@ -191,39 +275,94 @@ export function WalletPanel({
     ) => Promise<TransactionReceipt | void>,
   ) => {
     let submittedHash: TransactionReceipt['hash'] | undefined
-    const submittedContext =
-      action !== 'chain' &&
-      session.account &&
-      session.chainId !== undefined &&
-      session.provider
+    const walletContext =
+      session.account && session.chainId !== undefined && session.provider
         ? {
             account: session.account,
-            action,
             chainId: session.chainId,
+            provider: session.provider,
+            walletName: session.name ?? 'Injected wallet',
+          }
+        : undefined
+    const submittedContext =
+      action !== 'chain' && walletContext
+        ? {
+            ...walletContext,
+            action,
+            composeRevision: composeRevision.current,
+            id: ++transactionSequence.current,
             postBody: action === 'post' ? body : '',
             postMediaCid:
               action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
-            provider: session.provider,
           }
         : undefined
-    setBusyAction(action)
-    setActionError(undefined)
-    setReceipt(undefined)
-    if (action !== 'chain') setSubmittedTransaction(undefined)
+    const operationId = ++operationSequence.current
+    setBusyOperations((current) => [
+      ...current,
+      {
+        action,
+        context: walletContext,
+        id: operationId,
+        scope: action === 'chain' ? 'provider' : 'context',
+      },
+    ])
+    setActionProblems((current) =>
+      walletContext
+        ? current.filter(
+            (problem) =>
+              problem.context !== undefined &&
+              !sameWalletContext(problem.context, walletContext),
+          )
+        : [],
+    )
+    if (walletContext) {
+      setResults((current) =>
+        current.filter((result) => !sameWalletContext(result, walletContext)),
+      )
+    }
+    if (submittedContext) {
+      setSubmittedTransactions((current) =>
+        current.filter(
+          (transaction) =>
+            transaction.status !== 'failed' ||
+            !sameWalletContext(transaction, submittedContext),
+        ),
+      )
+    }
     try {
       const nextReceipt = await operation((hash) => {
         if (!submittedContext) return
         submittedHash = hash
-        setSubmittedTransaction({
-          ...submittedContext,
-          hash,
-          status: 'pending',
-        })
+        setSubmittedTransactions((current) => [
+          ...current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+          { ...submittedContext, hash, status: 'pending' },
+        ])
       })
-      if (nextReceipt) {
-        setReceipt(nextReceipt)
-        setSubmittedTransaction(undefined)
-        if (action === 'post' && submittedContext) {
+      if (nextReceipt && submittedContext) {
+        setResults((current) =>
+          [
+            ...current.filter(
+              (result) => !sameWalletContext(result, submittedContext),
+            ),
+            { ...submittedContext, id: operationId, receipt: nextReceipt },
+          ].slice(-12),
+        )
+        setSubmittedTransactions((current) =>
+          current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+        )
+        if (
+          action === 'post' &&
+          transactionContextMatchesSession(submittedContext, sessionRef.current)
+        ) {
+          if (composeRevision.current === submittedContext.composeRevision) {
+            composeRevision.current += 1
+            setBody('')
+            setMediaCidInput('')
+          }
           onPostConfirmed({
             blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
@@ -241,16 +380,48 @@ export function WalletPanel({
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
       if (submittedHash && submittedContext) {
-        setSubmittedTransaction({
-          ...submittedContext,
-          hash: submittedHash,
-          status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
-        })
+        setSubmittedTransactions((current) => [
+          ...current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+          {
+            ...submittedContext,
+            hash: submittedHash,
+            status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
+          },
+        ])
+      } else if (
+        submittedContext &&
+        isTransactionSubmissionUnknownError(error)
+      ) {
+        setSubmittedTransactions((current) => [
+          ...current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+          { ...submittedContext, status: 'ambiguous' },
+        ])
+      } else if (submittedContext) {
+        setSubmittedTransactions((current) =>
+          current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+        )
       }
       if (action !== 'chain') await refreshInspection()
-      setActionError(describeRpcError(error, 'The wallet action failed.'))
+      setActionProblems((current) =>
+        [
+          ...current.filter((problem) => problem.id !== operationId),
+          {
+            context: walletContext,
+            id: operationId,
+            message: describeRpcError(error, 'The wallet action failed.'),
+          },
+        ].slice(-12),
+      )
     } finally {
-      setBusyAction(undefined)
+      setBusyOperations((current) =>
+        current.filter((operation) => operation.id !== operationId),
+      )
     }
   }
   const handleLocalChain = () => {
@@ -284,27 +455,53 @@ export function WalletPanel({
     )
       return
     void runAction('post', async (onSubmitted) => {
-      const nextReceipt = await publishPost(
+      return await publishPostAction(
         provider,
         account,
         chainId,
         { body, mediaCid: parsedMediaCid?.bytes ?? '0x' },
         onSubmitted,
       )
-      setBody('')
-      setMediaCidInput('')
-      return nextReceipt
     })
   }
-  const handleRetryReceipt = () => {
-    const transaction = submittedTransaction
-    if (transaction?.status !== 'unknown') return
+  const handleRetryReceipt = (transaction: SubmittedTransaction) => {
+    const hash = transaction.hash
+    if (
+      transaction.status !== 'unknown' ||
+      !hash ||
+      !transactionContextMatchesSession(transaction, session)
+    ) {
+      return
+    }
     const provider = transaction.provider
+    const operationId = ++operationSequence.current
     void (async () => {
-      setBusyAction('receipt')
-      setActionError(undefined)
-      setReceipt(undefined)
-      setSubmittedTransaction({ ...transaction, status: 'pending' })
+      setBusyOperations((current) => [
+        ...current,
+        {
+          action: 'receipt',
+          context: transaction,
+          id: operationId,
+          scope: 'context',
+        },
+      ])
+      setActionProblems((current) =>
+        current.filter(
+          (problem) =>
+            problem.context !== undefined &&
+            !sameWalletContext(problem.context, transaction),
+        ),
+      )
+      setResults((current) =>
+        current.filter((result) => !sameWalletContext(result, transaction)),
+      )
+      setSubmittedTransactions((current) =>
+        current.map((candidate) =>
+          candidate.id === transaction.id
+            ? { ...candidate, status: 'pending' }
+            : candidate,
+        ),
+      )
       try {
         if (session.provider !== provider) {
           throw new Error(
@@ -316,52 +513,84 @@ export function WalletPanel({
           transaction.account,
           transaction.chainId,
         )
-        const nextReceipt = await waitForTransactionReceipt(
-          provider,
-          transaction.hash,
-          {
-            assertCurrentChain: guard.assertSubmission,
-            assertUnchanged: guard.assertUnchanged,
-            expectedPost:
-              transaction.action === 'post'
-                ? {
-                    author: transaction.account,
-                    body: transaction.postBody,
-                    mediaCid: transaction.postMediaCid,
-                  }
-                : undefined,
-            expectProtocol: transaction.action === 'deploy',
-            selectedChainId: transaction.chainId,
-          },
-        ).finally(guard.release)
-        setReceipt(nextReceipt)
-        setSubmittedTransaction(undefined)
+        const nextReceipt = await waitForTransactionReceipt(provider, hash, {
+          assertCurrentChain: guard.assertSubmission,
+          assertUnchanged: guard.assertUnchanged,
+          expectedPost:
+            transaction.action === 'post'
+              ? {
+                  author: transaction.account,
+                  body: transaction.postBody,
+                  mediaCid: transaction.postMediaCid,
+                }
+              : undefined,
+          expectProtocol: transaction.action === 'deploy',
+          selectedChainId: transaction.chainId,
+        }).finally(guard.release)
+        setResults((current) =>
+          [
+            ...current.filter(
+              (result) => !sameWalletContext(result, transaction),
+            ),
+            { ...transaction, id: operationId, receipt: nextReceipt },
+          ].slice(-12),
+        )
+        setSubmittedTransactions((current) =>
+          current.filter((candidate) => candidate.id !== transaction.id),
+        )
         if (transaction.action === 'post') {
-          setBody('')
-          setMediaCidInput('')
-          onPostConfirmed({
-            blockHash: nextReceipt.blockHash,
-            blockNumber: nextReceipt.blockNumber,
-            chainId: transaction.chainId,
-            expectedPost: {
-              author: transaction.account,
-              body: transaction.postBody,
-              mediaCid: transaction.postMediaCid,
-            },
-            hash: nextReceipt.hash,
-            provider: transaction.provider,
-          })
+          if (
+            transactionContextMatchesSession(transaction, sessionRef.current)
+          ) {
+            if (composeRevision.current === transaction.composeRevision) {
+              composeRevision.current += 1
+              setBody('')
+              setMediaCidInput('')
+            }
+            onPostConfirmed({
+              blockHash: nextReceipt.blockHash,
+              blockNumber: nextReceipt.blockNumber,
+              chainId: transaction.chainId,
+              expectedPost: {
+                author: transaction.account,
+                body: transaction.postBody,
+                mediaCid: transaction.postMediaCid,
+              },
+              hash: nextReceipt.hash,
+              provider: transaction.provider,
+            })
+          }
         } else await refreshInspection()
       } catch (error) {
-        setSubmittedTransaction({
-          ...transaction,
-          status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
-        })
-        setActionError(
-          describeRpcError(error, 'The transaction receipt could not be read.'),
+        setSubmittedTransactions((current) =>
+          current.map((candidate) =>
+            candidate.id === transaction.id
+              ? {
+                  ...candidate,
+                  status: isTransactionRevertedError(error)
+                    ? 'failed'
+                    : 'unknown',
+                }
+              : candidate,
+          ),
+        )
+        setActionProblems((current) =>
+          [
+            ...current.filter((problem) => problem.id !== operationId),
+            {
+              context: transaction,
+              id: operationId,
+              message: describeRpcError(
+                error,
+                'The transaction receipt could not be read.',
+              ),
+            },
+          ].slice(-12),
         )
       } finally {
-        setBusyAction(undefined)
+        setBusyOperations((current) =>
+          current.filter((operation) => operation.id !== operationId),
+        )
       }
     })()
   }
@@ -369,9 +598,23 @@ export function WalletPanel({
   const connected =
     session.status === 'connected' &&
     Boolean(session.account && session.provider)
-  const transactionWriteLocked =
-    submittedTransaction !== undefined &&
-    submittedTransaction.status !== 'failed'
+  const activeActionProblem = actionProblems.findLast(
+    (problem) =>
+      problem.context === undefined ||
+      transactionContextMatchesSession(problem.context, session),
+  )
+  const activeResult = results.findLast((result) =>
+    transactionContextMatchesSession(result, session),
+  )
+  const activeSubmittedTransactions = submittedTransactions.filter(
+    (transaction) => transactionContextMatchesSession(transaction, session),
+  )
+  const busyAction = busyOperations.findLast((operation) =>
+    busyOperationMatchesSession(operation, session),
+  )?.action
+  const transactionWriteLocked = activeSubmittedTransactions.some(
+    (transaction) => transaction.status !== 'failed',
+  )
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
       <div className="wallet-panel-heading">
@@ -510,7 +753,10 @@ export function WalletPanel({
                 rows={5}
                 value={body}
                 disabled={busyAction === 'post' || transactionWriteLocked}
-                onChange={(event) => setBody(event.target.value)}
+                onChange={(event) => {
+                  composeRevision.current += 1
+                  setBody(event.target.value)
+                }}
                 placeholder="What should survive every rebrand?"
               />
               <label htmlFor="post-media-cid">
@@ -522,7 +768,10 @@ export function WalletPanel({
                 aria-invalid={mediaCidError ? true : undefined}
                 disabled={busyAction === 'post' || transactionWriteLocked}
                 maxLength={MAX_MEDIA_CID_TEXT_LENGTH}
-                onChange={(event) => setMediaCidInput(event.target.value)}
+                onChange={(event) => {
+                  composeRevision.current += 1
+                  setMediaCidInput(event.target.value)
+                }}
                 placeholder="bafy… or Qm…"
                 type="text"
                 value={mediaCidInput}
@@ -566,22 +815,40 @@ export function WalletPanel({
           )}
         </div>
       </div>
-      {actionError ? (
+      {activeActionProblem ? (
         <p className="error-message action-feedback" role="alert">
-          {actionError}
+          {activeActionProblem.message}
         </p>
       ) : null}
-      {submittedTransaction ? (
-        <TransactionStatus
-          transaction={submittedTransaction}
-          onRetry={handleRetryReceipt}
-          onDismiss={() => {
-            setSubmittedTransaction(undefined)
-            setActionError(undefined)
-          }}
-        />
+      {submittedTransactions.map((transaction) => {
+        const currentContext = transactionContextMatchesSession(
+          transaction,
+          session,
+        )
+        return (
+          <TransactionStatus
+            currentContext={currentContext}
+            key={transaction.id}
+            transaction={transaction}
+            onRetry={() => handleRetryReceipt(transaction)}
+            onDismiss={() => {
+              setSubmittedTransactions((current) =>
+                current.filter((candidate) => candidate.id !== transaction.id),
+              )
+              setActionProblems((current) =>
+                current.filter(
+                  (problem) =>
+                    problem.context === undefined ||
+                    !sameWalletContext(problem.context, transaction),
+                ),
+              )
+            }}
+          />
+        )
+      })}
+      {activeResult ? (
+        <TransactionResult receipt={activeResult.receipt} />
       ) : null}
-      {receipt ? <TransactionResult receipt={receipt} /> : null}
     </section>
   )
 }

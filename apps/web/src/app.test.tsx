@@ -1,15 +1,27 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
+import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
+  publishPost,
+  type TransactionReceipt,
 } from './protocol'
+import { WalletPanel } from './wallet-panel'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
+import type { WalletSessionController } from './wallet-session'
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
@@ -52,6 +64,15 @@ function announceWallet(name: string, uuid: string, provider: unknown) {
 }
 function buttonDisabled(name: RegExp) {
   return screen.getByRole('button', { name }).hasAttribute('disabled')
+}
+function deferred<T>() {
+  let reject!: (reason?: unknown) => void
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next, fail) => {
+    reject = fail
+    resolve = next
+  })
+  return { promise, reject, resolve }
 }
 afterEach(() => {
   cleanup()
@@ -177,6 +198,8 @@ describe('App', () => {
               logs: [
                 {
                   address: PROTOCOL_ADDRESS,
+                  blockHash: RECEIPT_BLOCK_HASH,
+                  blockNumber: '0x2a',
                   data: encodeAbiParameters(
                     [{ type: 'string' }, { type: 'bytes' }],
                     [body, MEDIA_CID.bytes],
@@ -186,6 +209,7 @@ describe('App', () => {
                     padHex(toHex(1n), { size: 32 }),
                     padHex(ACCOUNT, { size: 32 }),
                   ],
+                  transactionHash: TRANSACTION_HASH,
                 },
               ],
               status: '0x1',
@@ -221,6 +245,8 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
 
     expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
+    expect((mediaInput as HTMLInputElement).value).toBe('')
     expect(waitForSafePost).toHaveBeenCalledWith(
       provider,
       1n,
@@ -233,6 +259,260 @@ describe('App', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
     expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(2)
+    stop()
+  })
+  it('locks posting when a wallet may broadcast without returning a hash', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') {
+          throw new Error('Provider response timed out.')
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    }
+    const stop = announceWallet('Ambiguous Wallet', 'ambiguous', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect ambiguous wallet/i,
+      }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Did this publish?' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+
+    const acknowledge = await screen.findByRole('button', {
+      name: /i checked my wallet/i,
+    })
+    expect(screen.getByText(/may have broadcast/i)).toBeTruthy()
+    expect(acknowledge.closest('.transaction-pending')?.textContent).toMatch(
+      /chain 1.*Ambiguous Wallet/i,
+    )
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect((textarea as HTMLTextAreaElement).value).toBe('Did this publish?')
+
+    fireEvent.click(acknowledge)
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
+    stop()
+  })
+  it('scopes concurrent busy writes to their original wallet context', async () => {
+    let chainId = '0x1'
+    let submissions = 0
+    const firstSubmission = deferred<string>()
+    const secondSubmission = deferred<string>()
+    const listeners = new Map<string, Set<(value: unknown) => void>>()
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return chainId
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') {
+          submissions += 1
+          return submissions === 1
+            ? firstSubmission.promise
+            : secondSubmission.promise
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+      on: vi.fn((event: string, listener: (value: unknown) => void) => {
+        const registered = listeners.get(event) ?? new Set()
+        registered.add(listener)
+        listeners.set(event, registered)
+      }),
+      removeListener: vi.fn(
+        (event: string, listener: (value: unknown) => void) => {
+          listeners.get(event)?.delete(listener)
+        },
+      ),
+    }
+    const emitChain = (value: string) => {
+      chainId = value
+      listeners.get('chainChanged')?.forEach((listener) => listener(value))
+    }
+    const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })
+    const stop = announceWallet('Busy Wallet', 'busy-context', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', { name: /connect busy wallet/i }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Waiting on chain A.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    await waitFor(() => expect(submissions).toBe(1))
+
+    await act(async () => emitChain('0x2'))
+    const chainBPublish = await screen.findByRole('button', {
+      name: /publish on-chain/i,
+    })
+    expect(chainBPublish.hasAttribute('disabled')).toBe(false)
+    fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
+    fireEvent.click(chainBPublish)
+    await waitFor(() => expect(submissions).toBe(2))
+    expect(buttonDisabled(/publishing/i)).toBe(true)
+
+    await act(async () => {
+      firstSubmission.reject(rejection)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(buttonDisabled(/publishing/i)).toBe(true)
+
+    await act(async () => {
+      secondSubmission.reject(rejection)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(
+      await screen.findByRole('button', { name: /publish on-chain/i }),
+    ).toBeTruthy()
+    stop()
+  })
+  it('does not let a stale post completion clear the current draft', async () => {
+    let selectedChain = '0x1'
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return selectedChain
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const controller = (chainId: bigint): WalletSessionController => ({
+      connect: vi.fn(async () => undefined),
+      refresh: vi.fn(async () => undefined),
+      session: {
+        account: ACCOUNT,
+        chainId,
+        name: 'Completion Wallet',
+        provider,
+        status: 'connected',
+      },
+    })
+    const completion = deferred<TransactionReceipt>()
+    const publishPostAction = vi.fn<typeof publishPost>(
+      async () => completion.promise,
+    )
+    const onPostConfirmed = vi.fn()
+    const { rerender } = render(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        publishPostAction={publishPostAction}
+        walletSession={controller(1n)}
+      />,
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Submitted on chain A.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    await waitFor(() => expect(publishPostAction).toHaveBeenCalledTimes(1))
+
+    selectedChain = '0x2'
+    rerender(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        publishPostAction={publishPostAction}
+        walletSession={controller(2n)}
+      />,
+    )
+    await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    fireEvent.change(textarea, { target: { value: 'Unsent chain B draft.' } })
+    const mediaInput = screen.getByLabelText(/IPFS media CID/i)
+    fireEvent.change(mediaInput, { target: { value: MEDIA_CID_V0 } })
+
+    await act(async () =>
+      completion.resolve({
+        blockHash: RECEIPT_BLOCK_HASH as TransactionReceipt['blockHash'],
+        blockNumber: 42n,
+        hash: TRANSACTION_HASH,
+      }),
+    )
+
+    expect(onPostConfirmed).not.toHaveBeenCalled()
+    expect((textarea as HTMLTextAreaElement).value).toBe(
+      'Unsent chain B draft.',
+    )
+    expect((mediaInput as HTMLInputElement).value).toBe(MEDIA_CID_V0)
+    expect(screen.queryByText(/included in block 42/i)).toBeNull()
+
+    selectedChain = '0x1'
+    rerender(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        publishPostAction={publishPostAction}
+        walletSession={controller(1n)}
+      />,
+    )
+    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+  })
+  it('preserves an unknown post while another chain starts a write', async () => {
+    let chainId = '0x1'
+    let submissions = 0
+    const listeners = new Map<string, Set<(value: unknown) => void>>()
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return chainId
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') {
+          submissions += 1
+          if (submissions === 1) return UNKNOWN_TRANSACTION_HASH
+          throw Object.assign(new Error('User rejected.'), { code: 4001 })
+        }
+        if (method === 'eth_getTransactionReceipt') {
+          throw new Error('Temporary receipt outage.')
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+      on: vi.fn((event: string, listener: (value: unknown) => void) => {
+        const registered = listeners.get(event) ?? new Set()
+        registered.add(listener)
+        listeners.set(event, registered)
+      }),
+      removeListener: vi.fn(
+        (event: string, listener: (value: unknown) => void) => {
+          listeners.get(event)?.delete(listener)
+        },
+      ),
+    }
+    const emitChain = (value: string) => {
+      chainId = value
+      listeners.get('chainChanged')?.forEach((listener) => listener(value))
+    }
+    const stop = announceWallet('Context Wallet', 'context', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect context wallet/i,
+      }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Uncertain on chain A.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+
+    expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
+    expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
+    await act(async () => emitChain('0x2'))
+    expect(
+      await screen.findByText(/another wallet context.*current console/i),
+    ).toBeTruthy()
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
+
+    fireEvent.change(textarea, { target: { value: 'Rejected on chain B.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /request was rejected/i,
+    )
+
+    await act(async () => emitChain('0x1'))
+    expect(
+      await screen.findByRole('button', { name: /check receipt again/i }),
+    ).toBeTruthy()
+    expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
     stop()
   })
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
