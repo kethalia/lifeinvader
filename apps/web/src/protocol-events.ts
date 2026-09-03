@@ -13,6 +13,9 @@ import type { EventLogFilter, IndexedEventLog } from './event-indexer'
 import {
   COMMENT_PUBLISHED_EVENT_ABI,
   COMMENT_PUBLISHED_TOPIC,
+  DIRECT_MESSAGE_SENT_EVENT_ABI,
+  DIRECT_MESSAGE_SENT_TOPIC,
+  getDirectConversationId,
   getPostBodyByteLength,
   getUtf8ByteLength,
   MAX_MEDIA_CID_BYTES,
@@ -42,6 +45,14 @@ const PROFILE_DATA_PARAMETERS = [
   { type: 'bytes' },
 ] as const
 
+const DIRECT_MESSAGE_DATA_PARAMETERS = [
+  { type: 'uint256' },
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
 export const POST_CONTENT_KIND_TOPIC = padHex(toHex(POST_CONTENT_KIND), {
   size: 32,
 })
@@ -55,6 +66,24 @@ export const PUBLISHED_COMMENT_FILTER = {
   address: PROTOCOL_ADDRESS,
   topics: [COMMENT_PUBLISHED_TOPIC],
 } as const satisfies EventLogFilter
+
+export const DIRECT_MESSAGE_SENT_FILTER = {
+  address: PROTOCOL_ADDRESS,
+  topics: [DIRECT_MESSAGE_SENT_TOPIC],
+} as const satisfies EventLogFilter
+
+export function getDirectMessageConversationFilter(
+  firstAccount: Address,
+  secondAccount: Address,
+): EventLogFilter {
+  return {
+    address: PROTOCOL_ADDRESS,
+    topics: [
+      DIRECT_MESSAGE_SENT_TOPIC,
+      getDirectConversationId(firstAccount, secondAccount),
+    ],
+  }
+}
 
 export const PUBLISHED_REPOST_FILTER = {
   address: PROTOCOL_ADDRESS,
@@ -129,6 +158,20 @@ export type ProfileSet = {
   transactionIndex: number
 }
 
+export type PublishedDirectMessage = {
+  blockHash: Hash
+  blockNumber: bigint
+  body: string
+  conversationId: Hash
+  logIndex: number
+  mediaCid: Hex
+  messageId: bigint
+  recipient: Address
+  sender: Address
+  transactionHash: Hash
+  transactionIndex: number
+}
+
 function invalidPostEvent() {
   return new Error('The chain returned an invalid PostPublished event.')
 }
@@ -147,6 +190,10 @@ function invalidRepostEvent() {
 
 function invalidProfileEvent() {
   return new Error('The chain returned an invalid ProfileSet event.')
+}
+
+function invalidDirectMessageEvent() {
+  return new Error('The chain returned an invalid DirectMessageSent event.')
 }
 
 export function decodePublishedPost(
@@ -386,5 +433,72 @@ export function decodeProfileSet(log: IndexedEventLog): ProfileSet | undefined {
     }
   } catch {
     throw invalidProfileEvent()
+  }
+}
+
+export function decodePublishedDirectMessage(
+  log: IndexedEventLog,
+): PublishedDirectMessage | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== DIRECT_MESSAGE_SENT_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 4) throw invalidDirectMessageEvent()
+  try {
+    const decoded = decodeEventLog({
+      abi: DIRECT_MESSAGE_SENT_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { body, conversationId, mediaCid, messageId, recipient, sender } =
+      decoded.args
+    const normalizedSender = getAddress(sender)
+    const normalizedRecipient = getAddress(recipient)
+    const canonicalConversationId = getDirectConversationId(
+      normalizedSender,
+      normalizedRecipient,
+    )
+    const bodyLength = getPostBodyByteLength(body)
+    const mediaCidLength = size(mediaCid)
+    if (
+      messageId === 0n ||
+      normalizedSender.toLowerCase() === ZERO_ADDRESS ||
+      normalizedRecipient.toLowerCase() === ZERO_ADDRESS ||
+      (bodyLength === 0 && mediaCidLength === 0) ||
+      bodyLength > MAX_POST_BODY_BYTES ||
+      mediaCidLength > MAX_MEDIA_CID_BYTES ||
+      conversationId.toLowerCase() !== canonicalConversationId.toLowerCase() ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(DIRECT_MESSAGE_DATA_PARAMETERS, [
+          messageId,
+          body,
+          mediaCid,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !== canonicalConversationId.toLowerCase() ||
+      log.topics[2]?.toLowerCase() !==
+        padHex(normalizedSender, { size: 32 }).toLowerCase() ||
+      log.topics[3]?.toLowerCase() !==
+        padHex(normalizedRecipient, { size: 32 }).toLowerCase()
+    ) {
+      throw invalidDirectMessageEvent()
+    }
+    return {
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      body,
+      conversationId: canonicalConversationId,
+      logIndex: log.logIndex,
+      mediaCid,
+      messageId,
+      recipient: normalizedRecipient,
+      sender: normalizedSender,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidDirectMessageEvent()
   }
 }

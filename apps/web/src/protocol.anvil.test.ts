@@ -24,6 +24,7 @@ import {
   publishComment,
   publishRepost,
   publishPost,
+  sendDirectMessage,
   setProfile,
   setPostLike,
 } from './protocol'
@@ -117,13 +118,15 @@ afterAll(async () => {
   })
 })
 describe('wallet transaction helpers on Anvil', () => {
-  it('deploys v1 and verifies profile, post, comment, and reaction transactions', async () => {
+  it('deploys v1 and verifies profile, post, reaction, and public-message transactions', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
     )
     const account = accounts[0]
+    const recipient = accounts[1]
     expect(account).toBeDefined()
-    if (!account) return
+    expect(recipient).toBeDefined()
+    if (!account || !recipient) return
     await expect(inspectProtocol(provider)).resolves.toEqual({
       kind: 'deployable',
     })
@@ -191,6 +194,17 @@ describe('wallet transaction helpers on Anvil', () => {
       publishRepost(provider, account, LOCAL_CHAIN_ID, 1n, undefined, provider),
     ).resolves.toMatchObject({ blockNumber: 7n })
     await expect(
+      sendDirectMessage(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        recipient,
+        { body: 'This message is permanently public.', mediaCid: '0x' },
+        undefined,
+        provider,
+      ),
+    ).resolves.toMatchObject({ blockNumber: 8n })
+    await expect(
       setProfile(
         provider,
         account,
@@ -199,7 +213,7 @@ describe('wallet transaction helpers on Anvil', () => {
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 8n })
+    ).resolves.toMatchObject({ blockNumber: 9n })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,
