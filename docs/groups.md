@@ -100,17 +100,21 @@ no history is read merely because a wallet connected or a component rendered.
 
 The membership projection reduces complete-block cache pages in chronological
 order to each account's latest join or leave signal. It retains only current
-members, while its resumable snapshot binds the selected group, total signal
-count, exact log tail, confirmation checkpoint, and canonical active-member
-records. Snapshot digests are deterministic, member reads are address-ordered and
-capped at 200 records per page, and an address-cursor radix index keeps each read
+members and constant-size progress for the selected group, total signal count,
+exact log tail, and confirmation checkpoint. Member reads are address-ordered and
+capped at 200 records per page; an address-cursor radix index keeps each read
 proportional to that page instead of repeatedly sorting the entire group.
-Malformed, zero-address, or cross-group input is rejected atomically.
-Reference-counted active identity indexes likewise keep each history-apply step
-proportional to its bounded input page instead of the total group size. This
-remains public social metadata, never access control. A later runner will
-authenticate the snapshot against the exact cache generation before publishing
-it to React.
+Malformed, zero-address, or cross-group input is rejected atomically, while
+reference-counted active identity indexes keep each history-apply and confirmation
+step independent of the total group size.
+
+The projection deliberately does not materialize or hash a monolithic member
+snapshot after each history page. Durable derived membership will use bounded
+member chunks in a later local IndexedDB layer; until then, the resumable event
+cache remains authoritative and projection work advances explicitly page by
+page. Membership remains public social metadata, never access control. A later
+runner will authenticate the exact cache generation before publishing results to
+React.
 
 The Anvil integration covers create, join, send, confirmed exact-group message
 and membership readback, and discovery of the immutable group definition. Later

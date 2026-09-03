@@ -1,11 +1,4 @@
-import {
-  getAddress,
-  isAddress,
-  keccak256,
-  stringToHex,
-  type Address,
-  type Hash,
-} from 'viem'
+import { getAddress, isAddress, type Address, type Hash } from 'viem'
 import {
   eventTransactionsAreConsistent,
   validateIndexedEventLog,
@@ -21,7 +14,6 @@ import { PROTOCOL_ADDRESS } from './protocol'
 export const GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE = 50
 export const MAX_GROUP_MEMBERSHIP_PROJECTION_PAGE_LOGS = 5_199
 export const MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE = 200
-export const GROUP_MEMBERSHIP_PROJECTION_SNAPSHOT_VERSION = 1
 
 const MAX_UINT256 = (1n << 256n) - 1n
 const ADDRESS_HEX_LENGTH = 40
@@ -51,15 +43,6 @@ export type GroupMembershipProjectionReadPage = {
   members: readonly GroupMembershipSet[]
   nextAfter?: Address
   totalMembers: bigint
-}
-
-export type GroupMembershipProjectionSnapshot = {
-  confirmedThrough?: EventCheckpoint
-  groupId: bigint
-  last?: GroupMembershipProjectionPosition
-  members: readonly GroupMembershipSet[]
-  schemaVersion: typeof GROUP_MEMBERSHIP_PROJECTION_SNAPSHOT_VERSION
-  signalCount: bigint
 }
 
 type DecodedMembershipPage = {
@@ -121,76 +104,16 @@ function normalizeBlockNumber(value: unknown, label: string) {
   return normalizeQuantity(value, label)
 }
 
-function normalizeIndex(value: unknown, label: string) {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw projectionError(label)
-  }
-  return value
-}
-
-function normalizePosition(
-  value: unknown,
-): GroupMembershipProjectionPosition | undefined {
-  if (value === undefined) return undefined
-  if (!isRecord(value)) throw projectionError('snapshot position')
-  return {
-    blockHash: normalizeHash(value.blockHash, 'snapshot position block hash'),
-    blockNumber: normalizeBlockNumber(
-      value.blockNumber,
-      'snapshot position block number',
-    ),
-    logIndex: normalizeIndex(value.logIndex, 'snapshot position log index'),
-  }
-}
-
 function normalizeCheckpoint(value: unknown): EventCheckpoint | undefined {
   if (value === undefined) return undefined
-  if (!isRecord(value)) throw projectionError('snapshot confirmation')
+  if (!isRecord(value)) throw projectionError('confirmation')
   return {
-    blockHash: normalizeHash(
-      value.blockHash,
-      'snapshot confirmation block hash',
-    ),
+    blockHash: normalizeHash(value.blockHash, 'confirmation block hash'),
     blockNumber: normalizeBlockNumber(
       value.blockNumber,
-      'snapshot confirmation block number',
+      'confirmation block number',
     ),
   }
-}
-
-function normalizeMember(value: unknown): GroupMembershipSet {
-  if (!isRecord(value)) throw projectionError('snapshot member')
-  if (value.joined !== true) throw projectionError('snapshot member state')
-  return {
-    account: normalizeAccount(value.account),
-    blockHash: normalizeHash(value.blockHash, 'snapshot member block hash'),
-    blockNumber: normalizeBlockNumber(
-      value.blockNumber,
-      'snapshot member block number',
-    ),
-    groupId: normalizeGroupId(value.groupId),
-    joined: true,
-    logIndex: normalizeIndex(value.logIndex, 'snapshot member log index'),
-    transactionHash: normalizeHash(
-      value.transactionHash,
-      'snapshot member transaction hash',
-    ),
-    transactionIndex: normalizeIndex(
-      value.transactionIndex,
-      'snapshot member transaction index',
-    ),
-  }
-}
-
-function compareAccounts(first: Address, second: Address) {
-  const normalizedFirst = first.toLowerCase()
-  const normalizedSecond = second.toLowerCase()
-  if (normalizedFirst === normalizedSecond) return 0
-  return normalizedFirst < normalizedSecond ? -1 : 1
-}
-
-function compareMembers(first: GroupMembershipSet, second: GroupMembershipSet) {
-  return compareAccounts(first.account, second.account)
 }
 
 function createAddressIndexNode(): AddressIndexNode {
@@ -251,19 +174,6 @@ function comparePositions(
     (first.logIndex ?? Number.MAX_SAFE_INTEGER) -
     (second.logIndex ?? Number.MAX_SAFE_INTEGER)
   )
-}
-
-function assertMemberBeforeBoundary(
-  member: GroupMembershipSet,
-  last: GroupMembershipProjectionPosition,
-) {
-  if (
-    comparePositions(member, last) > 0 ||
-    (member.blockNumber === last.blockNumber &&
-      member.blockHash !== last.blockHash)
-  ) {
-    throw projectionError('snapshot member boundary')
-  }
 }
 
 function assertTransactionHashesBelongToOneBlock(
@@ -339,103 +249,6 @@ function assertConsistentMembershipMetadata(
   if (!eventTransactionsAreConsistent(logs)) {
     throw projectionError(`${label} transaction metadata`)
   }
-}
-
-function normalizeSnapshot(value: unknown): GroupMembershipProjectionSnapshot {
-  if (!isRecord(value)) throw projectionError('snapshot')
-  if (value.schemaVersion !== GROUP_MEMBERSHIP_PROJECTION_SNAPSHOT_VERSION) {
-    throw projectionError('snapshot schema version')
-  }
-  const groupId = normalizeGroupId(value.groupId)
-  const signalCount = normalizeQuantity(
-    value.signalCount,
-    'snapshot signal count',
-  )
-  if (!Array.isArray(value.members)) {
-    throw projectionError('snapshot members')
-  }
-  if (BigInt(value.members.length) > signalCount) {
-    throw projectionError('snapshot member count')
-  }
-  const members = new Map<string, GroupMembershipSet>()
-  for (const memberValue of value.members) {
-    const member = normalizeMember(memberValue)
-    if (member.groupId !== groupId) {
-      throw projectionError('snapshot member group')
-    }
-    const key = member.account.toLowerCase()
-    if (members.has(key)) throw projectionError('snapshot duplicate member')
-    members.set(key, member)
-  }
-  const last = normalizePosition(value.last)
-  const confirmedThrough = normalizeCheckpoint(value.confirmedThrough)
-  if ((signalCount === 0n) !== (last === undefined)) {
-    throw projectionError('snapshot signal progress')
-  }
-  if (last) {
-    for (const member of members.values()) {
-      assertMemberBeforeBoundary(member, last)
-    }
-  }
-  if (
-    last &&
-    confirmedThrough &&
-    last.blockNumber === confirmedThrough.blockNumber &&
-    last.blockHash !== confirmedThrough.blockHash
-  ) {
-    throw projectionError('snapshot confirmation progress')
-  }
-  assertConsistentMembershipMetadata([...members.values()], 'snapshot')
-  assertBlockIdentities(
-    [
-      ...members.values(),
-      ...(last ? [last] : []),
-      ...(confirmedThrough ? [confirmedThrough] : []),
-    ],
-    'snapshot',
-  )
-  return {
-    ...(confirmedThrough ? { confirmedThrough } : {}),
-    groupId,
-    ...(last ? { last } : {}),
-    members: [...members.values()].toSorted(compareMembers),
-    schemaVersion: GROUP_MEMBERSHIP_PROJECTION_SNAPSHOT_VERSION,
-    signalCount,
-  }
-}
-
-function serializeSnapshot(value: unknown) {
-  const snapshot = normalizeSnapshot(value)
-  return JSON.stringify([
-    'lifeinvader.group-membership-projection.snapshot.v1',
-    snapshot.groupId.toString(16),
-    snapshot.signalCount.toString(16),
-    snapshot.confirmedThrough
-      ? [
-          snapshot.confirmedThrough.blockNumber.toString(16),
-          snapshot.confirmedThrough.blockHash,
-        ]
-      : null,
-    snapshot.last
-      ? [
-          snapshot.last.blockNumber.toString(16),
-          snapshot.last.logIndex.toString(16),
-          snapshot.last.blockHash,
-        ]
-      : null,
-    snapshot.members.map((member) => [
-      member.account.toLowerCase(),
-      member.blockNumber.toString(16),
-      member.blockHash,
-      member.logIndex.toString(16),
-      member.transactionHash,
-      member.transactionIndex.toString(16),
-    ]),
-  ])
-}
-
-export function getGroupMembershipProjectionSnapshotDigest(value: unknown) {
-  return keccak256(stringToHex(serializeSnapshot(value)))
 }
 
 function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
@@ -588,20 +401,6 @@ export class GroupMembershipProjection {
     this.#groupId = normalizeGroupId(groupIdValue)
   }
 
-  static fromSnapshot(value: unknown) {
-    const snapshot = normalizeSnapshot(value)
-    const projection = new GroupMembershipProjection(snapshot.groupId)
-    for (const member of snapshot.members) {
-      projection.#retainMember(member)
-    }
-    projection.#confirmedThrough = snapshot.confirmedThrough
-      ? copyCheckpoint(snapshot.confirmedThrough)
-      : undefined
-    projection.#last = snapshot.last ? copyPosition(snapshot.last) : undefined
-    projection.#signalCount = snapshot.signalCount
-    return projection
-  }
-
   get groupId() {
     return this.#groupId
   }
@@ -613,21 +412,6 @@ export class GroupMembershipProjection {
         : {}),
       ...(this.#last ? { last: copyPosition(this.#last) } : {}),
       memberCount: BigInt(this.#members.size),
-      signalCount: this.#signalCount,
-    }
-  }
-
-  get snapshot(): GroupMembershipProjectionSnapshot {
-    return {
-      ...(this.#confirmedThrough
-        ? { confirmedThrough: copyCheckpoint(this.#confirmedThrough) }
-        : {}),
-      groupId: this.#groupId,
-      ...(this.#last ? { last: copyPosition(this.#last) } : {}),
-      members: [...this.#members.values()]
-        .map(copyMember)
-        .toSorted(compareMembers),
-      schemaVersion: GROUP_MEMBERSHIP_PROJECTION_SNAPSHOT_VERSION,
       signalCount: this.#signalCount,
     }
   }
@@ -669,6 +453,15 @@ export class GroupMembershipProjection {
           this.#last.blockHash !== checkpoint.blockHash))
     ) {
       throw projectionError('confirmation progress')
+    }
+    for (const boundary of [this.#last, this.#confirmedThrough]) {
+      if (
+        boundary &&
+        boundary.blockHash === checkpoint.blockHash &&
+        boundary.blockNumber !== checkpoint.blockNumber
+      ) {
+        throw projectionError('confirmation block identity')
+      }
     }
     const retainedBlock = this.#memberBlocksByHash.get(checkpoint.blockHash)
     if (retainedBlock && retainedBlock.blockNumber !== checkpoint.blockNumber) {

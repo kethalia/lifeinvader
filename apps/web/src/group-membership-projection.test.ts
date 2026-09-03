@@ -10,7 +10,6 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
-  getGroupMembershipProjectionSnapshotDigest,
   GroupMembershipProjection,
   MAX_GROUP_MEMBERSHIP_PROJECTION_PAGE_LOGS,
   MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE,
@@ -64,6 +63,15 @@ function membershipLog(
         `transaction:${blockNumber.toString()}:${transactionIndex.toString()}`,
       ),
     transactionIndex,
+  }
+}
+
+function projectionState(projection: GroupMembershipProjection) {
+  return {
+    members: projection.readMembers({
+      limit: MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE,
+    }).members,
+    progress: projection.progress,
   }
 }
 
@@ -185,7 +193,7 @@ describe('group membership projection', () => {
     expect(last.nextAfter).toBeUndefined()
   })
 
-  it('returns defensive copies of members, progress, and snapshots', () => {
+  it('returns defensive copies of members and progress', () => {
     const projection = new GroupMembershipProjection(GROUP_ID)
     projection.applyLogs([membershipLog(ACCOUNT_A, true, 1n)])
     projection.confirmThrough({
@@ -196,13 +204,10 @@ describe('group membership projection', () => {
     const member = projection.getMember(ACCOUNT_A)!
     const pageMember = projection.readMembers().members[0]!
     const progress = projection.progress
-    const snapshot = projection.snapshot
     member.blockNumber = 90n
     pageMember.blockNumber = 91n
     progress.last!.blockNumber = 92n
     progress.confirmedThrough!.blockNumber = 93n
-    snapshot.members[0]!.blockNumber = 94n
-    snapshot.last!.blockNumber = 95n
 
     expect(projection.getMember(ACCOUNT_A)!.blockNumber).toBe(1n)
     expect(projection.progress.last!.blockNumber).toBe(1n)
@@ -212,7 +217,7 @@ describe('group membership projection', () => {
   it('rejects another group atomically even after valid entries in a page', () => {
     const projection = new GroupMembershipProjection(GROUP_ID)
     projection.applyLogs([membershipLog(ACCOUNT_A, true, 1n)])
-    const before = projection.snapshot
+    const before = projectionState(projection)
 
     expect(() =>
       projection.applyLogs([
@@ -224,7 +229,7 @@ describe('group membership projection', () => {
         }),
       ]),
     ).toThrow(/event group/i)
-    expect(projection.snapshot).toEqual(before)
+    expect(projectionState(projection)).toEqual(before)
   })
 
   it('rejects malformed, unordered, and transaction-inconsistent pages', () => {
@@ -287,14 +292,14 @@ describe('group membership projection', () => {
     projection.applyLogs([
       membershipLog(ACCOUNT_A, true, 1n, { transactionHash }),
     ])
-    const before = projection.snapshot
+    const before = projectionState(projection)
 
     expect(() =>
       projection.applyLogs([
         membershipLog(ACCOUNT_B, true, 2n, { transactionHash }),
       ]),
     ).toThrow(/history transaction block/i)
-    expect(projection.snapshot).toEqual(before)
+    expect(projectionState(projection)).toEqual(before)
 
     expect(() =>
       projection.applyLogs([
@@ -303,7 +308,7 @@ describe('group membership projection', () => {
         }),
       ]),
     ).toThrow(/history block identity/i)
-    expect(projection.snapshot).toEqual(before)
+    expect(projectionState(projection)).toEqual(before)
   })
 
   it('applies a one-log delta over 5,000 retained members', () => {
@@ -318,6 +323,10 @@ describe('group membership projection', () => {
 
     const sorting = vi.spyOn(Array.prototype, 'toSorted')
     try {
+      projection.confirmThrough({
+        blockHash: hash('block:5,002'),
+        blockNumber: 5_002n,
+      })
       const firstPage = projection.readMembers({
         limit: MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE,
       })
@@ -338,6 +347,10 @@ describe('group membership projection', () => {
     }
 
     expect(projection.progress).toMatchObject({
+      confirmedThrough: {
+        blockHash: hash('block:5,002'),
+        blockNumber: 5_002n,
+      },
       memberCount: 5_001n,
       signalCount: 5_001n,
     })
@@ -406,147 +419,27 @@ describe('group membership projection', () => {
     ).toThrow(/confirmation boundary/i)
   })
 
-  it('round-trips canonical resumable snapshots and their digest', () => {
+  it('compares confirmation identity with an all-left history tail', () => {
     const projection = new GroupMembershipProjection(GROUP_ID)
     projection.applyLogs([
-      membershipLog(ACCOUNT_B, true, 1n),
-      membershipLog(ACCOUNT_A, true, 1n, {
-        logIndex: 1,
-        transactionIndex: 1,
-      }),
+      membershipLog(ACCOUNT_A, true, 1n),
+      membershipLog(ACCOUNT_A, false, 2n),
     ])
+
+    expect(() =>
+      projection.confirmThrough({
+        blockHash: hash('block:2'),
+        blockNumber: 3n,
+      }),
+    ).toThrow(/confirmation block identity/i)
+    expect(projection.progress.confirmedThrough).toBeUndefined()
+    expect(projection.readMembers().members).toEqual([])
+
     projection.confirmThrough({
-      blockHash: hash('block:4'),
-      blockNumber: 4n,
+      blockHash: hash('block:3'),
+      blockNumber: 3n,
     })
-    const snapshot = projection.snapshot
-    const reversed = { ...snapshot, members: [...snapshot.members].reverse() }
-
-    expect(GroupMembershipProjection.fromSnapshot(reversed).snapshot).toEqual(
-      snapshot,
-    )
-    expect(getGroupMembershipProjectionSnapshotDigest(reversed)).toBe(
-      getGroupMembershipProjectionSnapshotDigest(snapshot),
-    )
-    expect(
-      getGroupMembershipProjectionSnapshotDigest({
-        ...snapshot,
-        signalCount: snapshot.signalCount + 1n,
-      }),
-    ).not.toBe(getGroupMembershipProjectionSnapshotDigest(snapshot))
-  })
-
-  it('round-trips a non-empty history whose current member set is empty', () => {
-    const projection = new GroupMembershipProjection(GROUP_ID)
-    projection.applyLogs([
-      membershipLog(ACCOUNT_A, true, 1n),
-      membershipLog(ACCOUNT_A, false, 1n, {
-        logIndex: 1,
-        transactionIndex: 1,
-      }),
-    ])
-
-    const restored = GroupMembershipProjection.fromSnapshot(projection.snapshot)
-    expect(restored.readMembers()).toEqual({
-      complete: true,
-      members: [],
-      nextAfter: undefined,
-      totalMembers: 0n,
-    })
-    expect(restored.progress).toMatchObject({
-      memberCount: 0n,
-      signalCount: 2n,
-    })
-  })
-
-  it('rejects inconsistent or forged resumable snapshots', () => {
-    const projection = new GroupMembershipProjection(GROUP_ID)
-    projection.applyLogs([
-      membershipLog(ACCOUNT_A, true, 1n),
-      membershipLog(ACCOUNT_B, true, 2n),
-    ])
-    const snapshot = projection.snapshot
-
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        schemaVersion: 2,
-      }),
-    ).toThrow(/schema version/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({ ...snapshot, groupId: 0n }),
-    ).toThrow(/group identifier/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        signalCount: 1n,
-      }),
-    ).toThrow(/member count/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({ ...snapshot, last: undefined }),
-    ).toThrow(/signal progress/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        members: [snapshot.members[0], snapshot.members[0]],
-      }),
-    ).toThrow(/duplicate member/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        members: [
-          { ...snapshot.members[0], groupId: OTHER_GROUP_ID },
-          snapshot.members[1],
-        ],
-      }),
-    ).toThrow(/member group/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        members: [
-          { ...snapshot.members[0], joined: false },
-          snapshot.members[1],
-        ],
-      }),
-    ).toThrow(/member state/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        members: [
-          {
-            ...snapshot.members[0],
-            account: '0x0000000000000000000000000000000000000000',
-          },
-          snapshot.members[1],
-        ],
-      }),
-    ).toThrow(/account/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        last: {
-          ...snapshot.last!,
-          blockNumber: 1n,
-          logIndex: 0,
-        },
-      }),
-    ).toThrow(/member boundary/i)
-    expect(() =>
-      GroupMembershipProjection.fromSnapshot({
-        ...snapshot,
-        last: {
-          ...snapshot.last!,
-          blockHash: snapshot.members[0]!.blockHash,
-        },
-        members: [
-          snapshot.members[0],
-          {
-            ...snapshot.members[1],
-            blockHash: snapshot.members[0]!.blockHash,
-          },
-        ],
-      }),
-    ).toThrow(/block identity/i)
+    expect(projection.progress.confirmedThrough?.blockNumber).toBe(3n)
   })
 
   it('validates group, page, account, and read work bounds', () => {
