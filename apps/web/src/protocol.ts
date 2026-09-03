@@ -1,0 +1,270 @@
+import {
+  concatHex,
+  encodeFunctionData,
+  getCreate2Address,
+  keccak256,
+  type Address,
+  type Hash,
+  type Hex,
+} from 'viem'
+
+import {
+  getRpcErrorCode,
+  parseTransactionHash,
+  type Eip1193Provider,
+} from './ethereum'
+
+export const FACTORY_ADDRESS = '0x4e59b44847b379578588920cA78FbF26c0B4956C'
+export const FACTORY_CODE_HASH =
+  '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989'
+export const PROTOCOL_ADDRESS = '0x779DEb5AD0B27BF40BDBFF3A81caB2d9049d7ad1'
+export const PROTOCOL_CODE_HASH =
+  '0x9289a8f9250caef94eb4c263b182f4540e50b62b713f83ab722237cfcbdb87c4'
+export const DEPLOYMENT_SALT =
+  '0x12f1d647ac2191038e16cc3e772d7674c8f6eb825ce09650b96d6dba48179059'
+export const INIT_CODE_HASH =
+  '0xa9bdddbbb0824a6b64f118b0eeb6b2c6051394933c5593ace3ee9495f4cc805e'
+export const MAX_POST_BODY_BYTES = 4_096
+export const LOCAL_CHAIN_ID = 31_337n
+
+export const LIFEINVADER_INIT_CODE =
+  '0x608060405260016000556001805560016002556001600355348015602257600080fd5b50610d4d806100326000396000f3fe608060405234801561001057600080fd5b506004361061012c5760003560e01c80639ae9a5ca116100ad578063b3f1a39a11610071578063b3f1a39a14610224578063c4e225f614610237578063cec6cdfa1461023f578063d0bdacbe14610252578063eefbf17e1461025b57600080fd5b80639ae9a5ca146101cf5780639aee153e146101e2578063a75611e3146101f5578063a9e5ec9014610208578063b1eabf391461021157600080fd5b80635eda7a76116100f45780635eda7a761461017a578063769da0d7146101835780637bd6262c1461019657806380b28cee146101a957806398e1747f146101bc57600080fd5b80631ba44fd4146101315780632ade18c214610146578063373e2db3146101615780635c09bd98146101695780635c33f13114610172575b600080fd5b61014461013f36600461092b565b610264565b005b61014f61100081565b60405190815260200160405180910390f35b61014f604081565b61014f60005481565b61014f608081565b61014f60035481565b61014f610191366004610984565b6102e2565b61014f6101a4366004610a00565b610359565b61014f6101b7366004610a7f565b6103cc565b6101446101ca366004610af0565b610436565b6101446101dd366004610b96565b6104fc565b61014f6101f0366004610a00565b610543565b61014f610203366004610a7f565b6105ab565b61014f61040081565b61014461021f366004610bb9565b610662565b61014f610232366004610bd2565b61069b565b61014f606081565b61014461024d366004610c0f565b610746565b61014f60015481565b61014f60025481565b600083600181111561027857610278610c39565b0361028b57610286826107d5565b610294565b61029482610808565b33828460018111156102a8576102a8610c39565b60405184151581527fa6fa55005fe0b190111a9abc7df43c5e4b986d6332d5971d6fe809390bb97aa09060200160405180910390a4505050565b6000806000836001600160a01b0316856001600160a01b03161061030757838561030a565b84845b6040516bffffffffffffffffffffffff19606084811b8216602084015283901b166034820152919350915060480160405160208183030381529060405280519060200120925050505b92915050565b600061036486610838565b61037085858585610868565b6103786108d2565b905080336001600160a01b0316877fd09a35baad2f16a457a76f1875dcc3ffa7556a6515782e018f8ab2a13798c308888888886040516103bb9493929190610c78565b60405180910390a495945050505050565b60006103da85858585610868565b506000546103e9816001610caa565b600055604051339082907fe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db90610426908990899089908990610c78565b60405180910390a3949350505050565b84604081111561046e57604080516373767f0560e11b8152610465918391600401918252602082015260400190565b60405180910390fd5b8361040081111561049d5760405163b84047d160e01b8152600481018290526104006024820152604401610465565b6104a784846108e6565b336001600160a01b03167f033f4d6cdbbae83b8a59446e605fd37762898192566e447aed006d0d815842a78989898989896040516104ea96959493929190610ccb565b60405180910390a25050505050505050565b61050582610838565b6040518115158152339083907f35b852f9d0970d7d7c8d97158385a3a58772cab7af8c74714b25f79ae466641c906020015b60405180910390a35050565b600061054e866107d5565b61055a85858585610868565b600154905080600161056c9190610caa565b6001556040513390879083907fdab0b0dd807460349a9bdbcf1e964a6f69ea6e241e844257a8ea7a47d7ea7076906103bb908a908a908a908a90610c78565b6000838082036105ce57604051634a2e0cdd60e01b815260040160405180910390fd5b60608111156105fa57604051633acbcdd760e21b81526004810182905260606024820152604401610465565b61060484846108e6565b6003549150610614826001610caa565b600355604051339083907ff32741f516bc616f96857271f14729f50e80882de799470133ec54117df98edd90610651908a908a908a908a90610c78565b60405180910390a350949350505050565b61066b816107d5565b604051339082907f48b2667530535dfe389ce140bb7872ab9a922083158958ed14099b3565381b9990600090a350565b60006001600160a01b0386166106c45760405163d92e233d60e01b815260040160405180910390fd5b6106d085858585610868565b6106d86108d2565b905060006106e633886102e2565b9050866001600160a01b0316336001600160a01b0316827fd3c21a10e60cff821a30409b33f5e1cbe639483334abf0a56db83cbdbd3f5732858a8a8a8a604051610734959493929190610d14565b60405180910390a45095945050505050565b6001600160a01b03821661076d5760405163d92e233d60e01b815260040160405180910390fd5b336001600160a01b038316036107965760405163773685ef60e01b815260040160405180910390fd5b60405181151581526001600160a01b0383169033907fd94333e426f298545f1366b65dd950a7409194062f9d6a8c4a708c8a9c1d6b6490602001610537565b8015806107e457506000548110155b15610805576040516391f2ffcb60e01b815260048101829052602401610465565b50565b80158061081757506001548110155b15610805576040516393cbe52960e01b815260048101829052602401610465565b80158061084757506003548110155b156108055760405163cfd439dd60e01b815260048101829052602401610465565b8280158015610875575081155b1561089357604051630b8fc7cd60e21b815260040160405180910390fd5b6110008111156108c157604051635d51876360e11b8152600481018290526110006024820152604401610465565b6108cb83836108e6565b5050505050565b6002546108e0816001610caa565b60025590565b608081111561091257604051630d4b64c960e41b81526004810182905260806024820152604401610465565b5050565b8035801515811461092657600080fd5b919050565b60008060006060848603121561094057600080fd5b83356002811061094f57600080fd5b92506020840135915061096460408501610916565b90509250925092565b80356001600160a01b038116811461092657600080fd5b6000806040838503121561099757600080fd5b6109a08361096d565b91506109ae6020840161096d565b90509250929050565b60008083601f8401126109c957600080fd5b50813567ffffffffffffffff8111156109e157600080fd5b6020830191508360208285010111156109f957600080fd5b9250929050565b600080600080600060608688031215610a1857600080fd5b85359450602086013567ffffffffffffffff811115610a3657600080fd5b610a42888289016109b7565b909550935050604086013567ffffffffffffffff811115610a6257600080fd5b610a6e888289016109b7565b969995985093965092949392505050565b60008060008060408587031215610a9557600080fd5b843567ffffffffffffffff811115610aac57600080fd5b610ab8878288016109b7565b909550935050602085013567ffffffffffffffff811115610ad857600080fd5b610ae4878288016109b7565b95989497509550505050565b60008060008060008060608789031215610b0957600080fd5b863567ffffffffffffffff811115610b2057600080fd5b610b2c89828a016109b7565b909750955050602087013567ffffffffffffffff811115610b4c57600080fd5b610b5889828a016109b7565b909550935050604087013567ffffffffffffffff811115610b7857600080fd5b610b8489828a016109b7565b979a9699509497509295939492505050565b60008060408385031215610ba957600080fd5b823591506109ae60208401610916565b600060208284031215610bcb57600080fd5b5035919050565b600080600080600060608688031215610bea57600080fd5b610bf38661096d565b9450602086013567ffffffffffffffff811115610a3657600080fd5b60008060408385031215610c2257600080fd5b610c2b8361096d565b91506109ae60208401610916565b634e487b7160e01b600052602160045260246000fd5b81835281816020850137506000828201602090810191909152601f909101601f19169091010190565b604081526000610c8c604083018688610c4f565b8281036020840152610c9f818587610c4f565b979650505050505050565b8082018082111561035357634e487b7160e01b600052601160045260246000fd5b606081526000610cdf60608301888a610c4f565b8281036020840152610cf2818789610c4f565b90508281036040840152610d07818587610c4f565b9998505050505050505050565b858152606060208201526000610d2e606083018688610c4f565b8281036040840152610d41818587610c4f565b9897505050505050505056' as Hex
+
+const PUBLISH_POST_ABI = [
+  {
+    type: 'function',
+    name: 'publishPost',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'body', type: 'string' },
+      { name: 'mediaCid', type: 'bytes' },
+    ],
+    outputs: [{ name: 'postId', type: 'uint256' }],
+  },
+] as const
+
+export type ProtocolInspection =
+  | { kind: 'ready' }
+  | { kind: 'deployable' }
+  | { kind: 'missing-factory' }
+  | { kind: 'unsafe-factory' }
+  | { kind: 'address-conflict' }
+
+export type TransactionReceipt = {
+  blockNumber: bigint
+  hash: Hash
+}
+
+function parseCode(value: unknown): Hex {
+  if (typeof value !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(value)) {
+    throw new Error('The wallet returned invalid contract code.')
+  }
+
+  return value.toLowerCase() as Hex
+}
+
+async function getCode(
+  provider: Eip1193Provider,
+  address: Address,
+): Promise<Hex> {
+  return parseCode(
+    await provider.request({
+      method: 'eth_getCode',
+      params: [address, 'latest'],
+    }),
+  )
+}
+
+export function assertProtocolConfiguration() {
+  if (keccak256(LIFEINVADER_INIT_CODE) !== INIT_CODE_HASH) {
+    throw new Error('The bundled Lifeinvader creation code does not match v1.')
+  }
+
+  const derivedAddress = getCreate2Address({
+    bytecodeHash: INIT_CODE_HASH,
+    from: FACTORY_ADDRESS,
+    salt: DEPLOYMENT_SALT,
+  })
+  if (derivedAddress !== PROTOCOL_ADDRESS) {
+    throw new Error(
+      'The bundled Lifeinvader deployment address does not match v1.',
+    )
+  }
+}
+
+export async function inspectProtocol(
+  provider: Eip1193Provider,
+): Promise<ProtocolInspection> {
+  const protocolCode = await getCode(provider, PROTOCOL_ADDRESS)
+
+  if (protocolCode !== '0x') {
+    return keccak256(protocolCode) === PROTOCOL_CODE_HASH
+      ? { kind: 'ready' }
+      : { kind: 'address-conflict' }
+  }
+
+  const factoryCode = await getCode(provider, FACTORY_ADDRESS)
+  if (factoryCode === '0x') return { kind: 'missing-factory' }
+  if (keccak256(factoryCode) !== FACTORY_CODE_HASH)
+    return { kind: 'unsafe-factory' }
+  return { kind: 'deployable' }
+}
+
+export async function switchToLocalChain(provider: Eip1193Provider) {
+  const chainId = `0x${LOCAL_CHAIN_ID.toString(16)}`
+
+  try {
+    await provider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId }],
+    })
+  } catch (error) {
+    if (getRpcErrorCode(error) !== 4902) throw error
+
+    await provider.request({
+      method: 'wallet_addEthereumChain',
+      params: [
+        {
+          chainId,
+          chainName: 'Lifeinvader Local (Anvil)',
+          nativeCurrency: { decimals: 18, name: 'Ether', symbol: 'ETH' },
+          rpcUrls: ['http://127.0.0.1:8545'],
+        },
+      ],
+    })
+
+    const selectedChainId = await provider.request({ method: 'eth_chainId' })
+    if (
+      typeof selectedChainId !== 'string' ||
+      selectedChainId.toLowerCase() !== chainId
+    ) {
+      await provider.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId }],
+      })
+    }
+  }
+}
+
+async function sendTransaction(
+  provider: Eip1193Provider,
+  transaction: { data: Hex; from: Address; to: Address },
+): Promise<Hash> {
+  return parseTransactionHash(
+    await provider.request({
+      method: 'eth_sendTransaction',
+      params: [transaction],
+    }),
+  )
+}
+
+function parseReceipt(
+  value: unknown,
+  hash: Hash,
+): TransactionReceipt | undefined {
+  if (value === null) return undefined
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('The wallet returned an invalid transaction receipt.')
+  }
+
+  const status = 'status' in value ? value.status : undefined
+  const blockNumber = 'blockNumber' in value ? value.blockNumber : undefined
+  if (status !== '0x0' && status !== '0x1') {
+    throw new Error('The wallet returned an invalid transaction status.')
+  }
+  if (typeof blockNumber !== 'string' || !/^0x[0-9a-f]+$/i.test(blockNumber)) {
+    throw new Error('The wallet returned an invalid receipt block number.')
+  }
+  if (status === '0x0') throw new Error('The transaction reverted on-chain.')
+
+  return { blockNumber: BigInt(blockNumber), hash }
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
+}
+
+export async function waitForTransactionReceipt(
+  provider: Eip1193Provider,
+  hash: Hash,
+  options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+): Promise<TransactionReceipt> {
+  const pollIntervalMs = options.pollIntervalMs ?? 1_000
+  const timeoutMs = options.timeoutMs ?? 120_000
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() <= deadline) {
+    const receipt = parseReceipt(
+      await provider.request({
+        method: 'eth_getTransactionReceipt',
+        params: [hash],
+      }),
+      hash,
+    )
+    if (receipt) return receipt
+    await delay(pollIntervalMs)
+  }
+
+  throw new Error('Timed out while waiting for the transaction receipt.')
+}
+
+export async function deployProtocol(
+  provider: Eip1193Provider,
+  account: Address,
+): Promise<TransactionReceipt> {
+  assertProtocolConfiguration()
+  const inspection = await inspectProtocol(provider)
+  if (inspection.kind === 'ready') {
+    throw new Error('Lifeinvader v1 is already deployed on this chain.')
+  }
+  if (inspection.kind !== 'deployable') {
+    throw new Error('This chain cannot safely deploy Lifeinvader v1.')
+  }
+
+  const hash = await sendTransaction(provider, {
+    data: concatHex([DEPLOYMENT_SALT, LIFEINVADER_INIT_CODE]),
+    from: account,
+    to: FACTORY_ADDRESS,
+  })
+  const receipt = await waitForTransactionReceipt(provider, hash)
+
+  if ((await inspectProtocol(provider)).kind !== 'ready') {
+    throw new Error(
+      'The deployment transaction did not install Lifeinvader v1.',
+    )
+  }
+
+  return receipt
+}
+
+export function getPostBodyByteLength(body: string): number {
+  return new TextEncoder().encode(body).length
+}
+
+export async function publishPost(
+  provider: Eip1193Provider,
+  account: Address,
+  body: string,
+): Promise<TransactionReceipt> {
+  const bodyLength = getPostBodyByteLength(body)
+  if (bodyLength === 0) throw new Error('Write something before publishing.')
+  if (bodyLength > MAX_POST_BODY_BYTES) {
+    throw new Error(`Posts are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`)
+  }
+  if ((await inspectProtocol(provider)).kind !== 'ready') {
+    throw new Error(
+      'Verified Lifeinvader v1 code is required before publishing.',
+    )
+  }
+
+  const hash = await sendTransaction(provider, {
+    data: encodeFunctionData({
+      abi: PUBLISH_POST_ABI,
+      functionName: 'publishPost',
+      args: [body, '0x'],
+    }),
+    from: account,
+    to: PROTOCOL_ADDRESS,
+  })
+  return waitForTransactionReceipt(provider, hash)
+}
