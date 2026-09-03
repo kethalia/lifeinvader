@@ -207,6 +207,23 @@ async function getCode(
   const timeout = () => new Error('Contract code inspection timed out.')
   return parseCode(await beforeDeadline(request, deadline, timeout))
 }
+
+export class TransactionSubmissionUnknownError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'The wallet did not return a transaction hash. It may still have broadcast the action; check wallet activity before trying again.',
+      { cause },
+    )
+    this.name = 'TransactionSubmissionUnknownError'
+  }
+}
+
+export function isTransactionSubmissionUnknownError(
+  error: unknown,
+): error is TransactionSubmissionUnknownError {
+  return error instanceof TransactionSubmissionUnknownError
+}
+
 export function assertProtocolConfiguration() {
   if (keccak256(LIFEINVADER_INIT_CODE) !== INIT_CODE_HASH) {
     throw new Error('The bundled Lifeinvader creation code does not match v1.')
@@ -442,8 +459,9 @@ async function sendTransaction(
     await verifyLocalChain(provider, localProvider)
     await guard.assertSubmission()
   }
-  const hash = parseTransactionHash(
-    await provider.request({
+  let hashValue: unknown
+  try {
+    hashValue = await provider.request({
       method: 'eth_sendTransaction',
       params: [
         {
@@ -451,8 +469,17 @@ async function sendTransaction(
           chainId: `0x${guard.chainId.toString(16)}`,
         },
       ],
-    }),
-  )
+    })
+  } catch (error) {
+    if (getRpcErrorCode(error) === 4001) throw error
+    throw new TransactionSubmissionUnknownError(error)
+  }
+  let hash: Hash
+  try {
+    hash = parseTransactionHash(hashValue)
+  } catch (error) {
+    throw new TransactionSubmissionUnknownError(error)
+  }
   onSubmitted?.(hash)
   await guard.assertSubmission()
   return hash
@@ -512,6 +539,7 @@ function expectedTopic(value: Address | bigint) {
 
 function hasExpectedProtocolLog(
   logs: unknown,
+  receipt: TransactionReceipt,
   expectedTopics: readonly (Hex | undefined)[],
   expectedData: Hex,
 ) {
@@ -522,10 +550,22 @@ function hasExpectedProtocolLog(
   return logs.some((log) => {
     if (typeof log !== 'object' || log === null) return false
     const { address, data, topics } = log as Record<string, unknown>
+    const blockHash = 'blockHash' in log ? log.blockHash : undefined
+    const blockNumber = 'blockNumber' in log ? log.blockNumber : undefined
+    const transactionHash =
+      'transactionHash' in log ? log.transactionHash : undefined
     return (
       typeof address === 'string' &&
       /^0x[0-9a-f]{40}$/i.test(address) &&
       address.toLowerCase() === PROTOCOL_ADDRESS.toLowerCase() &&
+      typeof blockHash === 'string' &&
+      blockHash.toLowerCase() === receipt.blockHash.toLowerCase() &&
+      typeof blockNumber === 'string' &&
+      blockNumber.length <= 66 &&
+      /^0x[0-9a-f]+$/i.test(blockNumber) &&
+      BigInt(blockNumber) === receipt.blockNumber &&
+      typeof transactionHash === 'string' &&
+      transactionHash.toLowerCase() === receipt.hash.toLowerCase() &&
       Array.isArray(topics) &&
       topics.length === expectedTopics.length &&
       topics.every(
@@ -543,7 +583,11 @@ function hasExpectedProtocolLog(
   })
 }
 
-export function assertExpectedPost(logs: unknown, expected: ExpectedPost) {
+export function assertExpectedPost(
+  logs: unknown,
+  expected: ExpectedPost,
+  receipt: TransactionReceipt,
+) {
   const expectedData = encodeAbiParameters(POST_DATA_PARAMETERS, [
     expected.body,
     expected.mediaCid,
@@ -551,6 +595,7 @@ export function assertExpectedPost(logs: unknown, expected: ExpectedPost) {
   if (
     !hasExpectedProtocolLog(
       logs,
+      receipt,
       [POST_PUBLISHED_TOPIC, undefined, expectedTopic(expected.author)],
       expectedData,
     )
@@ -562,6 +607,7 @@ export function assertExpectedPost(logs: unknown, expected: ExpectedPost) {
 export function assertExpectedPostAction(
   logs: unknown,
   expected: ExpectedPostAction,
+  receipt: TransactionReceipt,
 ) {
   const account = expectedTopic(expected.account)
   const postId = expectedTopic(expected.postId)
@@ -569,11 +615,13 @@ export function assertExpectedPostAction(
     expected.kind === 'repost'
       ? hasExpectedProtocolLog(
           logs,
+          receipt,
           [REPOST_PUBLISHED_TOPIC, postId, account],
           '0x',
         )
       : hasExpectedProtocolLog(
           logs,
+          receipt,
           [LIKE_SET_TOPIC, expectedTopic(0n), postId, account],
           encodeAbiParameters(LIKE_DATA_PARAMETERS, [expected.liked]),
         )
@@ -675,10 +723,10 @@ export async function waitForTransactionReceipt(
             throw new Error('The receipt did not deploy Lifeinvader v1.')
           }
           if (!reverted && options.expectedPost) {
-            assertExpectedPost(logs, options.expectedPost)
+            assertExpectedPost(logs, options.expectedPost, receipt)
           }
           if (!reverted && options.expectedPostAction) {
-            assertExpectedPostAction(logs, options.expectedPostAction)
+            assertExpectedPostAction(logs, options.expectedPostAction, receipt)
           }
           if (reverted) throw new TransactionRevertedError(hash)
           return receipt

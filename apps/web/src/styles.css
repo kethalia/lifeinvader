@@ -626,6 +626,11 @@ h1 span {
   font-weight: 800;
 }
 
+.stale-action-feedback {
+  border-style: dashed;
+  color: rgba(25, 24, 23, 0.72);
+}
+
 .empty-feed,
 .feed-placeholder {
   min-height: 220px;

@@ -16,6 +16,7 @@ import {
 import {
   createTransactionGuard,
   isTransactionRevertedError,
+  isTransactionSubmissionUnknownError,
   publishRepost,
   setPostLike,
   waitForTransactionReceipt,
@@ -60,24 +61,52 @@ function syncStatus(snapshot: PostFeedSnapshot) {
     : `Indexed through block ${snapshot.indexedThrough.toString()} of confirmed head ${snapshot.safeHead?.toString() ?? 'unknown'}.`
 }
 
-type SubmittedPostAction = {
+type PostActionContext = {
   chainId: bigint
   expected: ExpectedPostAction
-  hash: TransactionReceipt['hash']
   provider: Eip1193Provider
-  status: 'failed' | 'pending' | 'unknown'
+  walletName: string
 }
 
-type CompletedPostAction = {
-  chainId: bigint
-  expected: ExpectedPostAction
-  provider: Eip1193Provider
+type PostActionAttempt = PostActionContext & {
+  hash?: TransactionReceipt['hash']
+  id: number
+  status: 'ambiguous' | 'failed' | 'opening' | 'pending' | 'unknown'
+}
+
+type CompletedPostAction = PostActionContext & {
   receipt: TransactionReceipt
 }
+
+type PostActionProblem = PostActionContext & { message: string }
 
 function actionLabel(expected: ExpectedPostAction) {
   if (expected.kind === 'repost') return 'Repost'
   return expected.liked ? 'Like' : 'Unlike'
+}
+
+function actionContextMatchesSession(
+  context: PostActionContext,
+  session: WalletSession,
+) {
+  return (
+    session.status === 'connected' &&
+    context.provider === session.provider &&
+    context.chainId === session.chainId &&
+    context.expected.account.toLowerCase() === session.account?.toLowerCase()
+  )
+}
+
+function sameActionContext(
+  first: PostActionContext,
+  second: PostActionContext,
+) {
+  return (
+    first.provider === second.provider &&
+    first.chainId === second.chainId &&
+    first.expected.account.toLowerCase() ===
+      second.expected.account.toLowerCase()
+  )
 }
 
 export function PostFeedPanel({
@@ -116,12 +145,16 @@ export function PostFeedPanel({
     message?: string
     status: 'waiting' | 'stopped'
   }>()
-  const [busyPostAction, setBusyPostAction] = useState<ExpectedPostAction>()
-  const [completedPostAction, setCompletedPostAction] =
-    useState<CompletedPostAction>()
-  const [postActionError, setPostActionError] = useState<string>()
-  const [submittedPostAction, setSubmittedPostAction] =
-    useState<SubmittedPostAction>()
+  const [completedPostActions, setCompletedPostActions] = useState<
+    CompletedPostAction[]
+  >([])
+  const [postActionAttempts, setPostActionAttempts] = useState<
+    PostActionAttempt[]
+  >([])
+  const [postActionProblems, setPostActionProblems] = useState<
+    PostActionProblem[]
+  >([])
+  const actionSequence = useRef(0)
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const requestSequence = useRef(0)
   const connected =
@@ -155,20 +188,18 @@ export function PostFeedPanel({
     confirmation?.hash === includedPost.hash
       ? confirmation
       : undefined
-  const activeCompletedPostAction =
-    connected &&
-    completedPostAction !== undefined &&
-    completedPostAction.provider === session.provider &&
-    completedPostAction.chainId === session.chainId &&
-    completedPostAction.expected.account.toLowerCase() ===
-      session.account?.toLowerCase()
-      ? completedPostAction
-      : undefined
+  const activeCompletedPostAction = completedPostActions.findLast((action) =>
+    actionContextMatchesSession(action, session),
+  )
+  const activePostActionProblem = postActionProblems.findLast((problem) =>
+    actionContextMatchesSession(problem, session),
+  )
+  const activePostActionAttempts = postActionAttempts.filter((attempt) =>
+    actionContextMatchesSession(attempt, session),
+  )
   const postActionsLocked =
     session.account === undefined ||
-    busyPostAction !== undefined ||
-    (submittedPostAction !== undefined &&
-      submittedPostAction.status !== 'failed')
+    activePostActionAttempts.some((attempt) => attempt.status !== 'failed')
 
   const runSynchronization = useCallback(() => {
     const provider = session.provider
@@ -223,11 +254,6 @@ export function PostFeedPanel({
       activeRequest.current?.abort()
     }
   }, [connected, runSynchronization])
-
-  useEffect(() => {
-    setCompletedPostAction(undefined)
-    setPostActionError(undefined)
-  }, [session.account, session.chainId, session.provider])
 
   useEffect(() => {
     if (
@@ -293,24 +319,38 @@ export function PostFeedPanel({
       action === 'repost'
         ? { account, kind: 'repost', postId }
         : { account, kind: 'like', liked: action === 'like', postId }
-    let submittedHash: TransactionReceipt['hash'] | undefined
-    setBusyPostAction(expected)
-    setCompletedPostAction(undefined)
-    setPostActionError(undefined)
-    if (submittedPostAction?.status === 'failed') {
-      setSubmittedPostAction(undefined)
+    const context: PostActionContext = {
+      chainId,
+      expected,
+      provider,
+      walletName: session.name ?? 'Injected wallet',
     }
+    const attemptId = ++actionSequence.current
+    let submittedHash: TransactionReceipt['hash'] | undefined
+    setPostActionAttempts((current) => [
+      ...current.filter(
+        (attempt) =>
+          attempt.status !== 'failed' || !sameActionContext(attempt, context),
+      ),
+      { ...context, id: attemptId, status: 'opening' },
+    ])
+    setCompletedPostActions((current) =>
+      current.filter((completed) => !sameActionContext(completed, context)),
+    )
+    setPostActionProblems((current) =>
+      current.filter((problem) => !sameActionContext(problem, context)),
+    )
     const onSubmitted: TransactionSubmitted = (hash) => {
       submittedHash = hash
-      setSubmittedPostAction({
-        chainId,
-        expected,
-        hash,
-        provider,
-        status: 'pending',
-      })
+      setPostActionAttempts((current) =>
+        current.map((attempt) =>
+          attempt.id === attemptId
+            ? { ...attempt, hash, status: 'pending' }
+            : attempt,
+        ),
+      )
     }
-    const operation =
+    const operation = () =>
       action === 'repost'
         ? publishRepostAction(provider, account, chainId, postId, onSubmitted)
         : setPostLikeAction(
@@ -321,37 +361,85 @@ export function PostFeedPanel({
             action === 'like',
             onSubmitted,
           )
-    void operation
+    void Promise.resolve()
+      .then(operation)
       .then((receipt) => {
-        setCompletedPostAction({ chainId, expected, provider, receipt })
-        setSubmittedPostAction(undefined)
-      })
-      .catch((actionError: unknown) => {
-        if (submittedHash) {
-          setSubmittedPostAction({
-            chainId,
-            expected,
-            hash: submittedHash,
-            provider,
-            status: isTransactionRevertedError(actionError)
-              ? 'failed'
-              : 'unknown',
-          })
-        }
-        setPostActionError(
-          describeRpcError(actionError, 'The public post action failed.'),
+        setCompletedPostActions((current) =>
+          [
+            ...current.filter(
+              (completed) => !sameActionContext(completed, context),
+            ),
+            { ...context, receipt },
+          ].slice(-12),
+        )
+        setPostActionAttempts((current) =>
+          current.filter((attempt) => attempt.id !== attemptId),
         )
       })
-      .finally(() => setBusyPostAction(undefined))
+      .catch((actionError: unknown) => {
+        const recoverableStatus = submittedHash
+          ? isTransactionRevertedError(actionError)
+            ? 'failed'
+            : 'unknown'
+          : isTransactionSubmissionUnknownError(actionError)
+            ? 'ambiguous'
+            : undefined
+        setPostActionAttempts((current) =>
+          recoverableStatus
+            ? current.map((attempt) =>
+                attempt.id === attemptId
+                  ? {
+                      ...attempt,
+                      hash: submittedHash,
+                      status: recoverableStatus,
+                    }
+                  : attempt,
+              )
+            : current.filter((attempt) => attempt.id !== attemptId),
+        )
+        setPostActionProblems((current) =>
+          [
+            ...current.filter(
+              (problem) => !sameActionContext(problem, context),
+            ),
+            {
+              ...context,
+              message: describeRpcError(
+                actionError,
+                'The public post action failed.',
+              ),
+            },
+          ].slice(-12),
+        )
+      })
   }
 
-  const retryPostActionReceipt = () => {
-    const transaction = submittedPostAction
-    if (transaction?.status !== 'unknown' || busyPostAction) return
+  const retryPostActionReceipt = (transaction: PostActionAttempt) => {
+    const hash = transaction.hash
+    if (
+      transaction.status !== 'unknown' ||
+      !hash ||
+      !actionContextMatchesSession(transaction, session) ||
+      postActionAttempts.some(
+        (attempt) =>
+          attempt.id !== transaction.id &&
+          attempt.status !== 'failed' &&
+          sameActionContext(attempt, transaction),
+      )
+    ) {
+      return
+    }
     void (async () => {
-      setBusyPostAction(transaction.expected)
-      setPostActionError(undefined)
-      setSubmittedPostAction({ ...transaction, status: 'pending' })
+      setPostActionProblems((current) =>
+        current.filter((problem) => !sameActionContext(problem, transaction)),
+      )
+      setPostActionAttempts((current) =>
+        current.map((attempt) =>
+          attempt.id === transaction.id
+            ? { ...attempt, status: 'pending' }
+            : attempt,
+        ),
+      )
       try {
         if (session.provider !== transaction.provider) {
           throw new Error(
@@ -363,40 +451,61 @@ export function PostFeedPanel({
           transaction.expected.account,
           transaction.chainId,
         )
-        const receipt = await waitForActionReceipt(
-          transaction.provider,
-          transaction.hash,
-          {
-            assertCurrentChain: guard.assertSubmission,
-            assertUnchanged: guard.assertUnchanged,
-            expectedPostAction: transaction.expected,
-            selectedChainId: transaction.chainId,
-          },
-        ).finally(guard.release)
-        setCompletedPostAction({
-          chainId: transaction.chainId,
-          expected: transaction.expected,
-          provider: transaction.provider,
-          receipt,
-        })
-        setSubmittedPostAction(undefined)
+        const receipt = await waitForActionReceipt(transaction.provider, hash, {
+          assertCurrentChain: guard.assertSubmission,
+          assertUnchanged: guard.assertUnchanged,
+          expectedPostAction: transaction.expected,
+          selectedChainId: transaction.chainId,
+        }).finally(guard.release)
+        setCompletedPostActions((current) =>
+          [
+            ...current.filter(
+              (completed) => !sameActionContext(completed, transaction),
+            ),
+            { ...transaction, receipt },
+          ].slice(-12),
+        )
+        setPostActionAttempts((current) =>
+          current.filter((attempt) => attempt.id !== transaction.id),
+        )
       } catch (receiptError) {
-        setSubmittedPostAction({
-          ...transaction,
-          status: isTransactionRevertedError(receiptError)
-            ? 'failed'
-            : 'unknown',
-        })
-        setPostActionError(
-          describeRpcError(
-            receiptError,
-            'The public action receipt could not be read.',
+        setPostActionAttempts((current) =>
+          current.map((attempt) =>
+            attempt.id === transaction.id
+              ? {
+                  ...attempt,
+                  status: isTransactionRevertedError(receiptError)
+                    ? 'failed'
+                    : 'unknown',
+                }
+              : attempt,
           ),
         )
-      } finally {
-        setBusyPostAction(undefined)
+        setPostActionProblems((current) =>
+          [
+            ...current.filter(
+              (problem) => !sameActionContext(problem, transaction),
+            ),
+            {
+              ...transaction,
+              message: describeRpcError(
+                receiptError,
+                'The public action receipt could not be read.',
+              ),
+            },
+          ].slice(-12),
+        )
       }
     })()
+  }
+
+  const dismissPostAction = (transaction: PostActionAttempt) => {
+    setPostActionAttempts((current) =>
+      current.filter((attempt) => attempt.id !== transaction.id),
+    )
+    setPostActionProblems((current) =>
+      current.filter((problem) => !sameActionContext(problem, transaction)),
+    )
   }
 
   return (
@@ -452,44 +561,75 @@ export function PostFeedPanel({
             : activeConfirmation.message}
         </p>
       ) : null}
-      {postActionError ? (
+      {activePostActionProblem ? (
         <p className="error-message feed-feedback" role="alert">
-          {postActionError}
+          {activePostActionProblem.message}
         </p>
       ) : null}
-      {submittedPostAction ? (
-        <div className="feed-feedback" role="status">
-          <span>
-            {actionLabel(submittedPostAction.expected)} for post #
-            {submittedPostAction.expected.postId.toString()} submitted ·{' '}
-            <code title={submittedPostAction.hash}>
-              {shortValue(submittedPostAction.hash)}
-            </code>
-            .{' '}
-            {submittedPostAction.status === 'pending'
-              ? 'Waiting for an on-chain receipt…'
-              : submittedPostAction.status === 'failed'
-                ? 'Reverted on-chain. This hash is final.'
-                : 'Its final status is unknown. Check this hash before trying again.'}
-          </span>
-          {submittedPostAction.status === 'unknown' ? (
-            <div className="transaction-recovery-actions">
-              <button type="button" onClick={retryPostActionReceipt}>
-                Check action receipt again
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSubmittedPostAction(undefined)
-                  setPostActionError(undefined)
-                }}
-              >
-                I checked this hash
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {postActionAttempts.map((transaction) => {
+        const currentContext = actionContextMatchesSession(transaction, session)
+        return (
+          <div
+            className={`feed-feedback${currentContext ? '' : ' stale-action-feedback'}`}
+            key={transaction.id}
+            role="status"
+          >
+            <span>
+              {actionLabel(transaction.expected)} for post #
+              {transaction.expected.postId.toString()} on chain{' '}
+              {transaction.chainId.toString()} from{' '}
+              <code title={transaction.expected.account}>
+                {shortValue(transaction.expected.account)}
+              </code>{' '}
+              via {transaction.walletName}
+              {transaction.hash ? (
+                <>
+                  {' '}
+                  ·{' '}
+                  <code title={transaction.hash}>
+                    {shortValue(transaction.hash)}
+                  </code>
+                </>
+              ) : null}
+              .{' '}
+              {transaction.status === 'opening'
+                ? 'Opening the wallet…'
+                : transaction.status === 'pending'
+                  ? 'Waiting for an on-chain receipt…'
+                  : transaction.status === 'failed'
+                    ? 'Reverted on-chain. This hash is final.'
+                    : transaction.status === 'ambiguous'
+                      ? 'The wallet returned no hash, but may have broadcast it. Check wallet activity before trying again.'
+                      : 'Its final status is unknown. Check this hash before trying again.'}{' '}
+              {!currentContext
+                ? 'This belongs to another wallet context and does not lock the current feed.'
+                : null}
+            </span>
+            {transaction.status === 'unknown' ||
+            transaction.status === 'ambiguous' ||
+            transaction.status === 'failed' ? (
+              <div className="transaction-recovery-actions">
+                {transaction.status === 'unknown' && currentContext ? (
+                  <button
+                    type="button"
+                    onClick={() => retryPostActionReceipt(transaction)}
+                  >
+                    Check action receipt again
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => dismissPostAction(transaction)}
+                >
+                  {transaction.hash
+                    ? 'I checked this hash'
+                    : 'I checked my wallet'}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
       {activeCompletedPostAction ? (
         <p className="feed-feedback post-action-complete" role="status">
           {actionLabel(activeCompletedPostAction.expected)} for post #

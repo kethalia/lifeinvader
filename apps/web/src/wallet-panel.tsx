@@ -13,6 +13,7 @@ import {
   getPostBodyByteLength,
   inspectProtocol,
   isTransactionRevertedError,
+  isTransactionSubmissionUnknownError,
   LOCAL_CHAIN_ID,
   MAX_POST_BODY_BYTES,
   PROTOCOL_ADDRESS,
@@ -52,17 +53,20 @@ type SubmittedTransaction = {
   account: Address
   action: 'deploy' | 'post'
   chainId: bigint
-  hash: TransactionReceipt['hash']
+  hash?: TransactionReceipt['hash']
   postBody: string
   postMediaCid: Hex
   provider: Eip1193Provider
-  status: 'pending' | 'unknown' | 'failed'
+  status: 'ambiguous' | 'failed' | 'pending' | 'unknown'
+  walletName: string
 }
 function TransactionStatus({
+  currentContext,
   onDismiss,
   onRetry,
   transaction,
 }: {
+  currentContext: boolean
   onDismiss(): void
   onRetry(): void
   transaction: SubmittedTransaction
@@ -73,21 +77,49 @@ function TransactionStatus({
       ? 'Waiting for an on-chain receipt…'
       : transaction.status === 'failed'
         ? 'Reverted on-chain. This hash is final; you can safely try again.'
-        : 'Its final status is unknown. Check this hash before trying again.'
+        : transaction.status === 'ambiguous'
+          ? 'The wallet returned no hash, but may have broadcast it. Check wallet activity before trying again.'
+          : 'Its final status is unknown. Check this hash before trying again.'
   return (
     <div className="transaction-pending action-feedback" role="status">
       <span>
-        {label} submitted ·{' '}
-        <code title={transaction.hash}>{shortAddress(transaction.hash)}</code>.{' '}
-        {statusCopy}
+        {transaction.hash ? (
+          <>
+            {label} submitted on chain {transaction.chainId.toString()} from{' '}
+            <code title={transaction.account}>
+              {shortAddress(transaction.account)}
+            </code>{' '}
+            via {transaction.walletName} ·{' '}
+            <code title={transaction.hash}>
+              {shortAddress(transaction.hash)}
+            </code>
+            .{' '}
+          </>
+        ) : (
+          <>
+            {label} submission is ambiguous on chain{' '}
+            {transaction.chainId.toString()} from{' '}
+            <code title={transaction.account}>
+              {shortAddress(transaction.account)}
+            </code>{' '}
+            via {transaction.walletName}.{' '}
+          </>
+        )}
+        {statusCopy}{' '}
+        {!currentContext
+          ? 'This belongs to another wallet context and does not lock the current console.'
+          : null}
       </span>
-      {transaction.status === 'unknown' ? (
+      {transaction.status === 'unknown' ||
+      transaction.status === 'ambiguous' ? (
         <div className="transaction-recovery-actions">
-          <button type="button" onClick={onRetry}>
-            Check receipt again
-          </button>
+          {transaction.status === 'unknown' && currentContext ? (
+            <button type="button" onClick={onRetry}>
+              Check receipt again
+            </button>
+          ) : null}
           <button type="button" onClick={onDismiss}>
-            I checked this hash
+            {transaction.hash ? 'I checked this hash' : 'I checked my wallet'}
           </button>
         </div>
       ) : null}
@@ -204,6 +236,7 @@ export function WalletPanel({
             postMediaCid:
               action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
             provider: session.provider,
+            walletName: session.name ?? 'Injected wallet',
           }
         : undefined
     setBusyAction(action)
@@ -245,6 +278,14 @@ export function WalletPanel({
           ...submittedContext,
           hash: submittedHash,
           status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
+        })
+      } else if (
+        submittedContext &&
+        isTransactionSubmissionUnknownError(error)
+      ) {
+        setSubmittedTransaction({
+          ...submittedContext,
+          status: 'ambiguous',
         })
       }
       if (action !== 'chain') await refreshInspection()
@@ -298,7 +339,8 @@ export function WalletPanel({
   }
   const handleRetryReceipt = () => {
     const transaction = submittedTransaction
-    if (transaction?.status !== 'unknown') return
+    const hash = transaction?.hash
+    if (transaction?.status !== 'unknown' || !hash) return
     const provider = transaction.provider
     void (async () => {
       setBusyAction('receipt')
@@ -316,24 +358,20 @@ export function WalletPanel({
           transaction.account,
           transaction.chainId,
         )
-        const nextReceipt = await waitForTransactionReceipt(
-          provider,
-          transaction.hash,
-          {
-            assertCurrentChain: guard.assertSubmission,
-            assertUnchanged: guard.assertUnchanged,
-            expectedPost:
-              transaction.action === 'post'
-                ? {
-                    author: transaction.account,
-                    body: transaction.postBody,
-                    mediaCid: transaction.postMediaCid,
-                  }
-                : undefined,
-            expectProtocol: transaction.action === 'deploy',
-            selectedChainId: transaction.chainId,
-          },
-        ).finally(guard.release)
+        const nextReceipt = await waitForTransactionReceipt(provider, hash, {
+          assertCurrentChain: guard.assertSubmission,
+          assertUnchanged: guard.assertUnchanged,
+          expectedPost:
+            transaction.action === 'post'
+              ? {
+                  author: transaction.account,
+                  body: transaction.postBody,
+                  mediaCid: transaction.postMediaCid,
+                }
+              : undefined,
+          expectProtocol: transaction.action === 'deploy',
+          selectedChainId: transaction.chainId,
+        }).finally(guard.release)
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
         if (transaction.action === 'post') {
@@ -369,8 +407,15 @@ export function WalletPanel({
   const connected =
     session.status === 'connected' &&
     Boolean(session.account && session.provider)
-  const transactionWriteLocked =
+  const submittedTransactionMatchesSession =
     submittedTransaction !== undefined &&
+    session.status === 'connected' &&
+    submittedTransaction.provider === session.provider &&
+    submittedTransaction.chainId === session.chainId &&
+    submittedTransaction.account.toLowerCase() ===
+      session.account?.toLowerCase()
+  const transactionWriteLocked =
+    submittedTransactionMatchesSession &&
     submittedTransaction.status !== 'failed'
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
@@ -573,6 +618,7 @@ export function WalletPanel({
       ) : null}
       {submittedTransaction ? (
         <TransactionStatus
+          currentContext={submittedTransactionMatchesSession}
           transaction={submittedTransaction}
           onRetry={handleRetryReceipt}
           onDismiss={() => {

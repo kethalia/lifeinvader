@@ -177,6 +177,8 @@ describe('App', () => {
               logs: [
                 {
                   address: PROTOCOL_ADDRESS,
+                  blockHash: RECEIPT_BLOCK_HASH,
+                  blockNumber: '0x2a',
                   data: encodeAbiParameters(
                     [{ type: 'string' }, { type: 'bytes' }],
                     [body, MEDIA_CID.bytes],
@@ -186,6 +188,7 @@ describe('App', () => {
                     padHex(toHex(1n), { size: 32 }),
                     padHex(ACCOUNT, { size: 32 }),
                   ],
+                  transactionHash: TRANSACTION_HASH,
                 },
               ],
               status: '0x1',
@@ -233,6 +236,44 @@ describe('App', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
     expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(2)
+    stop()
+  })
+  it('locks posting when a wallet may broadcast without returning a hash', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') {
+          throw new Error('Provider response timed out.')
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    }
+    const stop = announceWallet('Ambiguous Wallet', 'ambiguous', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect ambiguous wallet/i,
+      }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Did this publish?' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+
+    const acknowledge = await screen.findByRole('button', {
+      name: /i checked my wallet/i,
+    })
+    expect(screen.getByText(/may have broadcast/i)).toBeTruthy()
+    expect(acknowledge.closest('.transaction-pending')?.textContent).toMatch(
+      /chain 1.*Ambiguous Wallet/i,
+    )
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect((textarea as HTMLTextAreaElement).value).toBe('Did this publish?')
+
+    fireEvent.click(acknowledge)
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     stop()
   })
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
