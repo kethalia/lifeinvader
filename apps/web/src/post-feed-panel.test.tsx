@@ -13,6 +13,12 @@ import { parseMediaCid } from './media-cid'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSnapshot } from './post-feed'
 import type { PostFeedConfirmationWaiter } from './post-feed-confirmation'
+import type { PostReactionProjectionReader } from './post-reaction-read-model'
+import type { PostReactionProjectionRunSnapshot } from './post-reaction-projection-run'
+import type {
+  PostReactionProjectionAnchor,
+  PostReactionStreamSnapshot,
+} from './post-reaction-stream'
 import {
   publishRepost,
   setPostLike,
@@ -27,6 +33,7 @@ import type { WalletSession } from './wallet-session'
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
+const REACTION_ANCHOR = { chainId: 1n } as PostReactionProjectionAnchor
 
 function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
   return {
@@ -67,6 +74,48 @@ function connectedSession(
     name: 'Test Wallet',
     provider,
     status: 'connected',
+  }
+}
+
+function reactionStream(): PostReactionStreamSnapshot {
+  return {
+    likes: {
+      cacheReset: false,
+      caughtUp: true,
+      head: 20n,
+      indexedThrough: 8n,
+      recentSignals: [],
+      safeHead: 8n,
+      scannedRanges: 1,
+    },
+    projectionAnchor: REACTION_ANCHOR,
+    reposts: {
+      cacheReset: false,
+      caughtUp: true,
+      head: 20n,
+      indexedThrough: 8n,
+      recentReposts: [],
+      safeHead: 8n,
+      scannedRanges: 1,
+    },
+  }
+}
+
+function reactionProjection(
+  phase: PostReactionProjectionRunSnapshot['phase'],
+): PostReactionProjectionRunSnapshot {
+  const complete = phase === 'complete'
+  return {
+    chainId: 1n,
+    head: 20n,
+    likes: { complete, logsProcessed: 2n, pagesScanned: 1n },
+    phase,
+    reposts: {
+      complete,
+      logsProcessed: complete ? 1n : 0n,
+      pagesScanned: complete ? 1n : 0n,
+    },
+    safeHead: 8n,
   }
 }
 
@@ -147,6 +196,72 @@ describe('PostFeedPanel', () => {
     expect(screen.getByText(/availability is not guaranteed/i)).toBeTruthy()
     expect(screen.getByText(/invalid media CID bytes/i)).toBeTruthy()
     expect(screen.getByText('0x0102')).toBeTruthy()
+  })
+
+  it('loads exact reaction totals through explicit bounded user steps', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizePostReactions = vi.fn().mockResolvedValue(reactionStream())
+    const run = {
+      advance: vi
+        .fn()
+        .mockResolvedValueOnce(reactionProjection('reposts'))
+        .mockResolvedValueOnce(reactionProjection('authenticate'))
+        .mockResolvedValueOnce(reactionProjection('complete')),
+      close: vi.fn(),
+      getSummary: vi.fn().mockReturnValue({
+        likeCount: 2n,
+        likedByAccount: true,
+        repostCount: 1n,
+      }),
+      snapshot: reactionProjection('likes'),
+    } satisfies PostReactionProjectionReader
+    const openReactionProjection = vi.fn().mockResolvedValue(run)
+    render(
+      <PostFeedPanel
+        openReactionProjection={openReactionProjection}
+        session={connectedSession(provider)}
+        synchronize={vi.fn().mockResolvedValue(snapshot([post('Count me.')]))}
+        synchronizePostReactions={synchronizePostReactions}
+      />,
+    )
+
+    expect(await screen.findByText('Count me.')).toBeTruthy()
+    expect(synchronizePostReactions).not.toHaveBeenCalled()
+    fireEvent.click(
+      screen.getByRole('button', { name: /load reaction counts/i }),
+    )
+    expect(
+      await screen.findByRole('button', {
+        name: /process next local reaction page/i,
+      }),
+    ).toBeTruthy()
+    expect(synchronizePostReactions).toHaveBeenCalledTimes(1)
+    expect(openReactionProjection).toHaveBeenCalledWith(REACTION_ANCHOR)
+
+    for (let step = 1; step <= 3; step += 1) {
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: /process next local reaction page/i,
+        }),
+      )
+      await waitFor(() => expect(run.advance).toHaveBeenCalledTimes(step))
+      if (step < 3) {
+        await screen.findByRole('button', {
+          name: /process next local reaction page/i,
+        })
+      }
+    }
+
+    expect(
+      await screen.findByRole('button', {
+        name: /check for newer reactions/i,
+      }),
+    ).toBeTruthy()
+    expect(screen.getByText(/exact through confirmed block 8/i)).toBeTruthy()
+    expect(
+      screen.getByText(/2 likes · 1 repost · You liked this/i),
+    ).toBeTruthy()
+    expect(run.getSummary).toHaveBeenCalledWith(1n, ACCOUNT)
   })
 
   it('submits explicit like, unlike, and repost events for a confirmed post', async () => {

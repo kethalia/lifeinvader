@@ -24,6 +24,12 @@ import {
   type TransactionReceipt,
   type TransactionSubmitted,
 } from './protocol'
+import {
+  usePostReactionReadModel,
+  type PostReactionProjectionOpener,
+  type PostReactionReadModelState,
+} from './post-reaction-read-model'
+import type { PostReactionStreamSynchronizer } from './post-reaction-stream'
 import type { WalletSession } from './wallet-session'
 
 function shortValue(value: string) {
@@ -59,6 +65,48 @@ function syncStatus(snapshot: PostFeedSnapshot) {
   return snapshot.indexedThrough === undefined
     ? 'The first bounded chain range is still waiting to be indexed.'
     : `Indexed through block ${snapshot.indexedThrough.toString()} of confirmed head ${snapshot.safeHead?.toString() ?? 'unknown'}.`
+}
+
+function reactionStatus(state: PostReactionReadModelState) {
+  if (state.phase === 'idle') {
+    return 'Reaction totals are not loaded. One request reads at most two bounded RPC ranges; exceptional cache repair is capped at 5,000 records per stream.'
+  }
+  if (state.phase === 'synchronizing') {
+    return 'Reading one bounded range for likes and one for reposts…'
+  }
+  if (state.phase === 'catchup') {
+    const likes = state.stream.likes.indexedThrough?.toString() ?? 'none'
+    const reposts = state.stream.reposts.indexedThrough?.toString() ?? 'none'
+    return `More confirmed reaction history remains. Likes indexed through ${likes}; reposts through ${reposts}.`
+  }
+  if (state.phase === 'projecting') {
+    const events =
+      state.projection.likes.logsProcessed +
+      state.projection.reposts.logsProcessed
+    const pages =
+      state.projection.likes.pagesScanned +
+      state.projection.reposts.pagesScanned
+    return `Local ${state.projection.phase} projection: ${events.toString()} events across ${pages.toString()} bounded pages.`
+  }
+  if (state.phase === 'complete') {
+    return state.projection.safeHead === undefined
+      ? 'Reaction totals are exact for the currently confirmed empty range.'
+      : `Reaction totals are exact through confirmed block ${state.projection.safeHead.toString()}.`
+  }
+  return state.message
+}
+
+function reactionButtonLabel(state: PostReactionReadModelState) {
+  if (state.phase === 'synchronizing') return 'Reading reactions…'
+  if (state.phase === 'catchup') return 'Load next reaction range'
+  if (state.phase === 'projecting') {
+    return state.busy
+      ? 'Processing reaction page…'
+      : 'Process next local reaction page'
+  }
+  if (state.phase === 'complete') return 'Check for newer reactions'
+  if (state.phase === 'failed') return 'Retry reaction counts'
+  return 'Load reaction counts'
 }
 
 type PostActionContext = {
@@ -111,18 +159,22 @@ function sameActionContext(
 
 export function PostFeedPanel({
   includedPost,
+  openReactionProjection,
   publishRepostAction = publishRepost,
   session,
   setPostLikeAction = setPostLike,
   synchronize = synchronizePostFeed,
+  synchronizePostReactions,
   waitForActionReceipt = waitForTransactionReceipt,
   waitForConfirmation = waitForPostFeedConfirmation,
 }: {
   includedPost?: IncludedPost
+  openReactionProjection?: PostReactionProjectionOpener
   publishRepostAction?: typeof publishRepost
   session: WalletSession
   setPostLikeAction?: typeof setPostLike
   synchronize?: PostFeedSynchronizer
+  synchronizePostReactions?: PostReactionStreamSynchronizer
   waitForActionReceipt?: typeof waitForTransactionReceipt
   waitForConfirmation?: PostFeedConfirmationWaiter
 }) {
@@ -154,6 +206,10 @@ export function PostFeedPanel({
   const [postActionProblems, setPostActionProblems] = useState<
     PostActionProblem[]
   >([])
+  const reactionModel = usePostReactionReadModel(session, {
+    openProjection: openReactionProjection,
+    synchronize: synchronizePostReactions,
+  })
   const actionSequence = useRef(0)
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const requestSequence = useRef(0)
@@ -551,6 +607,35 @@ export function PostFeedPanel({
           The disposable local cache was rebuilt before this range was read.
         </p>
       ) : null}
+      {connected ? (
+        <div
+          className={`feed-feedback reaction-read-model${reactionModel.state.phase === 'failed' ? ' error-message' : ''}`}
+        >
+          <div>
+            <strong>On-chain reaction ledger</strong>
+            <p
+              role={reactionModel.state.phase === 'failed' ? 'alert' : 'status'}
+            >
+              {reactionStatus(reactionModel.state)}
+            </p>
+          </div>
+          <button
+            disabled={
+              reactionModel.state.phase === 'synchronizing' ||
+              (reactionModel.state.phase === 'projecting' &&
+                reactionModel.state.busy)
+            }
+            onClick={
+              reactionModel.state.phase === 'projecting'
+                ? reactionModel.advanceProjection
+                : reactionModel.loadNextRange
+            }
+            type="button"
+          >
+            {reactionButtonLabel(reactionModel.state)}
+          </button>
+        </div>
+      ) : null}
       {activeConfirmation ? (
         <p
           className={`feed-feedback${activeConfirmation.status === 'stopped' ? ' error-message' : ''}`}
@@ -640,60 +725,79 @@ export function PostFeedPanel({
 
       {snapshot?.posts.length ? (
         <ol className="post-list" aria-busy={loading}>
-          {snapshot.posts.map((post) => (
-            <li key={`${post.blockHash}:${post.logIndex}`}>
-              <article className="post-card">
-                <header>
-                  <p>
-                    <span title={post.author}>{shortValue(post.author)}</span>
-                    <span>Post #{post.postId.toString()}</span>
-                  </p>
-                  <p>
-                    Block {post.blockNumber.toString()} ·{' '}
-                    <code title={post.transactionHash}>
-                      {shortValue(post.transactionHash)}
-                    </code>
-                  </p>
-                </header>
-                {post.body ? <p className="post-body">{post.body}</p> : null}
-                {post.mediaCid !== '0x' ? (
-                  <MediaCommitment value={post.mediaCid} />
-                ) : null}
-                <div
-                  aria-label={`Public actions for post ${post.postId.toString()}`}
-                  className="post-actions"
-                >
-                  <div>
-                    <button
-                      aria-label={`Record like for post ${post.postId.toString()}`}
-                      disabled={postActionsLocked}
-                      onClick={() => runPostAction(post.postId, 'like')}
-                      type="button"
-                    >
-                      Like
-                    </button>
-                    <button
-                      aria-label={`Record unlike for post ${post.postId.toString()}`}
-                      disabled={postActionsLocked}
-                      onClick={() => runPostAction(post.postId, 'unlike')}
-                      type="button"
-                    >
-                      Unlike
-                    </button>
-                    <button
-                      aria-label={`Repost post ${post.postId.toString()}`}
-                      disabled={postActionsLocked}
-                      onClick={() => runPostAction(post.postId, 'repost')}
-                      type="button"
-                    >
-                      Repost
-                    </button>
+          {snapshot.posts.map((post) => {
+            const reactionSummary = reactionModel.getSummary(
+              post.postId,
+              session.account,
+            )
+            return (
+              <li key={`${post.blockHash}:${post.logIndex}`}>
+                <article className="post-card">
+                  <header>
+                    <p>
+                      <span title={post.author}>{shortValue(post.author)}</span>
+                      <span>Post #{post.postId.toString()}</span>
+                    </p>
+                    <p>
+                      Block {post.blockNumber.toString()} ·{' '}
+                      <code title={post.transactionHash}>
+                        {shortValue(post.transactionHash)}
+                      </code>
+                    </p>
+                  </header>
+                  {post.body ? <p className="post-body">{post.body}</p> : null}
+                  {post.mediaCid !== '0x' ? (
+                    <MediaCommitment value={post.mediaCid} />
+                  ) : null}
+                  <div
+                    aria-label={`Public actions for post ${post.postId.toString()}`}
+                    className="post-actions"
+                  >
+                    {reactionSummary ? (
+                      <p className="post-reaction-summary">
+                        {reactionSummary.likeCount.toString()}{' '}
+                        {reactionSummary.likeCount === 1n ? 'like' : 'likes'} ·{' '}
+                        {reactionSummary.repostCount.toString()}{' '}
+                        {reactionSummary.repostCount === 1n
+                          ? 'repost'
+                          : 'reposts'}
+                        {reactionSummary.likedByAccount
+                          ? ' · You liked this.'
+                          : ''}
+                      </p>
+                    ) : null}
+                    <div>
+                      <button
+                        aria-label={`Record like for post ${post.postId.toString()}`}
+                        disabled={postActionsLocked}
+                        onClick={() => runPostAction(post.postId, 'like')}
+                        type="button"
+                      >
+                        Like
+                      </button>
+                      <button
+                        aria-label={`Record unlike for post ${post.postId.toString()}`}
+                        disabled={postActionsLocked}
+                        onClick={() => runPostAction(post.postId, 'unlike')}
+                        type="button"
+                      >
+                        Unlike
+                      </button>
+                      <button
+                        aria-label={`Repost post ${post.postId.toString()}`}
+                        disabled={postActionsLocked}
+                        onClick={() => runPostAction(post.postId, 'repost')}
+                        type="button"
+                      >
+                        Repost
+                      </button>
+                    </div>
+                    <p>Each click appends another public on-chain event.</p>
                   </div>
-                  <p>Each click appends another public on-chain event.</p>
-                </div>
-              </article>
-            </li>
-          ))}
+                </article>
+              </li>
+            )
+          })}
         </ol>
       ) : snapshot ? (
         <p className="empty-feed">
