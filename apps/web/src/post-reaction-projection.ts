@@ -89,6 +89,20 @@ function copyPosition(position: PostReactionProjectionPosition) {
   return { ...position }
 }
 
+function assertCompatibleStreamPositions(
+  next: PostReactionProjectionPosition | undefined,
+  other: PostReactionProjectionPosition | undefined,
+) {
+  if (
+    next &&
+    other &&
+    next.blockNumber === other.blockNumber &&
+    next.blockHash !== other.blockHash
+  ) {
+    throw projectionError('stream progress block hash')
+  }
+}
+
 function normalizePosition(
   value: unknown,
   label: string,
@@ -418,6 +432,7 @@ export class PostReactionProjection {
       activeChanges.set(likeKey, event.liked)
       countChanges.set(postKey, count)
     }
+    assertCompatibleStreamPositions(page.last, this.#lastRepost)
     for (const [likeKey, liked] of activeChanges) {
       if (liked) this.#activeLikes.add(likeKey)
       else this.#activeLikes.delete(likeKey)
@@ -443,6 +458,7 @@ export class PostReactionProjection {
         countChanges.get(postKey) ?? this.#repostCounts.get(postKey) ?? 0n
       countChanges.set(postKey, count + 1n)
     }
+    assertCompatibleStreamPositions(page.last, this.#lastLike)
     for (const [postKey, count] of countChanges) {
       this.#repostCounts.set(postKey, count)
     }

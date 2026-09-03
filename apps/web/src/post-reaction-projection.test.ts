@@ -341,6 +341,34 @@ describe('post reaction projection', () => {
     expect(projection.progress).toEqual(progress)
   })
 
+  it('rejects conflicting cross-stream tails before changing state', () => {
+    const likesFirst = new PostReactionProjection()
+    likesFirst.applyLikeLogs([likeLog(2n)])
+    const likesFirstSnapshot = likesFirst.snapshot
+    expect(() =>
+      likesFirst.applyRepostLogs([
+        {
+          ...repostLog(2n),
+          blockHash: hash('conflicting repost fork'),
+        },
+      ]),
+    ).toThrow(/stream progress block hash/i)
+    expect(likesFirst.snapshot).toEqual(likesFirstSnapshot)
+
+    const repostsFirst = new PostReactionProjection()
+    repostsFirst.applyRepostLogs([repostLog(2n)])
+    const repostsFirstSnapshot = repostsFirst.snapshot
+    expect(() =>
+      repostsFirst.applyLikeLogs([
+        {
+          ...likeLog(2n),
+          blockHash: hash('conflicting like fork'),
+        },
+      ]),
+    ).toThrow(/stream progress block hash/i)
+    expect(repostsFirst.snapshot).toEqual(repostsFirstSnapshot)
+  })
+
   it('requires strict order and complete-block page boundaries', () => {
     const projection = new PostReactionProjection()
     expect(() => projection.applyLikeLogs([likeLog(2n), likeLog(1n)])).toThrow(
