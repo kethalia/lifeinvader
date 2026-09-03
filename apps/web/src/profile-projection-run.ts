@@ -1,7 +1,9 @@
 import type { Address } from 'viem'
 import {
   openEventCache,
+  validateEventCacheScanBaseline,
   type BrowserEventCache,
+  type EventCacheDerivedStateBinding,
   type EventCachePosition,
   type EventCacheScanBaseline,
   type EventCacheScanCursor,
@@ -13,6 +15,7 @@ import {
   type EventCursor,
 } from './event-indexer'
 import {
+  getProfileProjectionSnapshotDigest,
   ProfileProjection,
   type ProfileProjectionPosition,
   type ProfileProjectionSnapshot,
@@ -45,6 +48,13 @@ export type ProfileProjectionRunSnapshot = {
 
 export type OpenProfileProjectionRunOptions = ProfileStreamStorageOptions & {
   pageSize?: number
+  resume?: ProfileProjectionResumeState
+}
+
+export type ProfileProjectionResumeState = {
+  baseline: EventCacheScanBaseline
+  binding: EventCacheDerivedStateBinding
+  projection: ProfileProjectionSnapshot
 }
 
 type NormalizedProjectionAnchor = {
@@ -53,6 +63,12 @@ type NormalizedProjectionAnchor = {
   head: bigint
   issued: ProfileProjectionAnchor
   safeHead?: bigint
+}
+
+type NormalizedProjectionResume = {
+  baseline: EventCacheScanBaseline
+  binding: EventCacheDerivedStateBinding
+  projection: ProfileProjection
 }
 
 function projectionRunError(message: string) {
@@ -93,6 +109,10 @@ function copyBaseline(baseline: EventCacheScanBaseline) {
   }
 }
 
+function copyBinding(binding: EventCacheDerivedStateBinding) {
+  return { ...binding }
+}
+
 function sameCursor(first: EventCursor, second: EventCursor) {
   return (
     first.chainId === second.chainId &&
@@ -127,6 +147,29 @@ function sameCachePosition(
     first.generation === second.generation &&
     first.revision === second.revision &&
     sameCursor(first.cursor, second.cursor)
+  )
+}
+
+function sameAccounts(first: readonly Address[], second: readonly Address[]) {
+  return (
+    first.length === second.length &&
+    first.every(
+      (account, index) =>
+        account.toLowerCase() === second[index]?.toLowerCase(),
+    )
+  )
+}
+
+function sameCheckpoint(
+  first: { blockHash: string; blockNumber: bigint } | undefined,
+  second: { blockHash: string; blockNumber: bigint } | undefined,
+) {
+  return (
+    first === second ||
+    (first !== undefined &&
+      second !== undefined &&
+      first.blockHash === second.blockHash &&
+      first.blockNumber === second.blockNumber)
   )
 }
 
@@ -212,6 +255,78 @@ function getSeed(position: EventCachePosition): EventCursor {
   }
 }
 
+function normalizeResume(
+  value: unknown,
+  anchor: NormalizedProjectionAnchor,
+  requested: ProfileProjection,
+): NormalizedProjectionResume | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw projectionRunError('resume state')
+  let projection: ProfileProjection
+  let baseline: EventCacheScanBaseline
+  try {
+    projection = ProfileProjection.fromSnapshot(value.projection)
+    baseline = validateEventCacheScanBaseline(
+      value.baseline,
+      getSeed(anchor.profiles),
+    )
+  } catch {
+    throw projectionRunError('resume state')
+  }
+  if (!sameAccounts(requested.trackedAccounts, projection.trackedAccounts)) {
+    throw projectionRunError('resume accounts')
+  }
+  if (!isRecord(value.binding)) {
+    throw projectionRunError('resume binding')
+  }
+  const { digest, proof } = value.binding
+  if (
+    typeof digest !== 'string' ||
+    !/^0x[0-9a-f]{64}$/.test(digest) ||
+    typeof proof !== 'string' ||
+    !/^0x[0-9a-f]{64}$/.test(proof)
+  ) {
+    throw projectionRunError('resume binding')
+  }
+  const binding = { digest, proof } as EventCacheDerivedStateBinding
+  if (getProfileProjectionSnapshotDigest(projection.snapshot) !== digest) {
+    throw projectionRunError('resume projection digest')
+  }
+  if (
+    baseline.generation !== anchor.profiles.generation ||
+    baseline.revision > anchor.profiles.revision ||
+    baseline.cursor.nextBlock > anchor.profiles.cursor.nextBlock ||
+    (baseline.revision === anchor.profiles.revision &&
+      !sameCursor(baseline.cursor, anchor.profiles.cursor))
+  ) {
+    throw projectionRunError('resume baseline')
+  }
+  const checkpoint = baseline.cursor.checkpoints.at(-1)
+  if (
+    baseline.cursor.nextBlock === baseline.cursor.startBlock
+      ? checkpoint !== undefined || projection.confirmedThrough !== undefined
+      : checkpoint === undefined ||
+        checkpoint.blockNumber !== baseline.cursor.nextBlock - 1n ||
+        !sameCheckpoint(checkpoint, projection.confirmedThrough) ||
+        !anchor.profiles.cursor.checkpoints.some((current) =>
+          sameCheckpoint(current, checkpoint),
+        )
+  ) {
+    throw projectionRunError('resume confirmation')
+  }
+  const progress = projection.progress
+  if (
+    baseline.last === undefined
+      ? progress !== undefined || baseline.logCount !== 0
+      : progress === undefined ||
+        baseline.last.blockNumber !== progress.blockNumber ||
+        baseline.last.logIndex !== progress.logIndex
+  ) {
+    throw projectionRunError('resume tail')
+  }
+  return { baseline, binding, projection }
+}
+
 function assertPageShape(page: EventCacheScanPage) {
   if (page.reset) throw projectionRunError('cache reset')
   if (page.complete) {
@@ -229,8 +344,10 @@ export class ProfileProjectionRun {
   readonly #anchor: NormalizedProjectionAnchor
   readonly #pageSize: number
   readonly #projection: ProfileProjection
+  readonly #initialLogCount: number
   #advancing = false
   #baseline?: EventCacheScanBaseline
+  #binding?: EventCacheDerivedStateBinding
   #cache?: BrowserEventCache
   #continuation?: EventCacheScanCursor
   #failure?: Error
@@ -238,17 +355,21 @@ export class ProfileProjectionRun {
   #logsProcessed = 0n
   #pagesScanned = 0n
   #phase: ProfileProjectionRunPhase = 'profiles'
+  #scanBaseline?: EventCacheScanBaseline
 
   private constructor(
     anchor: NormalizedProjectionAnchor,
     pageSize: number,
     projection: ProfileProjection,
     cache: BrowserEventCache,
+    resume?: NormalizedProjectionResume,
   ) {
     this.#anchor = anchor
     this.#pageSize = pageSize
     this.#projection = projection
     this.#cache = cache
+    this.#initialLogCount = resume?.baseline.logCount ?? 0
+    this.#scanBaseline = resume ? copyBaseline(resume.baseline) : undefined
   }
 
   static async open(
@@ -266,14 +387,30 @@ export class ProfileProjectionRun {
     ) {
       throw projectionRunError('page size')
     }
-    const projection = new ProfileProjection(accountsValue)
+    const requested = new ProfileProjection(accountsValue)
+    const resume = normalizeResume(optionsValue.resume, anchor, requested)
+    const projection = resume?.projection ?? requested
     const cache = await openEventCache({
       databaseName: optionsValue.databaseName,
       factory: optionsValue.factory,
       filter: PROFILE_SET_FILTER,
       keyRange: optionsValue.keyRange,
     })
-    return new ProfileProjectionRun(anchor, pageSize, projection, cache)
+    try {
+      if (resume) {
+        await cache.authenticateDerivedState(resume.baseline, resume.binding)
+      }
+      return new ProfileProjectionRun(
+        anchor,
+        pageSize,
+        projection,
+        cache,
+        resume,
+      )
+    } catch (error) {
+      cache.close()
+      throw error
+    }
   }
 
   get snapshot(): ProfileProjectionRunSnapshot {
@@ -307,6 +444,17 @@ export class ProfileProjectionRun {
       throw new Error('The profile projection is not complete.')
     }
     return this.#projection.snapshot
+  }
+
+  get resumeState(): ProfileProjectionResumeState {
+    if (this.#phase !== 'complete' || !this.#baseline || !this.#binding) {
+      throw new Error('The profile projection is not complete.')
+    }
+    return {
+      baseline: copyBaseline(this.#baseline),
+      binding: copyBinding(this.#binding),
+      projection: this.#projection.snapshot,
+    }
   }
 
   get trackedAccounts() {
@@ -347,6 +495,7 @@ export class ProfileProjectionRun {
     this.#advancing = true
     try {
       const page = await cache.scan(getSeed(this.#anchor.profiles), {
+        baseline: this.#continuation ? undefined : this.#scanBaseline,
         continuation: this.#continuation,
         limit: this.#pageSize,
         resetOnCorruption: false,
@@ -376,7 +525,9 @@ export class ProfileProjectionRun {
     this.#interruption.abort()
     this.#projection.reset()
     this.#baseline = undefined
+    this.#binding = undefined
     this.#continuation = undefined
+    this.#scanBaseline = undefined
     this.#closeCache()
   }
 
@@ -386,6 +537,7 @@ export class ProfileProjectionRun {
       throw projectionRunError('cache anchor')
     }
     this.#projection.applyLogs(page.logs)
+    this.#scanBaseline = undefined
     this.#logsProcessed += BigInt(page.logs.length)
     this.#pagesScanned += 1n
     if (!page.complete) {
@@ -396,7 +548,8 @@ export class ProfileProjectionRun {
     const progress = this.#projection.progress
     if (
       !sameCachePosition(baseline, this.#anchor.profiles) ||
-      BigInt(baseline.logCount) !== this.#logsProcessed
+      BigInt(baseline.logCount) !==
+        BigInt(this.#initialLogCount) + this.#logsProcessed
     ) {
       throw projectionRunError('completed baseline')
     }
@@ -432,19 +585,22 @@ export class ProfileProjectionRun {
       throw new Error('The profile projection run is closed.')
     }
     if (currentPhase !== 'authenticate') throw projectionRunError('phase')
+    if (this.#anchor.safeHead !== undefined) {
+      const checkpoint = this.#anchor.profiles.cursor.checkpoints.at(-1)
+      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
+        throw projectionRunError('confirmed projection boundary')
+      }
+      this.#projection.confirmThrough(checkpoint)
+    }
+    const digest = getProfileProjectionSnapshotDigest(this.#projection.snapshot)
+    let binding: EventCacheDerivedStateBinding | undefined
     await authenticateIssuedProfileProjectionAnchor(
       this.#anchor.issued,
       async () => {
         if (this.#readPhase() !== 'authenticate') {
           throw new Error('The profile projection run is closed.')
         }
-        await cache.authenticateBaselines([
-          {
-            baseline,
-            filter: PROFILE_SET_FILTER,
-            seed: getSeed(this.#anchor.profiles),
-          },
-        ])
+        binding = await cache.bindDerivedState(baseline, digest)
         if (this.#readPhase() !== 'authenticate') {
           throw new Error('The profile projection run is closed.')
         }
@@ -456,13 +612,8 @@ export class ProfileProjectionRun {
       throw new Error('The profile projection run is closed.')
     }
     if (currentPhase !== 'authenticate') throw projectionRunError('phase')
-    if (this.#anchor.safeHead !== undefined) {
-      const checkpoint = this.#anchor.profiles.cursor.checkpoints.at(-1)
-      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
-        throw projectionRunError('confirmed projection boundary')
-      }
-      this.#projection.confirmThrough(checkpoint)
-    }
+    if (!binding) throw projectionRunError('derived state binding')
+    this.#binding = copyBinding(binding)
     this.#closeCache()
     this.#phase = 'complete'
   }
@@ -473,7 +624,9 @@ export class ProfileProjectionRun {
     this.#interruption.abort()
     this.#projection.reset()
     this.#baseline = undefined
+    this.#binding = undefined
     this.#continuation = undefined
+    this.#scanBaseline = undefined
     this.#closeCache()
   }
 

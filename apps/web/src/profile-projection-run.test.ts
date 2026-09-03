@@ -221,6 +221,7 @@ async function prepareProjection(logs: readonly IndexedEventLog[]) {
   return {
     anchor: synchronized.projectionAnchor,
     control,
+    provider,
     storage: storageOptions,
   }
 }
@@ -255,6 +256,7 @@ describe('profile projection run', () => {
     expect(() => run.progress).toThrow(/not complete/i)
     expect(() => run.projectionSnapshot).toThrow(/not complete/i)
     expect(() => run.baseline).toThrow(/not complete/i)
+    expect(() => run.resumeState).toThrow(/not complete/i)
 
     await run.advance()
     expect(run.snapshot).toMatchObject({
@@ -308,6 +310,11 @@ describe('profile projection run', () => {
       ],
     })
     expect(run.baseline.logCount).toBe(3)
+    expect(run.resumeState).toMatchObject({
+      baseline: { logCount: 3 },
+      binding: { digest: expect.stringMatching(/^0x[0-9a-f]{64}$/) },
+      projection: { profiles: expect.any(Array) },
+    })
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
     expect(run.getProfile(ACCOUNT_A)?.displayName).toBe('Current A')
@@ -632,6 +639,10 @@ describe('profile projection run', () => {
     const baseline = run.baseline
     baseline.cursor.checkpoints[0]!.blockNumber = 99n
     baseline.last!.logIndex = 99
+    const resume = run.resumeState
+    resume.baseline.logCount = 99
+    resume.binding.proof = hash('mutated binding')
+    resume.projection.profiles[0]!.bio = 'mutated resume'
     expect(run.getProfile(ACCOUNT_A)).toMatchObject({
       bio: 'Original bio',
       displayName: 'Original name',
@@ -640,6 +651,9 @@ describe('profile projection run', () => {
     expect(run.progress?.logIndex).toBe(0)
     expect(run.baseline.cursor.checkpoints[0]!.blockNumber).toBe(SAFE_HEAD)
     expect(run.baseline.last).toEqual({ blockNumber: 1n, logIndex: 0 })
+    expect(run.resumeState.baseline.logCount).toBe(1)
+    expect(run.resumeState.binding.proof).not.toBe(hash('mutated binding'))
+    expect(run.resumeState.projection.profiles[0]?.bio).toBe('Original bio')
 
     const cache = await openEventCache({
       ...prepared.storage,
@@ -652,6 +666,133 @@ describe('profile projection run', () => {
     } finally {
       cache.close()
     }
+  })
+
+  it('authenticates a saved projection and scans only appended events', async () => {
+    const prepared = await prepareProjection([
+      profileLog(1n, { displayName: 'Old A' }),
+      profileLog(2n, { account: ACCOUNT_B, displayName: 'Current B' }),
+      profileLog(3n, { displayName: 'Current A' }),
+    ])
+    const first = await openProfileProjectionRun(
+      prepared.anchor,
+      [ACCOUNT_A, ACCOUNT_B],
+      prepared.storage,
+    )
+    await first.advance()
+    await first.advance()
+    const resume = first.resumeState
+
+    const cache = await openEventCache({
+      ...prepared.storage,
+      filter: PROFILE_SET_FILTER,
+    })
+    try {
+      const seed = seedCursor()
+      const current = await cache.readLatest(seed)
+      const safeHead = 7n
+      const cursor = {
+        ...current.cursor,
+        checkpoints: [
+          ...current.cursor.checkpoints,
+          { blockHash: blockHash(safeHead), blockNumber: safeHead },
+        ],
+        nextBlock: safeHead + 1n,
+      } satisfies EventCursor
+      await cache.apply(current, {
+        caughtUp: true,
+        cursor,
+        head: 19n,
+        logs: [profileLog(6n, { displayName: 'Delta A' })],
+        safeHead,
+        scannedRanges: 1,
+      })
+    } finally {
+      cache.close()
+    }
+    prepared.control.head = 19n
+    const synchronized = await synchronizeProfileStream(prepared.provider, 1n, {
+      storage: prepared.storage,
+    })
+    if (!synchronized.projectionAnchor) {
+      throw new Error('The updated stream did not issue a projection anchor.')
+    }
+
+    const resumed = await openProfileProjectionRun(
+      synchronized.projectionAnchor,
+      [ACCOUNT_A, ACCOUNT_B],
+      { ...prepared.storage, pageSize: 1, resume },
+    )
+    expect(resumed.snapshot).toMatchObject({
+      logsProcessed: 0n,
+      pagesScanned: 0n,
+      profilesRetained: 2n,
+      phase: 'profiles',
+      safeHead: 7n,
+    })
+    expect(() => resumed.getProfile(ACCOUNT_A)).toThrow(/not complete/i)
+
+    await resumed.advance()
+    expect(resumed.snapshot).toMatchObject({
+      logsProcessed: 1n,
+      pagesScanned: 1n,
+      profilesRetained: 2n,
+      phase: 'authenticate',
+    })
+    await resumed.advance()
+
+    expect(resumed.getProfile(ACCOUNT_A)).toMatchObject({
+      blockNumber: 6n,
+      displayName: 'Delta A',
+    })
+    expect(resumed.getProfile(ACCOUNT_B)?.displayName).toBe('Current B')
+    expect(resumed.baseline.logCount).toBe(4)
+    expect(resumed.projectionSnapshot.confirmedThrough).toEqual({
+      blockHash: blockHash(7n),
+      blockNumber: 7n,
+    })
+    expect(resumed.resumeState.binding.digest).not.toBe(resume.binding.digest)
+  })
+
+  it('rejects edited or mismatched saved projections before publication', async () => {
+    const prepared = await prepareProjection([profileLog(1n)])
+    const run = await openProfileProjectionRun(
+      prepared.anchor,
+      [ACCOUNT_A],
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    const resume = run.resumeState
+    const editedProjection = {
+      ...resume.projection,
+      profiles: resume.projection.profiles.map((profile) => ({
+        ...profile,
+        displayName: 'Edited',
+      })),
+    }
+
+    await expect(
+      openProfileProjectionRun(prepared.anchor, [ACCOUNT_A], {
+        ...prepared.storage,
+        resume: { ...resume, projection: editedProjection },
+      }),
+    ).rejects.toThrow(/resume projection digest/i)
+    await expect(
+      openProfileProjectionRun(prepared.anchor, [ACCOUNT_A], {
+        ...prepared.storage,
+        resume: {
+          ...resume,
+          binding: { ...resume.binding, proof: hash('edited proof') },
+        },
+      }),
+    ).rejects.toThrow(/derived state binding changed or is corrupt/i)
+    await expect(
+      openProfileProjectionRun(prepared.anchor, [ACCOUNT_B], {
+        ...prepared.storage,
+        resume,
+      }),
+    ).rejects.toThrow(/resume accounts/i)
   })
 
   it('rejects overlapping advances and discards state when closed', async () => {

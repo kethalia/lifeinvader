@@ -969,6 +969,74 @@ describe('browser event cache', () => {
     })
   })
 
+  it('binds derived state to a reusable append-only baseline', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 6n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(next, [eventLog(1n), eventLog(2n)]),
+    )
+    const baseline = (await opened.scan(seed)).baseline!
+    const digest = keccak256(stringToHex('derived state'))
+    const binding = await opened.bindDerivedState(baseline, digest)
+    expect(binding).toMatchObject({ digest })
+    opened.close()
+    cache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
+
+    await expect(
+      cache.authenticateDerivedState(baseline, binding),
+    ).resolves.toBeUndefined()
+    await expect(
+      cache.authenticateDerivedState(baseline, {
+        ...binding,
+        digest: keccak256(stringToHex('edited state')),
+      }),
+    ).rejects.toThrow(/derived state binding changed or is corrupt/i)
+    await expect(
+      cache.authenticateDerivedState(baseline, {
+        ...binding,
+        proof: keccak256(stringToHex('edited proof')),
+      }),
+    ).rejects.toThrow(/derived state binding changed or is corrupt/i)
+
+    const advanced = {
+      ...next,
+      checkpoints: [
+        ...next.checkpoints,
+        { blockHash: blockHash(7n), blockNumber: 7n },
+      ],
+      nextBlock: 8n,
+    } satisfies EventCursor
+    await cache.apply(
+      await cache.readLatest(seed),
+      syncResult(advanced, [eventLog(6n)]),
+    )
+
+    await expect(
+      cache.authenticateDerivedState(baseline, binding),
+    ).resolves.toBeUndefined()
+    const delta = await cache.scan(seed, { baseline })
+    expect(delta).toMatchObject({
+      complete: true,
+      logs: [eventLog(6n)],
+      revision: 2n,
+    })
+    await expect(cache.bindDerivedState(baseline, digest)).rejects.toThrow(
+      /baseline snapshot changed or is corrupt/i,
+    )
+    await expect(
+      cache.bindDerivedState(delta.baseline, keccak256(stringToHex('next'))),
+    ).resolves.toMatchObject({
+      digest: keccak256(stringToHex('next')),
+    })
+  })
+
   it('authenticates multiple completed scopes in one database snapshot', async () => {
     const factory = new IDBFactory()
     const firstSeed = seedCursor()

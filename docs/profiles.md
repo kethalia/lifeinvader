@@ -48,13 +48,20 @@ The pure projection core validates complete-block event pages, retains only the
 latest snapshot for one to fifty requested accounts, records compatible
 confirmation checkpoints, and exports canonical schema-versioned snapshots for
 resumable local work. The projection runner accepts only an anchor issued by the
-current page, scans its chronological cache snapshot one complete-block page at
-a time, and withholds every profile read until the full baseline and canonical
-provider checkpoint have been reauthenticated. Cache movement, corruption,
-reorgs, cancellation, or a wallet-context change fail closed and discard the
-partial projection. A completed run returns defensive profile data plus its
-authenticated cache baseline; wiring that result into the UI is a separate
-slice. No hosted indexer or server database is part of the protocol.
+current page and scans its chronological cache snapshot one complete-block page
+at a time. Its completed resume state contains the projection, cache baseline,
+and a cache-keyed binding between them. Persisting that tuple lets the next run
+authenticate the saved state and scan only events appended after its confirmed
+baseline. A first run has no resume state; a rejected binding or noncanonical
+baseline must be discarded and retried as a new full projection instead of
+trusting saved data.
+
+Every profile read remains withheld until the resulting full baseline and
+canonical provider checkpoint have been reauthenticated. Cache movement,
+corruption, reorgs, cancellation, or a wallet-context change fail closed and
+discard the partial projection. A completed run returns only defensive copies;
+wiring that result and its resume tuple into the UI is a separate slice. No
+hosted indexer or server database is part of the protocol.
 
 Avatar CIDs identify content; they do not pay for or prove persistence. See
 [`media.md`](./media.md) for the storage boundary.

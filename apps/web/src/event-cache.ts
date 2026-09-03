@@ -98,6 +98,10 @@ export type EventCacheScanBaseline = EventCachePosition & {
   logCount: number
   proof: Hash
 }
+export type EventCacheDerivedStateBinding = {
+  digest: Hash
+  proof: Hash
+}
 export type EventCacheScanPage = EventCachePosition & {
   baseline?: EventCacheScanBaseline
   complete: boolean
@@ -313,6 +317,24 @@ function getPublicLogPosition(log: IndexedEventLog): EventCacheLogPosition {
 function isLogDigest(value: unknown): value is Hash {
   return typeof value === 'string' && /^0x[0-9a-f]{64}$/.test(value)
 }
+function normalizeDerivedStateDigest(value: unknown) {
+  if (!isLogDigest(value)) {
+    throw cacheError('Invalid event cache derived state digest.')
+  }
+  return value
+}
+function normalizeDerivedStateBinding(
+  value: unknown,
+): EventCacheDerivedStateBinding {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw cacheError('Invalid event cache derived state binding.')
+  }
+  const binding = value as Partial<EventCacheDerivedStateBinding>
+  return {
+    digest: normalizeDerivedStateDigest(binding.digest),
+    proof: normalizeDerivedStateDigest(binding.proof),
+  }
+}
 function normalizeLogIntegrity(
   value: {
     digest?: unknown
@@ -427,6 +449,22 @@ function getScanBaselineProof(
     ),
   )
 }
+function getDerivedStateProof(
+  baselineKey: string,
+  baselineProof: Hash,
+  digest: Hash,
+) {
+  return keccak256(
+    stringToHex(
+      JSON.stringify([
+        'lifeinvader.event-cache.derived-state.v1',
+        baselineKey,
+        baselineProof,
+        digest,
+      ]),
+    ),
+  )
+}
 function normalizeScanCursor(
   value: unknown,
   seedCursor: EventCursor,
@@ -525,6 +563,16 @@ function normalizeScanBaseline(
     logCount: integrity.logCount,
     proof: source.proof,
   }
+}
+export function validateEventCacheScanBaseline(
+  value: unknown,
+  seedValue: unknown,
+) {
+  const seed = validateEventCursor(seedValue)
+  if (!isSeedCursor(seed)) {
+    throw cacheError('The event cache requires a fresh seed cursor.')
+  }
+  return normalizeScanBaseline(value, seed)
 }
 function assertRollbackTo(value: unknown, cursor: EventCursor) {
   if (value === undefined) return undefined
@@ -700,6 +748,25 @@ function normalizeBaselineAuthentications(
   })
 }
 
+function normalizeBaselineForFilter(
+  value: unknown,
+  filter: NormalizedEventLogFilter,
+): NormalizedBaselineAuthentication {
+  const position = asCachePosition(value)
+  const seed = getSeedCursor(position.cursor)
+  if (seed.filterId !== filter.id) {
+    throw cacheError(
+      'The event cache baseline authentication belongs to another scope.',
+    )
+  }
+  return {
+    baseline: normalizeScanBaseline(value, seed),
+    filter,
+    scope: getEventCacheScope(seed),
+    seed,
+  }
+}
+
 function assertBaselineAuthenticated(
   entry: NormalizedBaselineAuthentication,
   read: BaselineAuthenticationRead,
@@ -742,7 +809,7 @@ function assertBaselineAuthenticated(
     ) {
       throw new EventCacheCorruptionError()
     }
-    if (!hasLogs) return
+    if (!hasLogs) return state.baselineKey
     const first = asStoredLogRecord(read.firstLogRecord, entry.scope)
     const last = asStoredLogRecord(read.lastLogRecord, entry.scope)
     const firstIntegrity = advanceLogIntegrity(
@@ -767,6 +834,7 @@ function assertBaselineAuthenticated(
     ) {
       throw new EventCacheCorruptionError()
     }
+    return state.baselineKey
   } catch {
     throw cacheError('The event cache baseline snapshot changed or is corrupt.')
   }
@@ -821,7 +889,32 @@ export class BrowserEventCache {
 
   async authenticateBaselines(value: unknown): Promise<void> {
     const entries = normalizeBaselineAuthentications(value)
-    return this.#authenticateBaselinesTransaction(entries)
+    await this.#authenticateBaselinesTransaction(entries)
+  }
+
+  async bindDerivedState(
+    baselineValue: unknown,
+    digestValue: unknown,
+  ): Promise<EventCacheDerivedStateBinding> {
+    const entry = normalizeBaselineForFilter(baselineValue, this.#filter)
+    const digest = normalizeDerivedStateDigest(digestValue)
+    const [baselineKey] = await this.#authenticateBaselinesTransaction([entry])
+    if (!baselineKey) {
+      throw cacheError('The event cache baseline was not authenticated.')
+    }
+    return {
+      digest,
+      proof: getDerivedStateProof(baselineKey, entry.baseline.proof, digest),
+    }
+  }
+
+  async authenticateDerivedState(
+    baselineValue: unknown,
+    bindingValue: unknown,
+  ): Promise<void> {
+    const entry = normalizeBaselineForFilter(baselineValue, this.#filter)
+    const binding = normalizeDerivedStateBinding(bindingValue)
+    await this.#authenticateDerivedStateTransaction(entry, binding)
   }
 
   async clear(seedValue: unknown) {
@@ -1082,7 +1175,7 @@ export class BrowserEventCache {
   #authenticateBaselinesTransaction(
     entries: readonly NormalizedBaselineAuthentication[],
   ) {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<readonly string[]>((resolve, reject) => {
       const transaction = this.#database.transaction(
         [SCOPE_STORE, CURSOR_STORE, LOG_STORE],
         'readonly',
@@ -1090,7 +1183,7 @@ export class BrowserEventCache {
       const reads = entries.map(() => ({}) as BaselineAuthenticationRead)
       let failure: Error | undefined
       let pending = entries.length * 4
-      let validated = false
+      let baselineKeys: readonly string[] | undefined
       const scopeStore = transaction.objectStore(SCOPE_STORE)
       const cursorStore = transaction.objectStore(CURSOR_STORE)
       const logIndex = transaction.objectStore(LOG_STORE).index(LOG_SCOPE_INDEX)
@@ -1110,10 +1203,9 @@ export class BrowserEventCache {
         pending -= 1
         if (pending !== 0 || failure) return
         try {
-          entries.forEach((entry, index) =>
+          baselineKeys = entries.map((entry, index) =>
             assertBaselineAuthenticated(entry, reads[index]!),
           )
-          validated = true
         } catch (error) {
           fail(error)
         }
@@ -1152,7 +1244,7 @@ export class BrowserEventCache {
         lastRequest.onerror = () => fail(lastRequest.error)
       })
       transaction.oncomplete = () => {
-        if (validated) resolve()
+        if (baselineKeys) resolve(baselineKeys)
         else
           reject(
             failure ??
@@ -1165,6 +1257,75 @@ export class BrowserEventCache {
             asError(
               transaction.error,
               'The event cache baselines could not be authenticated.',
+            ),
+        )
+      transaction.onerror = () => undefined
+    })
+  }
+
+  #authenticateDerivedStateTransaction(
+    entry: NormalizedBaselineAuthentication,
+    binding: EventCacheDerivedStateBinding,
+  ) {
+    return new Promise<void>((resolve, reject) => {
+      const transaction = this.#database.transaction(SCOPE_STORE, 'readonly')
+      let failure: Error | undefined
+      let authenticated = false
+      const request = transaction.objectStore(SCOPE_STORE).get(entry.scope)
+      const fail = (error: unknown) => {
+        if (failure) return
+        failure = asError(
+          error,
+          'The event cache derived state could not be authenticated.',
+        )
+        try {
+          transaction.abort()
+        } catch {
+          reject(failure)
+        }
+      }
+      request.onsuccess = () => {
+        try {
+          if (request.result === undefined)
+            throw new EventCacheCorruptionError()
+          const state = asScopeRecord(request.result, entry.scope, entry.filter)
+          const { proof, ...baselinePayload } = entry.baseline
+          if (
+            state.generation !== entry.baseline.generation ||
+            entry.baseline.revision > state.revision ||
+            getScanBaselineProof(state.baselineKey, baselinePayload) !==
+              proof ||
+            getDerivedStateProof(state.baselineKey, proof, binding.digest) !==
+              binding.proof
+          ) {
+            throw new EventCacheCorruptionError()
+          }
+          authenticated = true
+        } catch {
+          fail(
+            cacheError(
+              'The event cache derived state binding changed or is corrupt.',
+            ),
+          )
+        }
+      }
+      request.onerror = () => fail(request.error)
+      transaction.oncomplete = () => {
+        if (authenticated) resolve()
+        else
+          reject(
+            failure ??
+              cacheError(
+                'The event cache derived state was not authenticated.',
+              ),
+          )
+      }
+      transaction.onabort = () =>
+        reject(
+          failure ??
+            asError(
+              transaction.error,
+              'The event cache derived state could not be authenticated.',
             ),
         )
       transaction.onerror = () => undefined
