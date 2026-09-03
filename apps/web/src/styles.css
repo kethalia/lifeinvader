@@ -540,7 +540,8 @@ h1 span {
   width: fit-content;
 }
 
-.reaction-read-model {
+.reaction-read-model,
+.comment-read-model {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -548,16 +549,20 @@ h1 span {
 }
 
 .reaction-read-model strong,
-.reaction-read-model p {
+.reaction-read-model p,
+.comment-read-model strong,
+.comment-read-model p {
   margin: 0;
 }
 
-.reaction-read-model p {
+.reaction-read-model p,
+.comment-read-model p {
   margin-top: 0.35rem;
   line-height: 1.45;
 }
 
-.reaction-read-model button {
+.reaction-read-model button,
+.comment-read-model button {
   flex: 0 0 auto;
 }
 
@@ -735,6 +740,98 @@ h1 span {
   font-weight: 800;
 }
 
+.post-comments {
+  display: grid;
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  gap: 0.85rem;
+  border-top: 1px solid var(--ink);
+}
+
+.post-comments-heading,
+.comment-heading,
+.comment-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.post-comments-heading,
+.comment-heading,
+.comment-pagination,
+.empty-comments {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+}
+
+.post-comments-heading > span,
+.comment-heading {
+  color: rgba(25, 24, 23, 0.68);
+}
+
+.comment-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 0.75rem;
+  list-style: none;
+}
+
+.comment-list > li {
+  min-width: 0;
+  padding: 0.85rem;
+  border-left: 3px solid var(--red);
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.comment-heading {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  line-height: 1.4;
+}
+
+.comment-body {
+  margin: 0.75rem 0 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.comment-list .post-media-commitment {
+  margin-top: 0.75rem;
+}
+
+.empty-comments {
+  margin: 0;
+}
+
+.comment-pagination span {
+  text-align: center;
+}
+
+.comment-pagination button {
+  min-height: 34px;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.comment-pagination button:hover:not(:disabled),
+.comment-pagination button:focus-visible {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.comment-pagination button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
 .post-action-complete {
   color: var(--ink);
   background: var(--acid);
@@ -879,8 +976,13 @@ footer p {
     flex-direction: column;
   }
 
-  .reaction-read-model {
+  .reaction-read-model,
+  .comment-read-model {
     align-items: stretch;
+    flex-direction: column;
+  }
+
+  .comment-heading {
     flex-direction: column;
   }
 

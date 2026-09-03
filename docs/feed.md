@@ -26,7 +26,7 @@ Changing provider or chain aborts active synchronization and confirmation monito
 
 ## Presentation boundary
 
-Posts are ordered newest first by canonical `(blockNumber, logIndex)` cache order. The interface shows author, post identifier, block number, transaction hash, text, and supported media commitments as canonical CIDv1 text. Invalid or unsupported on-chain CID bytes are visibly isolated instead of poisoning the feed. Confirmed cards can publish comments, but the client does not yet derive their history. It also does not fetch media from a gateway or paginate beyond the newest 50 cached posts. Reactions use their independent, explicitly stepped read model so high-volume reaction logs never crowd posts out of this page.
+Posts are ordered newest first by canonical `(blockNumber, logIndex)` cache order. The interface shows author, post identifier, block number, transaction hash, text, and supported media commitments as canonical CIDv1 text. Invalid or unsupported on-chain CID bytes are visibly isolated instead of poisoning the feed. Confirmed cards can publish comments and render exact confirmed histories after the independent comment read model completes. It does not fetch media from a gateway or paginate beyond the newest 50 cached posts. Reactions and comments use independent, explicitly stepped read models so their higher-volume logs never crowd posts out of this page or cause one RPC request per card.
 
 Confirmed post cards can submit like, unlike, and repost events. These controls verify their exact receipt events and never display optimistic counts. Exact confirmed counts and current-like state appear only after the independent bounded read model specified in [`reactions.md`](./reactions.md) completes.
 

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react'
 import type { Hex } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
 import {
@@ -6,6 +13,13 @@ import {
   MAX_MEDIA_CID_TEXT_LENGTH,
   parseMediaCid,
 } from './media-cid'
+import type { PostCommentProjectionReadPage } from './post-comment-projection'
+import {
+  usePostCommentReadModel,
+  type PostCommentProjectionOpener,
+  type PostCommentReadModelState,
+} from './post-comment-read-model'
+import type { PostCommentStreamSynchronizer } from './post-comment-stream'
 import {
   synchronizePostFeed,
   type PostFeedSnapshot,
@@ -39,6 +53,8 @@ import {
 import type { PostReactionStreamSynchronizer } from './post-reaction-stream'
 import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+
+const COMMENT_RENDER_PAGE_SIZE = 10
 
 function shortValue(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`
@@ -115,6 +131,123 @@ function reactionButtonLabel(state: PostReactionReadModelState) {
   if (state.phase === 'complete') return 'Check for newer reactions'
   if (state.phase === 'failed') return 'Retry reaction counts'
   return 'Load reaction counts'
+}
+
+function commentStatus(state: PostCommentReadModelState) {
+  if (state.phase === 'idle') {
+    return 'Comment histories are not loaded. One request reads one bounded global RPC range; exact visible threads are then derived in explicit local pages.'
+  }
+  if (state.phase === 'synchronizing') {
+    return 'Reading one bounded range from the global comment stream…'
+  }
+  if (state.phase === 'catchup') {
+    const indexedThrough = state.stream.indexedThrough?.toString() ?? 'none'
+    return `More confirmed comment history remains. Indexed through block ${indexedThrough} of confirmed head ${state.stream.safeHead?.toString() ?? 'unknown'}.`
+  }
+  if (state.phase === 'projecting') {
+    return `Local ${state.projection.phase} projection: ${state.projection.logsProcessed.toString()} events across ${state.projection.pagesScanned.toString()} bounded pages; ${state.projection.commentsRetained.toString()} visible comments retained.`
+  }
+  if (state.phase === 'complete') {
+    return state.projection.safeHead === undefined
+      ? 'Comment histories are exact for the currently confirmed empty range.'
+      : `Comment histories are exact through confirmed block ${state.projection.safeHead.toString()}.`
+  }
+  return state.message
+}
+
+function commentButtonLabel(state: PostCommentReadModelState) {
+  if (state.phase === 'synchronizing') return 'Reading comments…'
+  if (state.phase === 'catchup') return 'Load next comment range'
+  if (state.phase === 'projecting') {
+    return state.busy
+      ? 'Processing comment page…'
+      : 'Process next local comment page'
+  }
+  if (state.phase === 'complete') return 'Check for newer comments'
+  if (state.phase === 'failed') return 'Retry comment histories'
+  return 'Load comment histories'
+}
+
+function PostCommentList({
+  offset,
+  onOffset,
+  page,
+  postId,
+}: {
+  offset: number
+  onOffset: (offset: number) => void
+  page: PostCommentProjectionReadPage
+  postId: bigint
+}) {
+  const headingId = `post-comments-${postId.toString()}`
+  return (
+    <section aria-labelledby={headingId} className="post-comments">
+      <div className="post-comments-heading">
+        <strong id={headingId}>
+          Public comments · {page.totalComments.toString()}
+        </strong>
+        <span>Oldest first</span>
+      </div>
+      {page.totalComments === 0n ? (
+        <p className="empty-comments">
+          No confirmed comments as of this block.
+        </p>
+      ) : (
+        <>
+          <ol className="comment-list">
+            {page.comments.map((comment) => (
+              <li key={`${comment.blockHash}:${comment.logIndex}`}>
+                <div className="comment-heading">
+                  <span title={comment.author}>
+                    {shortValue(comment.author)} · Comment #
+                    {comment.commentId.toString()}
+                  </span>
+                  <span>
+                    Block {comment.blockNumber.toString()} ·{' '}
+                    <code title={comment.transactionHash}>
+                      {shortValue(comment.transactionHash)}
+                    </code>
+                  </span>
+                </div>
+                {comment.body ? (
+                  <p className="comment-body">{comment.body}</p>
+                ) : null}
+                {comment.mediaCid !== '0x' ? (
+                  <MediaCommitment value={comment.mediaCid} />
+                ) : null}
+              </li>
+            ))}
+          </ol>
+          <div className="comment-pagination">
+            <button
+              aria-label={`Show previous comments for post ${postId.toString()}`}
+              disabled={offset === 0}
+              onClick={() =>
+                onOffset(Math.max(0, offset - COMMENT_RENDER_PAGE_SIZE))
+              }
+              type="button"
+            >
+              Previous
+            </button>
+            <span>
+              {offset + 1}–{offset + page.comments.length} of{' '}
+              {page.totalComments.toString()}
+            </span>
+            <button
+              aria-label={`Show next comments for post ${postId.toString()}`}
+              disabled={page.nextOffset === undefined}
+              onClick={() => {
+                if (page.nextOffset !== undefined) onOffset(page.nextOffset)
+              }}
+              type="button"
+            >
+              Next
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
 }
 
 type PostActionContext = {
@@ -217,23 +350,27 @@ function sameCommentDraftRevision(first: CommentDraft, second: CommentDraft) {
 
 export function PostFeedPanel({
   includedPost,
+  openCommentProjection,
   openReactionProjection,
   publishCommentAction = publishComment,
   publishRepostAction = publishRepost,
   session,
   setPostLikeAction = setPostLike,
   synchronize = synchronizePostFeed,
+  synchronizePostComments,
   synchronizePostReactions,
   waitForActionReceipt = waitForTransactionReceipt,
   waitForConfirmation = waitForPostFeedConfirmation,
 }: {
   includedPost?: IncludedPost
+  openCommentProjection?: PostCommentProjectionOpener
   openReactionProjection?: PostReactionProjectionOpener
   publishCommentAction?: typeof publishComment
   publishRepostAction?: typeof publishRepost
   session: WalletSession
   setPostLikeAction?: typeof setPostLike
   synchronize?: PostFeedSynchronizer
+  synchronizePostComments?: PostCommentStreamSynchronizer
   synchronizePostReactions?: PostReactionStreamSynchronizer
   waitForActionReceipt?: typeof waitForTransactionReceipt
   waitForConfirmation?: PostFeedConfirmationWaiter
@@ -267,6 +404,9 @@ export function PostFeedPanel({
     PostActionProblem[]
   >([])
   const [commentDrafts, setCommentDrafts] = useState<CommentDraft[]>([])
+  const [commentPageOffsets, setCommentPageOffsets] = useState<
+    Record<string, number>
+  >({})
   const reactionModel = usePostReactionReadModel(session, {
     openProjection: openReactionProjection,
     synchronize: synchronizePostReactions,
@@ -310,6 +450,29 @@ export function PostFeedPanel({
     loaded.chainId === session.chainId
       ? loaded.snapshot
       : undefined
+  const visiblePosts = snapshot?.posts ?? []
+  const commentModel = usePostCommentReadModel(session, visiblePosts, {
+    openProjection: openCommentProjection,
+    synchronize: synchronizePostComments,
+  })
+  const commentPages = useMemo(() => {
+    const pages = new Map<string, PostCommentProjectionReadPage>()
+    if (!snapshot || commentModel.state.phase !== 'complete') return pages
+    for (const post of snapshot.posts) {
+      const key = post.postId.toString()
+      const page = commentModel.readComments(post.postId, {
+        limit: COMMENT_RENDER_PAGE_SIZE,
+        offset: commentPageOffsets[key] ?? 0,
+      })
+      if (page) pages.set(key, page)
+    }
+    return pages
+  }, [
+    commentModel.readComments,
+    commentModel.state.phase,
+    commentPageOffsets,
+    snapshot,
+  ])
   const activeCommentDraftPost = activeCommentDraft
     ? snapshot?.posts.find((post) =>
         commentDraftTargetsPost(activeCommentDraft, post),
@@ -351,6 +514,23 @@ export function PostFeedPanel({
   const postActionsLocked =
     session.account === undefined ||
     activePostActionAttempts.some((attempt) => attempt.status !== 'failed')
+
+  const runCommentReadModelStep = () => {
+    if (commentModel.state.phase === 'projecting') {
+      commentModel.advanceProjection()
+      return
+    }
+    setCommentPageOffsets({})
+    commentModel.loadNextRange()
+  }
+
+  useEffect(() => {
+    if (commentModel.state.phase !== 'complete') {
+      setCommentPageOffsets((current) =>
+        Object.keys(current).length === 0 ? current : {},
+      )
+    }
+  }, [commentModel.state.phase])
 
   const runSynchronization = useCallback(() => {
     const provider = session.provider
@@ -853,6 +1033,31 @@ export function PostFeedPanel({
           </button>
         </div>
       ) : null}
+      {connected && snapshot?.posts.length ? (
+        <div
+          className={`feed-feedback comment-read-model${commentModel.state.phase === 'failed' ? ' error-message' : ''}`}
+        >
+          <div>
+            <strong>On-chain comment ledger</strong>
+            <p
+              role={commentModel.state.phase === 'failed' ? 'alert' : 'status'}
+            >
+              {commentStatus(commentModel.state)}
+            </p>
+          </div>
+          <button
+            disabled={
+              commentModel.state.phase === 'synchronizing' ||
+              (commentModel.state.phase === 'projecting' &&
+                commentModel.state.busy)
+            }
+            onClick={runCommentReadModelStep}
+            type="button"
+          >
+            {commentButtonLabel(commentModel.state)}
+          </button>
+        </div>
+      ) : null}
       {activeConfirmation ? (
         <p
           className={`feed-feedback${activeConfirmation.status === 'stopped' ? ' error-message' : ''}`}
@@ -981,6 +1186,9 @@ export function PostFeedPanel({
             const draftingThisPost =
               activeCommentDraft !== undefined &&
               commentDraftTargetsPost(activeCommentDraft, post)
+            const commentOffset =
+              commentPageOffsets[post.postId.toString()] ?? 0
+            const commentPage = commentPages.get(post.postId.toString())
             return (
               <li key={`${post.blockHash}:${post.logIndex}`}>
                 <article className="post-card">
@@ -1140,6 +1348,19 @@ export function PostFeedPanel({
                     ) : null}
                     <p>Each click appends another public on-chain event.</p>
                   </div>
+                  {commentPage ? (
+                    <PostCommentList
+                      offset={commentOffset}
+                      onOffset={(offset) =>
+                        setCommentPageOffsets((current) => ({
+                          ...current,
+                          [post.postId.toString()]: offset,
+                        }))
+                      }
+                      page={commentPage}
+                      postId={post.postId}
+                    />
+                  ) : null}
                 </article>
               </li>
             )

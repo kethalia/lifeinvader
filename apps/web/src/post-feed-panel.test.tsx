@@ -10,6 +10,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Hex } from 'viem'
 import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
+import type { PostCommentProjectionReader } from './post-comment-read-model'
+import type { PostCommentProjectionRunSnapshot } from './post-comment-projection-run'
+import type {
+  PostCommentProjectionAnchor,
+  PostCommentStreamSnapshot,
+} from './post-comment-stream'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSnapshot } from './post-feed'
 import type { PostFeedConfirmationWaiter } from './post-feed-confirmation'
@@ -28,13 +34,14 @@ import {
   type TransactionReceipt,
   type TransactionSubmitted,
 } from './protocol'
-import type { PublishedPost } from './protocol-events'
+import type { PublishedComment, PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const REPLACEMENT_BLOCK_HASH = `0x${'33'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
+const COMMENT_ANCHOR = { chainId: 1n } as PostCommentProjectionAnchor
 const REACTION_ANCHOR = { chainId: 1n } as PostReactionProjectionAnchor
 
 function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
@@ -48,6 +55,26 @@ function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
     postId,
     transactionHash: TRANSACTION_HASH,
     transactionIndex: Number(postId),
+  }
+}
+
+function comment(
+  body: string,
+  commentId: bigint,
+  postId = 1n,
+  mediaCid: Hex = '0x',
+): PublishedComment {
+  return {
+    author: ACCOUNT,
+    blockHash: BLOCK_HASH,
+    blockNumber: commentId + 30n,
+    body,
+    commentId,
+    logIndex: Number(commentId),
+    mediaCid,
+    postId,
+    transactionHash: TRANSACTION_HASH,
+    transactionIndex: Number(commentId),
   }
 }
 
@@ -103,6 +130,21 @@ function reactionStream(): PostReactionStreamSnapshot {
   }
 }
 
+function commentStream(
+  projectionAnchor?: PostCommentProjectionAnchor,
+): PostCommentStreamSnapshot {
+  return {
+    cacheReset: false,
+    caughtUp: projectionAnchor !== undefined,
+    head: 20n,
+    indexedThrough: 8n,
+    ...(projectionAnchor ? { projectionAnchor } : {}),
+    recentComments: [],
+    safeHead: 8n,
+    scannedRanges: 1,
+  }
+}
+
 function reactionProjection(
   phase: PostReactionProjectionRunSnapshot['phase'],
 ): PostReactionProjectionRunSnapshot {
@@ -117,6 +159,21 @@ function reactionProjection(
       logsProcessed: complete ? 1n : 0n,
       pagesScanned: complete ? 1n : 0n,
     },
+    safeHead: 8n,
+  }
+}
+
+function commentProjection(
+  phase: PostCommentProjectionRunSnapshot['phase'],
+): PostCommentProjectionRunSnapshot {
+  const complete = phase === 'complete'
+  return {
+    chainId: 1n,
+    commentsRetained: complete ? 12n : 10n,
+    head: 20n,
+    logsProcessed: complete ? 12n : 10n,
+    pagesScanned: complete ? 2n : 1n,
+    phase,
     safeHead: 8n,
   }
 }
@@ -264,6 +321,167 @@ describe('PostFeedPanel', () => {
       screen.getByText(/2 likes · 1 repost · You liked this/i),
     ).toBeTruthy()
     expect(run.getSummary).toHaveBeenCalledWith(1n, ACCOUNT)
+  })
+
+  it('derives and paginates exact visible comment histories only on request', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const mediaCid = parseMediaCid(
+      'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
+    )!
+    const comments = Array.from({ length: 12 }, (_, index) =>
+      comment(
+        `Public comment ${index + 1}.`,
+        BigInt(index + 1),
+        1n,
+        index === 10 ? mediaCid.bytes : '0x',
+      ),
+    )
+    const readComments = vi.fn(
+      (postId: bigint, options: { limit?: number; offset?: number } = {}) => {
+        const selected = postId === 1n ? comments : []
+        const limit = options.limit ?? 50
+        const offset = options.offset ?? 0
+        const end = Math.min(offset + limit, selected.length)
+        const complete = end >= selected.length
+        return {
+          comments: selected.slice(offset, end),
+          complete,
+          ...(complete ? {} : { nextOffset: end }),
+          totalComments: BigInt(selected.length),
+        }
+      },
+    )
+    const run = {
+      advance: vi
+        .fn()
+        .mockResolvedValueOnce(commentProjection('authenticate'))
+        .mockResolvedValueOnce(commentProjection('complete')),
+      close: vi.fn(),
+      readComments,
+      snapshot: commentProjection('comments'),
+      trackedPostIds: [1n, 2n],
+    } satisfies PostCommentProjectionReader
+    const refreshedRun = {
+      advance: vi.fn(),
+      close: vi.fn(),
+      readComments,
+      snapshot: commentProjection('complete'),
+      trackedPostIds: [1n, 2n],
+    } satisfies PostCommentProjectionReader
+    const synchronizePostComments = vi
+      .fn()
+      .mockResolvedValueOnce(commentStream())
+      .mockResolvedValueOnce(commentStream(COMMENT_ANCHOR))
+      .mockResolvedValueOnce(commentStream(COMMENT_ANCHOR))
+    const openCommentProjection = vi
+      .fn()
+      .mockResolvedValueOnce(run)
+      .mockResolvedValueOnce(refreshedRun)
+
+    render(
+      <PostFeedPanel
+        openCommentProjection={openCommentProjection}
+        session={connectedSession(provider)}
+        synchronize={vi
+          .fn()
+          .mockResolvedValue(
+            snapshot([post('First post.'), post('Second post.', 2n)]),
+          )}
+        synchronizePostComments={synchronizePostComments}
+      />,
+    )
+
+    expect(await screen.findByText('First post.')).toBeTruthy()
+    expect(synchronizePostComments).not.toHaveBeenCalled()
+    expect(readComments).not.toHaveBeenCalled()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /load comment histories/i }),
+    )
+    expect(
+      await screen.findByRole('button', {
+        name: /load next comment range/i,
+      }),
+    ).toBeTruthy()
+    expect(synchronizePostComments).toHaveBeenCalledTimes(1)
+    expect(openCommentProjection).not.toHaveBeenCalled()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /load next comment range/i }),
+    )
+    expect(
+      await screen.findByRole('button', {
+        name: /process next local comment page/i,
+      }),
+    ).toBeTruthy()
+    expect(synchronizePostComments).toHaveBeenCalledTimes(2)
+    expect(openCommentProjection).toHaveBeenCalledWith(COMMENT_ANCHOR, [1n, 2n])
+    expect(run.advance).not.toHaveBeenCalled()
+
+    for (let step = 1; step <= 2; step += 1) {
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: /process next local comment page/i,
+        }),
+      )
+      await waitFor(() => expect(run.advance).toHaveBeenCalledTimes(step))
+      if (step < 2) {
+        await screen.findByRole('button', {
+          name: /process next local comment page/i,
+        })
+      }
+    }
+
+    expect(
+      await screen.findByRole('button', {
+        name: /check for newer comments/i,
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /comment histories are exact through confirmed block 8/i,
+      ),
+    ).toBeTruthy()
+    expect(screen.getByText('Public comment 1.')).toBeTruthy()
+    expect(screen.getByText('Public comments · 12')).toBeTruthy()
+    expect(
+      screen.getByText('No confirmed comments as of this block.'),
+    ).toBeTruthy()
+    expect(screen.queryByText('Public comment 11.')).toBeNull()
+    expect(readComments).toHaveBeenCalledWith(1n, { limit: 10, offset: 0 })
+    expect(readComments).toHaveBeenCalledWith(2n, { limit: 10, offset: 0 })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /show next comments for post 1/i }),
+    )
+    expect(await screen.findByText('Public comment 11.')).toBeTruthy()
+    expect(screen.getByText(mediaCid.text)).toBeTruthy()
+    expect(screen.queryByText('Public comment 1.')).toBeNull()
+    expect(readComments).toHaveBeenCalledWith(1n, { limit: 10, offset: 10 })
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /show previous comments for post 1/i,
+      }),
+    )
+    expect(await screen.findByText('Public comment 1.')).toBeTruthy()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /show next comments for post 1/i }),
+    )
+    expect(await screen.findByText('Public comment 11.')).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /check for newer comments/i }),
+    )
+    await waitFor(() => expect(openCommentProjection).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      const firstPostCalls = readComments.mock.calls.filter(
+        ([postId]) => postId === 1n,
+      )
+      expect(firstPostCalls.at(-1)?.[1]).toEqual({ limit: 10, offset: 0 })
+    })
+    expect(screen.getByText('Public comment 1.')).toBeTruthy()
+    expect(run.close).toHaveBeenCalledTimes(1)
   })
 
   it('submits explicit like, unlike, and repost events for a confirmed post', async () => {
