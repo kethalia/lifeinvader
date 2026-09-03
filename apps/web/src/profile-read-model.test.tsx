@@ -2,6 +2,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Address, Hash } from 'viem'
 import type { Eip1193Provider } from './ethereum'
+import { DeferredEventCacheCorruptionError } from './event-cache'
 import {
   useProfileReadModel,
   type ProfileProjectionReader,
@@ -310,6 +311,89 @@ describe('useProfileReadModel', () => {
     act(() => result.current.loadNextRange())
     await waitFor(() => expect(result.current.state.phase).toBe('catchup'))
     expect(synchronize).toHaveBeenCalledTimes(2)
+  })
+
+  it('resets deferred event-cache corruption before offering another retry', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const resetCache = vi.fn().mockResolvedValue(undefined)
+    const store = resumeStore({
+      load: vi.fn().mockResolvedValue(RESUME),
+      remove: vi.fn().mockRejectedValue(new Error('Resume store unavailable.')),
+    })
+    const corruptedRun = projectionRun({
+      advance: vi
+        .fn()
+        .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+    })
+    const nextRun = projectionRun()
+    const openProjection = vi
+      .fn()
+      .mockResolvedValueOnce(corruptedRun)
+      .mockResolvedValueOnce(nextRun)
+    const synchronize = vi.fn().mockResolvedValue(stream(ANCHOR))
+    const { result } = renderHook(() =>
+      useProfileReadModel(connectedSession(provider), {
+        openProjection,
+        resetCache,
+        resumeStore: store,
+        synchronize,
+      }),
+    )
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+
+    act(() => result.current.advanceProjection())
+    await waitFor(() => expect(result.current.state.phase).toBe('failed'))
+
+    expect(resetCache).toHaveBeenCalledWith(1n)
+    expect(store.remove).toHaveBeenCalledWith(1n, ACCOUNT_A)
+    expect(result.current.state).toMatchObject({
+      message: expect.stringMatching(/corrupt local profile cache was reset/i),
+      phase: 'failed',
+      retryable: true,
+    })
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+    expect(synchronize).toHaveBeenCalledTimes(2)
+    expect(openProjection).toHaveBeenCalledTimes(2)
+    expect(openProjection).toHaveBeenNthCalledWith(
+      2,
+      ANCHOR,
+      [ACCOUNT_A],
+      undefined,
+    )
+    expect(store.load).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not offer a futile retry when bounded corruption cleanup fails', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const run = projectionRun({
+      advance: vi
+        .fn()
+        .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+    })
+    const { result } = renderHook(() =>
+      useProfileReadModel(connectedSession(provider), {
+        openProjection: vi.fn().mockResolvedValue(run),
+        resetCache: vi
+          .fn()
+          .mockRejectedValue(new Error('Repair limit exceeded.')),
+        resumeStore: resumeStore(),
+        synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+      }),
+    )
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+
+    act(() => result.current.advanceProjection())
+    await waitFor(() => expect(result.current.state.phase).toBe('failed'))
+
+    expect(result.current.state).toMatchObject({
+      message: expect.stringMatching(/clear this site’s browser data/i),
+      phase: 'failed',
+      retryable: false,
+    })
   })
 
   it('aborts and ignores work from an old account context', async () => {

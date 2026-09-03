@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Address } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
+import { isDeferredEventCacheCorruptionError } from './event-cache'
 import {
   openProfileProjectionRun,
   type ProfileProjectionResumeState,
@@ -12,8 +13,10 @@ import {
   type ProfileResumeStore,
 } from './profile-resume-store'
 import {
+  resetProfileStreamCache,
   synchronizeProfileStream,
   type ProfileProjectionAnchor,
+  type ProfileStreamCacheResetter,
   type ProfileStreamSnapshot,
   type ProfileStreamSynchronizer,
 } from './profile-stream'
@@ -50,7 +53,7 @@ export type ProfileReadModelState =
       resumeSaved: boolean
       resumed: boolean
     }
-  | { message: string; phase: 'failed' }
+  | { message: string; phase: 'failed'; retryable: boolean }
 
 type ScopedReadModelState = {
   account: Address
@@ -67,6 +70,7 @@ type ActiveProjection = {
 
 export type UseProfileReadModelOptions = {
   openProjection?: ProfileProjectionOpener
+  resetCache?: ProfileStreamCacheResetter
   resumeStore?: ProfileResumeStore
   synchronize?: ProfileStreamSynchronizer
 }
@@ -101,6 +105,7 @@ export function useProfileReadModel(
   session: WalletSession,
   {
     openProjection = defaultProjectionOpener,
+    resetCache = resetProfileStreamCache,
     resumeStore = defaultResumeStore,
     synchronize = synchronizeProfileStream,
   }: UseProfileReadModelOptions = {},
@@ -109,6 +114,7 @@ export function useProfileReadModel(
   const activeController = useRef<AbortController | undefined>(undefined)
   const activeProjection = useRef<ActiveProjection | undefined>(undefined)
   const busy = useRef(false)
+  const ignoreSavedResume = useRef(false)
   const requestSequence = useRef(0)
   const connected =
     session.status === 'connected' &&
@@ -135,6 +141,7 @@ export function useProfileReadModel(
     activeProjection.current?.run.close()
     activeProjection.current = undefined
     busy.current = false
+    ignoreSavedResume.current = false
     setScopedState(undefined)
     return () => {
       requestSequence.current += 1
@@ -143,6 +150,7 @@ export function useProfileReadModel(
       activeProjection.current?.run.close()
       activeProjection.current = undefined
       busy.current = false
+      ignoreSavedResume.current = false
     }
   }, [account, chainId, connected, provider])
 
@@ -170,6 +178,7 @@ export function useProfileReadModel(
           'The confirmed profile is available, but resumable local progress could not be saved.'
       }
       if (requestSequence.current !== requestId) return
+      if (resumeSaved) ignoreSavedResume.current = false
       active.run.close()
       activeProjection.current = undefined
       setScopedState({
@@ -231,20 +240,28 @@ export function useProfileReadModel(
         }
         let notice: string | undefined
         let resume: ProfileProjectionResumeState | undefined
-        try {
-          resume = await resumeStore.load(chainId, account)
-        } catch {
+        let resumeReadFailed = false
+        if (ignoreSavedResume.current) {
           notice =
-            'Saved profile progress was unreadable and will not be trusted. Rebuilding from canonical events.'
+            'Previously rejected profile progress is being bypassed while the canonical projection is rebuilt.'
+        } else {
           try {
-            await resumeStore.remove(chainId, account)
+            resume = await resumeStore.load(chainId, account)
           } catch {
-            // A disposable acceleration cache may be unavailable. A fresh
-            // projection remains correct without it.
+            resumeReadFailed = true
+            notice =
+              'Saved profile progress was unreadable and will not be trusted. Rebuilding from canonical events.'
+            try {
+              await resumeStore.remove(chainId, account)
+            } catch {
+              // A disposable acceleration cache may be unavailable. A fresh
+              // projection remains correct without it.
+            }
           }
         }
         if (controller.signal.aborted || requestSequence.current !== requestId)
           return
+        if (resumeReadFailed) ignoreSavedResume.current = true
         let resumed = resume !== undefined
         try {
           openedRun = await openProjection(
@@ -254,6 +271,7 @@ export function useProfileReadModel(
           )
         } catch (error) {
           if (!resume) throw error
+          ignoreSavedResume.current = true
           notice =
             'Saved profile progress no longer matched the authenticated event cache. It was discarded and rebuilt.'
           try {
@@ -312,6 +330,7 @@ export function useProfileReadModel(
               'The public profile could not be synchronized.',
             ),
             phase: 'failed',
+            retryable: true,
           },
         })
       } finally {
@@ -328,6 +347,7 @@ export function useProfileReadModel(
     openProjection,
     provider,
     publishCompletedRun,
+    resetCache,
     resumeStore,
     synchronize,
   ])
@@ -373,27 +393,61 @@ export function useProfileReadModel(
           state: stateForProjection(projection, active.resumed, active.notice),
         })
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (requestSequence.current !== requestId) return
         active.run.close()
         activeProjection.current = undefined
+        let message = describeRpcError(
+          error,
+          'The local profile projection could not be completed.',
+        )
+        let retryable = true
+        if (isDeferredEventCacheCorruptionError(error)) {
+          try {
+            await resetCache(chainId)
+            if (requestSequence.current !== requestId) return
+            ignoreSavedResume.current = true
+            try {
+              await resumeStore.remove(chainId, account)
+            } catch {
+              // A stale resume is independently rejected on the next open.
+            }
+            message =
+              'The corrupt local profile cache was reset. Retry to rebuild it from confirmed chain events.'
+          } catch (resetError) {
+            const detail = describeRpcError(
+              resetError,
+              'The corrupt local profile cache could not be reset.',
+            )
+            message = `${detail} Clear this site’s browser data and reload.`
+            retryable = false
+          }
+        }
+        if (requestSequence.current !== requestId) return
         setScopedState({
           account,
           chainId,
           provider,
           state: {
-            message: describeRpcError(
-              error,
-              'The local profile projection could not be completed.',
-            ),
+            message,
             phase: 'failed',
+            retryable,
           },
         })
       })
       .finally(() => {
         if (requestSequence.current === requestId) busy.current = false
       })
-  }, [account, chainId, connected, provider, publishCompletedRun, state])
+  }, [
+    account,
+    chainId,
+    connected,
+    provider,
+    publishCompletedRun,
+    resetCache,
+    resumeStore,
+    state,
+  ])
 
   return { advanceProjection, loadNextRange, state }
 }

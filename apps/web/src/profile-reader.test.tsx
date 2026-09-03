@@ -8,6 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Address, Hash } from 'viem'
 import type { Eip1193Provider } from './ethereum'
+import { DeferredEventCacheCorruptionError } from './event-cache'
 import { parseMediaCid } from './media-cid'
 import type { ProfileProjectionReader } from './profile-read-model'
 import { ProfileReader } from './profile-reader'
@@ -244,5 +245,36 @@ describe('ProfileReader', () => {
       await screen.findByText(/invalid avatar CID bytes committed on-chain/i),
     ).toBeTruthy()
     expect(screen.getByText('0x01')).toBeTruthy()
+  })
+
+  it('blocks repeated projection retries when bounded cache cleanup fails', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const projectionRun = run(PROFILE)
+    vi.mocked(projectionRun.advance)
+      .mockReset()
+      .mockRejectedValue(new DeferredEventCacheCorruptionError())
+    render(
+      <ProfileReader
+        openProjection={vi.fn().mockResolvedValue(projectionRun)}
+        resetCache={vi.fn().mockRejectedValue(new Error('Repair too large.'))}
+        resumeStore={store()}
+        session={connectedSession(provider)}
+        synchronize={vi.fn().mockResolvedValue(stream(ANCHOR))}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed profile/i }),
+    )
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /process next local profile page/i,
+      }),
+    )
+
+    const clearData = await screen.findByRole('button', {
+      name: /clear site data and reload/i,
+    })
+    expect((clearData as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText(/clear this site’s browser data/i)).toBeTruthy()
   })
 })

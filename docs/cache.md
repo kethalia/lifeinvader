@@ -40,6 +40,8 @@ The connected-account profile reader persists its completed projection, baseline
 
 Normal scan work is proportional to the bounded page plus a constant number of edge and anchor reads. It performs no full-scope `count`, `getAll`, or unbounded local history load. A caller that must preserve this bound even after detecting corruption sets `resetOnCorruption: false`; the scan then aborts without deleting records and leaves cleanup to a later synchronization or explicit maintenance operation.
 
+The profile reader recognizes that deferred-corruption failure explicitly. It closes the partial projection and runs the profile scope's existing maintenance-capped clear before offering another retry, preventing an invalid older page outside the recent preview from failing forever. If the bounded clear cannot finish within the repair cap, the reader disables its futile retry and instructs the user to clear the site's disposable browser data and reload.
+
 ## Atomic synchronization
 
 Applying a synchronization result uses one read-write transaction across scope, cursor, and log stores:

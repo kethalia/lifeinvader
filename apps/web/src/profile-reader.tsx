@@ -53,7 +53,11 @@ function profileButtonLabel(state: ProfileReadModelState) {
       : 'Process next local profile page'
   }
   if (state.phase === 'complete') return 'Check for newer profile'
-  if (state.phase === 'failed') return 'Retry public profile'
+  if (state.phase === 'failed') {
+    return state.retryable
+      ? 'Retry public profile'
+      : 'Clear site data and reload'
+  }
   return 'Load confirmed profile'
 }
 
@@ -116,12 +120,14 @@ function ConfirmedProfile({ profile }: { profile?: ProfileSet }) {
 
 export function ProfileReader({
   openProjection,
+  resetCache,
   resumeStore,
   session,
   synchronize,
 }: UseProfileReadModelOptions & { session: WalletSession }) {
   const model = useProfileReadModel(session, {
     openProjection,
+    resetCache,
     resumeStore,
     synchronize,
   })
@@ -133,6 +139,7 @@ export function ProfileReader({
   const disabled =
     !connected ||
     model.state.phase === 'synchronizing' ||
+    (model.state.phase === 'failed' && !model.state.retryable) ||
     (model.state.phase === 'projecting' && model.state.busy)
   const runStep = () => {
     if (model.state.phase === 'projecting') {

@@ -143,6 +143,21 @@ type BaselineAuthenticationRead = {
 
 class EventCacheCorruptionError extends Error {}
 
+export class DeferredEventCacheCorruptionError extends Error {
+  constructor() {
+    super(
+      'The browser event cache is corrupt and was not reset. Synchronize again.',
+    )
+    this.name = 'DeferredEventCacheCorruptionError'
+  }
+}
+
+export function isDeferredEventCacheCorruptionError(
+  error: unknown,
+): error is Error {
+  return error instanceof DeferredEventCacheCorruptionError
+}
+
 const EMPTY_LOG_DIGEST = keccak256(
   stringToHex('lifeinvader.event-cache.log-chain.v1'),
 )
@@ -1935,11 +1950,7 @@ export class BrowserEventCache {
             return
           }
           if (!resetOnCorruption) {
-            fail(
-              cacheError(
-                'The browser event cache is corrupt and was not reset. Synchronize again.',
-              ),
-            )
+            fail(new DeferredEventCacheCorruptionError())
             return
           }
           try {

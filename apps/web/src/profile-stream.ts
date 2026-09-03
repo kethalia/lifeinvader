@@ -62,6 +62,8 @@ export type ProfileStreamSynchronizer = (
   options?: SynchronizeProfileStreamOptions,
 ) => Promise<ProfileStreamSnapshot>
 
+export type ProfileStreamCacheResetter = (chainId: bigint) => Promise<void>
+
 type IssuedProfileProjectionAnchor = {
   chainId: bigint
   checkpoint?: EventCheckpoint
@@ -340,6 +342,24 @@ function sameCursor(first: EventCursor, second: EventCursor) {
         checkpoint.blockNumber === second.checkpoints[index]?.blockNumber,
     )
   )
+}
+
+export async function resetProfileStreamCache(
+  chainId: bigint,
+  storage: ProfileStreamStorageOptions = {},
+) {
+  const seed = createEventCursor({
+    chainId,
+    filter: PROFILE_SET_FILTER,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock: PROFILE_EVENT_START_BLOCK,
+  })
+  const cache = await openEventCache({ ...storage, filter: PROFILE_SET_FILTER })
+  try {
+    await cache.clear(seed)
+  } finally {
+    cache.close()
+  }
 }
 
 export const synchronizeProfileStream: ProfileStreamSynchronizer = async (
