@@ -97,10 +97,22 @@ The stream rechecks its final checkpoint, confirmation depth, head, and wallet
 chain after cache work. It cannot claim catch-up unless its checkpoint anchors the
 twice-sampled safe head. Partial catch-up remains identifiable to the caller, and
 no history is read merely because a wallet connected or a component rendered.
+
+The membership projection reduces complete-block cache pages in chronological
+order to each account's latest join or leave signal. It retains only current
+members, while its resumable snapshot binds the selected group, total signal
+count, exact log tail, confirmation checkpoint, and canonical active-member
+records. Snapshot digests are deterministic, member reads are address-ordered and
+capped at 200 records per page, and malformed or cross-group input is rejected
+atomically. This remains public social metadata, never access control. A later
+runner will authenticate the snapshot against the exact cache generation before
+publishing it to React.
+
 The Anvil integration covers create, join, send, confirmed exact-group message
 and membership readback, and discovery of the immutable group definition. Later
-slices will reduce complete membership history and add the React interface
-without a hosted indexer, application server, or database.
+slices will connect the membership projection to its authenticated cache runner
+and add the React interface without a hosted indexer, application server, or
+database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
