@@ -173,6 +173,24 @@ async function requestInContext(
   }
 }
 
+async function authenticateCacheInContext(
+  authenticateCache: () => Promise<void>,
+  signal: AbortSignal,
+) {
+  if (signal.aborted) throw cancelledError()
+  let handleAbort: (() => void) | undefined
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    handleAbort = () => reject(cancelledError())
+    signal.addEventListener('abort', handleAbort, { once: true })
+  })
+  try {
+    await Promise.race([Promise.resolve().then(authenticateCache), interrupted])
+    if (signal.aborted) throw cancelledError()
+  } finally {
+    if (handleAbort) signal.removeEventListener('abort', handleAbort)
+  }
+}
+
 async function assertSelectedChain(
   provider: Eip1193Provider,
   chainId: bigint,
@@ -301,7 +319,7 @@ export async function authenticateIssuedGroupMembershipProjectionAnchor(
         'The wallet head moved behind the group-membership projection anchor.',
       )
     }
-    await authenticateCache()
+    await authenticateCacheInContext(authenticateCache, interruption.signal)
     assertContextActive()
     if (issued.checkpoint) {
       await assertCanonicalCheckpoint(

@@ -652,6 +652,70 @@ describe('group-membership projection anchors', () => {
     expect(authenticateCache).toHaveBeenCalledTimes(1)
   })
 
+  it('cancels a stalled cache authentication and releases listeners', async () => {
+    const base = providerFor()
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const provider: Eip1193Provider = {
+      on: vi.fn((event, listener) => listeners.set(event, listener)),
+      removeListener: vi.fn((event) => listeners.delete(event)),
+      request: vi.fn((request) => base.request(request)),
+    }
+    const snapshot = await synchronizeGroupMembershipStream(
+      provider,
+      1n,
+      GROUP_A,
+      { storage: storage() },
+    )
+    const controller = new AbortController()
+    const authenticateCache = vi.fn(
+      () =>
+        new Promise<void>(() => {
+          queueMicrotask(() => controller.abort())
+        }),
+    )
+
+    await expect(
+      authenticateIssuedGroupMembershipProjectionAnchor(
+        snapshot.projectionAnchor!,
+        authenticateCache,
+        controller.signal,
+      ),
+    ).rejects.toThrow(/cancelled/i)
+    expect(authenticateCache).toHaveBeenCalledTimes(1)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('interrupts stalled cache authentication when the wallet chain changes', async () => {
+    const base = providerFor()
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const provider: Eip1193Provider = {
+      on: vi.fn((event, listener) => listeners.set(event, listener)),
+      removeListener: vi.fn((event) => listeners.delete(event)),
+      request: vi.fn((request) => base.request(request)),
+    }
+    const snapshot = await synchronizeGroupMembershipStream(
+      provider,
+      1n,
+      GROUP_A,
+      { storage: storage() },
+    )
+    const authenticateCache = vi.fn(
+      () =>
+        new Promise<void>(() => {
+          queueMicrotask(() => listeners.get('chainChanged')?.('0x2'))
+        }),
+    )
+
+    await expect(
+      authenticateIssuedGroupMembershipProjectionAnchor(
+        snapshot.projectionAnchor!,
+        authenticateCache,
+      ),
+    ).rejects.toThrow(/chain changed/i)
+    expect(authenticateCache).toHaveBeenCalledTimes(1)
+    expect(listeners.size).toBe(0)
+  })
+
   it('rejects a replaced checkpoint before authenticating the cache', async () => {
     let branch = 'a'
     const provider: Eip1193Provider = {
