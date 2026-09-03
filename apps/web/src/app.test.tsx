@@ -170,6 +170,7 @@ describe('App', () => {
     let deployed = false
     let failNextInspection = false
     let transactionNumber = 0
+    let unknownReceiptAttempts = 0
     let resolveReceipt: ((value: unknown) => void) | undefined
     const receiptResponse = new Promise<unknown>((resolve) => {
       resolveReceipt = resolve
@@ -211,9 +212,21 @@ describe('App', () => {
               return result
             }
             if (transactionNumber === 2) {
-              return { blockNumber: '0x2b', status: '0x0' }
+              return {
+                blockNumber: '0x2b',
+                status: '0x0',
+                transactionHash: REVERTED_TRANSACTION_HASH,
+              }
             }
-            throw new Error('Wallet disconnected.')
+            unknownReceiptAttempts += 1
+            if (unknownReceiptAttempts === 1) {
+              throw new Error('Wallet disconnected.')
+            }
+            return {
+              blockNumber: '0x2c',
+              status: '0x1',
+              transactionHash: UNKNOWN_TRANSACTION_HASH,
+            }
           }
           throw new Error(`Unexpected method: ${method}`)
         },
@@ -250,7 +263,11 @@ describe('App', () => {
     ).toBe(true)
 
     await act(async () => {
-      resolveReceipt?.({ blockNumber: '0x2a', status: '0x1' })
+      resolveReceipt?.({
+        blockNumber: '0x2a',
+        status: '0x1',
+        transactionHash: TRANSACTION_HASH,
+      })
     })
 
     expect(await screen.findByText(/confirmed in block 42/i)).toBeTruthy()
@@ -290,13 +307,10 @@ describe('App', () => {
     ).toBe(false)
 
     fireEvent.click(
-      screen.getByRole('button', { name: /i checked this hash/i }),
+      screen.getByRole('button', { name: /check receipt again/i }),
     )
-    expect(
-      screen
-        .getByRole('button', { name: /publish on-chain/i })
-        .hasAttribute('disabled'),
-    ).toBe(false)
+    expect(await screen.findByText(/confirmed in block 44/i)).toBeTruthy()
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
 
     window.removeEventListener('eip6963:requestProvider', announce)
   })

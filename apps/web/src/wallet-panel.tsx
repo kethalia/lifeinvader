@@ -279,7 +279,8 @@ export function WalletPanel() {
         )
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
-        if (transaction.action === 'deploy') await refreshInspection()
+        if (transaction.action === 'post') setBody('')
+        else await refreshInspection()
       } catch (error) {
         setSubmittedTransaction({
           ...transaction,

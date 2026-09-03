@@ -103,6 +103,7 @@ describe('post transactions', () => {
     const provider = providerFrom(async () => ({
       blockNumber: '0x2a',
       status: '0x1',
+      transactionHash: TRANSACTION_HASH,
     }))
 
     await expect(
@@ -127,6 +128,7 @@ describe('post transactions', () => {
     const provider = providerFrom(async () => ({
       blockNumber: '0x2a',
       status: '0x0',
+      transactionHash: TRANSACTION_HASH,
     }))
 
     const error = await waitForTransactionReceipt(
@@ -150,6 +152,30 @@ describe('post transactions', () => {
     expect(request).toHaveBeenCalledTimes(1)
   })
 
+  it('rejects a receipt for a different transaction', async () => {
+    const provider = providerFrom(async () => ({
+      blockNumber: '0x2a',
+      status: '0x1',
+      transactionHash: OTHER_BLOCK_HASH,
+    }))
+
+    await expect(
+      waitForTransactionReceipt(provider, TRANSACTION_HASH),
+    ).rejects.toThrow(/different transaction/i)
+  })
+
+  it('bounds repeated null receipts without discarding the hash', async () => {
+    const request = vi.fn(async () => null)
+
+    await expect(
+      waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH, {
+        pollIntervalMs: 0,
+        timeoutMs: 0,
+      }),
+    ).rejects.toThrow(TRANSACTION_HASH)
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
   it('rechecks the selected chain after reading a receipt', async () => {
     let changed = false
     const assertCurrentChain = vi.fn(async () => {
@@ -157,7 +183,11 @@ describe('post transactions', () => {
     })
     const provider = providerFrom(async () => {
       changed = true
-      return { blockNumber: '0x2a', status: '0x1' }
+      return {
+        blockNumber: '0x2a',
+        status: '0x1',
+        transactionHash: TRANSACTION_HASH,
+      }
     })
 
     await expect(

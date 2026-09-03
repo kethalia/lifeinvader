@@ -420,6 +420,14 @@ function parseReceipt(
 
   const status = 'status' in value ? value.status : undefined
   const blockNumber = 'blockNumber' in value ? value.blockNumber : undefined
+  const transactionHash = parseTransactionHash(
+    'transactionHash' in value ? value.transactionHash : undefined,
+  )
+  if (transactionHash.toLowerCase() !== hash.toLowerCase()) {
+    throw new Error(
+      'The wallet returned a receipt for a different transaction.',
+    )
+  }
   if (status !== '0x0' && status !== '0x1') {
     throw new Error('The wallet returned an invalid transaction status.')
   }
@@ -454,9 +462,12 @@ export async function waitForTransactionReceipt(
   options: {
     assertCurrentChain?: () => Promise<void>
     pollIntervalMs?: number
+    timeoutMs?: number
   } = {},
 ): Promise<TransactionReceipt> {
   const pollIntervalMs = options.pollIntervalMs ?? 1_000
+  const timeoutMs = options.timeoutMs ?? 120_000
+  const deadline = Date.now() + timeoutMs
 
   while (true) {
     await options.assertCurrentChain?.()
@@ -468,7 +479,12 @@ export async function waitForTransactionReceipt(
 
     const receipt = parseReceipt(receiptValue, hash)
     if (receipt) return receipt
-    await delay(pollIntervalMs)
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Receipt for transaction ${hash} is still unavailable. Check its status before trying again.`,
+      )
+    }
+    await delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())))
   }
 }
 
