@@ -19,6 +19,7 @@ import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
 import { parseMediaCid } from './media-cid'
 import {
+  createGroup,
   deployProtocol,
   inspectProtocol,
   LOCAL_CHAIN_ID,
@@ -26,6 +27,8 @@ import {
   publishRepost,
   publishPost,
   sendDirectMessage,
+  sendGroupMessage,
+  setGroupMembership,
   setProfile,
   setPostLike,
 } from './protocol'
@@ -119,7 +122,7 @@ afterAll(async () => {
   })
 })
 describe('wallet transaction helpers on Anvil', () => {
-  it('deploys v1 and verifies profile, post, reaction, and public-message transactions', async () => {
+  it('deploys v1 and verifies profile, post, reaction, direct-message, and group transactions', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
     )
@@ -194,17 +197,55 @@ describe('wallet transaction helpers on Anvil', () => {
     await expect(
       publishRepost(provider, account, LOCAL_CHAIN_ID, 1n, undefined, provider),
     ).resolves.toMatchObject({ blockNumber: 7n })
+    const directMessageReceipt = await sendDirectMessage(
+      provider,
+      account,
+      LOCAL_CHAIN_ID,
+      recipient,
+      { body: 'This message is permanently public.', mediaCid: '0x' },
+      undefined,
+      provider,
+    )
+    expect(directMessageReceipt).toMatchObject({
+      blockNumber: 8n,
+      messageId: 1n,
+    })
+    const groupReceipt = await createGroup(
+      provider,
+      account,
+      LOCAL_CHAIN_ID,
+      { metadataCid: MEDIA_CID.bytes, name: 'Bagholders Anonymous' },
+      undefined,
+      provider,
+    )
+    expect(groupReceipt).toMatchObject({ blockNumber: 9n, groupId: 1n })
     await expect(
-      sendDirectMessage(
+      setGroupMembership(
         provider,
         account,
         LOCAL_CHAIN_ID,
-        recipient,
-        { body: 'This message is permanently public.', mediaCid: '0x' },
+        groupReceipt.groupId,
+        true,
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 8n })
+    ).resolves.toMatchObject({ blockNumber: 10n })
+    const groupMessageReceipt = await sendGroupMessage(
+      provider,
+      account,
+      LOCAL_CHAIN_ID,
+      groupReceipt.groupId,
+      {
+        body: 'Membership does not make this private.',
+        mediaCid: MEDIA_CID.bytes,
+      },
+      undefined,
+      provider,
+    )
+    expect(groupMessageReceipt).toMatchObject({
+      blockNumber: 11n,
+      messageId: 2n,
+    })
     await expect(
       setProfile(
         provider,
@@ -214,7 +255,7 @@ describe('wallet transaction helpers on Anvil', () => {
         undefined,
         provider,
       ),
-    ).resolves.toMatchObject({ blockNumber: 9n })
+    ).resolves.toMatchObject({ blockNumber: 12n })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,

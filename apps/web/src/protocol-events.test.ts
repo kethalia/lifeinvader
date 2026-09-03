@@ -11,7 +11,10 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
+  decodeGroupMembershipSet,
   decodePublishedDirectMessage,
+  decodePublishedGroup,
+  decodePublishedGroupMessage,
   decodeProfileSet,
   decodePostLikeSet,
   decodePublishedComment,
@@ -19,6 +22,11 @@ import {
   decodePublishedRepost,
   DIRECT_MESSAGE_SENT_FILTER,
   getDirectMessageConversationFilter,
+  getGroupMembershipFilter,
+  getGroupMessageFilter,
+  GROUP_CREATED_FILTER,
+  GROUP_MEMBERSHIP_SET_FILTER,
+  GROUP_MESSAGE_SENT_FILTER,
   POST_CONTENT_KIND_TOPIC,
   POST_LIKE_SET_FILTER,
   PROFILE_SET_FILTER,
@@ -29,6 +37,9 @@ import {
   COMMENT_PUBLISHED_TOPIC,
   DIRECT_MESSAGE_SENT_TOPIC,
   getDirectConversationId,
+  GROUP_CREATED_TOPIC,
+  GROUP_MEMBERSHIP_SET_TOPIC,
+  GROUP_MESSAGE_SENT_TOPIC,
   LIKE_SET_TOPIC,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
@@ -48,6 +59,10 @@ const PROFILE_DATA_PARAMETERS = [
 ] as const
 const DIRECT_MESSAGE_DATA_PARAMETERS = [
   { type: 'uint256' },
+  { type: 'string' },
+  { type: 'bytes' },
+] as const
+const GROUP_CREATED_DATA_PARAMETERS = [
   { type: 'string' },
   { type: 'bytes' },
 ] as const
@@ -222,6 +237,91 @@ function directMessageLog(
       options.conversationTopic ?? conversationId,
       options.senderTopic ?? padHex(sender, { size: 32 }),
       options.recipientTopic ?? padHex(recipient, { size: 32 }),
+    ],
+  }
+}
+
+function groupCreatedLog(
+  options: {
+    creator?: Address
+    creatorTopic?: Hex
+    data?: Hex
+    groupId?: bigint
+    metadataCid?: Hex
+    name?: string
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const creator = options.creator ?? AUTHOR
+  const groupId = options.groupId ?? 17n
+  const metadataCid = options.metadataCid ?? '0x01701220'
+  const name = options.name ?? 'Bagholders Anonymous'
+  return {
+    ...postLog(),
+    data:
+      options.data ??
+      encodeAbiParameters(GROUP_CREATED_DATA_PARAMETERS, [name, metadataCid]),
+    topics: options.topics ?? [
+      options.topic ?? GROUP_CREATED_TOPIC,
+      padHex(toHex(groupId), { size: 32 }),
+      options.creatorTopic ?? padHex(creator, { size: 32 }),
+    ],
+  }
+}
+
+function groupMembershipLog(
+  options: {
+    account?: Address
+    accountTopic?: Hex
+    data?: Hex
+    groupId?: bigint
+    joined?: boolean
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const account = options.account ?? ACCOUNT
+  const groupId = options.groupId ?? 17n
+  const joined = options.joined ?? true
+  return {
+    ...postLog(),
+    data: options.data ?? encodeAbiParameters(LIKE_DATA_PARAMETERS, [joined]),
+    topics: options.topics ?? [
+      options.topic ?? GROUP_MEMBERSHIP_SET_TOPIC,
+      padHex(toHex(groupId), { size: 32 }),
+      options.accountTopic ?? padHex(account, { size: 32 }),
+    ],
+  }
+}
+
+function groupMessageLog(
+  options: {
+    body?: string
+    data?: Hex
+    groupId?: bigint
+    mediaCid?: Hex
+    messageId?: bigint
+    sender?: Address
+    senderTopic?: Hex
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const body = options.body ?? 'Everyone can read this group message.'
+  const groupId = options.groupId ?? 17n
+  const mediaCid = options.mediaCid ?? '0x01701220'
+  const messageId = options.messageId ?? 19n
+  const sender = options.sender ?? AUTHOR
+  return {
+    ...postLog(),
+    data:
+      options.data ?? encodeAbiParameters(DATA_PARAMETERS, [body, mediaCid]),
+    topics: options.topics ?? [
+      options.topic ?? GROUP_MESSAGE_SENT_TOPIC,
+      padHex(toHex(groupId), { size: 32 }),
+      options.senderTopic ?? padHex(sender, { size: 32 }),
+      padHex(toHex(messageId), { size: 32 }),
     ],
   }
 }
@@ -644,5 +744,248 @@ describe('DirectMessageSent decoding', () => {
     expect(getDirectMessageConversationFilter(RECIPIENT, AUTHOR)).toEqual(
       getDirectMessageConversationFilter(AUTHOR, RECIPIENT),
     )
+  })
+})
+
+describe('GroupCreated decoding', () => {
+  it('decodes a canonical immutable public-group definition', () => {
+    expect(decodePublishedGroup(groupCreatedLog())).toEqual({
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      creator: getAddress(AUTHOR),
+      groupId: 17n,
+      logIndex: 2,
+      metadataCid: '0x01701220',
+      name: 'Bagholders Anonymous',
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', groupCreatedLog({ topic: POST_PUBLISHED_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...groupCreatedLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodePublishedGroup(log)).toBeUndefined()
+  })
+
+  it.each([
+    [
+      'missing indexed topics',
+      groupCreatedLog({ topics: [GROUP_CREATED_TOPIC] }),
+    ],
+    [
+      'surplus indexed topics',
+      groupCreatedLog({
+        topics: [
+          ...groupCreatedLog().topics,
+          keccak256(stringToHex('surplus')),
+        ],
+      }),
+    ],
+    ['zero group identifier', groupCreatedLog({ groupId: 0n })],
+    [
+      'a zero creator',
+      groupCreatedLog({
+        creator: '0x0000000000000000000000000000000000000000',
+      }),
+    ],
+    ['an empty name', groupCreatedLog({ name: '' })],
+    ['an oversized UTF-8 name', groupCreatedLog({ name: '🫥'.repeat(25) })],
+    [
+      'an oversized metadata CID',
+      groupCreatedLog({ metadataCid: `0x${'00'.repeat(129)}` as Hex }),
+    ],
+    [
+      'non-canonical creator padding',
+      groupCreatedLog({ creatorTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed ABI data', groupCreatedLog({ data: '0x01' })],
+    [
+      'non-zero dynamic padding',
+      groupCreatedLog({
+        data: `${groupCreatedLog().data.slice(0, -2)}01` as Hex,
+      }),
+    ],
+    [
+      'surplus ABI data',
+      groupCreatedLog({
+        data: `${groupCreatedLog().data}${'00'.repeat(32)}` as Hex,
+      }),
+    ],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodePublishedGroup(log)).toThrow(/invalid GroupCreated/i)
+  })
+})
+
+describe('GroupMembershipSet decoding', () => {
+  it.each([true, false])('decodes a canonical joined=%s signal', (joined) => {
+    expect(decodeGroupMembershipSet(groupMembershipLog({ joined }))).toEqual({
+      account: getAddress(ACCOUNT),
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      groupId: 17n,
+      joined,
+      logIndex: 2,
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', groupMembershipLog({ topic: LIKE_SET_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...groupMembershipLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodeGroupMembershipSet(log)).toBeUndefined()
+  })
+
+  it.each([
+    [
+      'missing indexed topics',
+      groupMembershipLog({ topics: [GROUP_MEMBERSHIP_SET_TOPIC] }),
+    ],
+    [
+      'surplus indexed topics',
+      groupMembershipLog({
+        topics: [
+          ...groupMembershipLog().topics,
+          keccak256(stringToHex('surplus')),
+        ],
+      }),
+    ],
+    ['zero group identifier', groupMembershipLog({ groupId: 0n })],
+    [
+      'a zero account',
+      groupMembershipLog({
+        account: '0x0000000000000000000000000000000000000000',
+      }),
+    ],
+    ['missing boolean data', groupMembershipLog({ data: '0x' })],
+    [
+      'non-canonical boolean data',
+      groupMembershipLog({ data: padHex(toHex(2), { size: 32 }) }),
+    ],
+    [
+      'surplus boolean data',
+      groupMembershipLog({ data: `0x${'00'.repeat(64)}` as Hex }),
+    ],
+    [
+      'non-canonical account padding',
+      groupMembershipLog({ accountTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodeGroupMembershipSet(log)).toThrow(
+      /invalid GroupMembershipSet/i,
+    )
+  })
+})
+
+describe('GroupMessageSent decoding', () => {
+  it('decodes a canonical deliberately public group message', () => {
+    expect(decodePublishedGroupMessage(groupMessageLog())).toEqual({
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      body: 'Everyone can read this group message.',
+      groupId: 17n,
+      logIndex: 2,
+      mediaCid: '0x01701220',
+      messageId: 19n,
+      sender: getAddress(AUTHOR),
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', groupMessageLog({ topic: POST_PUBLISHED_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...groupMessageLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodePublishedGroupMessage(log)).toBeUndefined()
+  })
+
+  it.each([
+    [
+      'missing indexed topics',
+      groupMessageLog({ topics: [GROUP_MESSAGE_SENT_TOPIC] }),
+    ],
+    [
+      'surplus indexed topics',
+      groupMessageLog({
+        topics: [
+          ...groupMessageLog().topics,
+          keccak256(stringToHex('surplus')),
+        ],
+      }),
+    ],
+    ['zero group identifier', groupMessageLog({ groupId: 0n })],
+    ['zero message identifier', groupMessageLog({ messageId: 0n })],
+    [
+      'a zero sender',
+      groupMessageLog({
+        sender: '0x0000000000000000000000000000000000000000',
+      }),
+    ],
+    ['an empty message', groupMessageLog({ body: '', mediaCid: '0x' })],
+    ['an oversized body', groupMessageLog({ body: 'x'.repeat(4_097) })],
+    [
+      'an oversized media CID',
+      groupMessageLog({ mediaCid: `0x${'00'.repeat(129)}` as Hex }),
+    ],
+    [
+      'non-canonical sender padding',
+      groupMessageLog({ senderTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed ABI data', groupMessageLog({ data: '0x01' })],
+    [
+      'non-zero dynamic padding',
+      groupMessageLog({
+        data: `${groupMessageLog().data.slice(0, -2)}01` as Hex,
+      }),
+    ],
+    [
+      'surplus ABI data',
+      groupMessageLog({
+        data: `${groupMessageLog().data}${'00'.repeat(32)}` as Hex,
+      }),
+    ],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodePublishedGroupMessage(log)).toThrow(
+      /invalid GroupMessageSent/i,
+    )
+  })
+
+  it('offers global discovery and exact group-scoped filters', () => {
+    const groupTopic = padHex(toHex(17n), { size: 32 })
+    expect(GROUP_CREATED_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [GROUP_CREATED_TOPIC],
+    })
+    expect(GROUP_MEMBERSHIP_SET_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [GROUP_MEMBERSHIP_SET_TOPIC],
+    })
+    expect(GROUP_MESSAGE_SENT_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [GROUP_MESSAGE_SENT_TOPIC],
+    })
+    expect(getGroupMembershipFilter(17n)).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [GROUP_MEMBERSHIP_SET_TOPIC, groupTopic],
+    })
+    expect(getGroupMessageFilter(17n)).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [GROUP_MESSAGE_SENT_TOPIC, groupTopic],
+    })
+    expect(() => getGroupMembershipFilter(0n)).toThrow(/group identifier/i)
+    expect(() => getGroupMessageFilter(1n << 256n)).toThrow(/group identifier/i)
   })
 })
