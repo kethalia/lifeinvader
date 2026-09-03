@@ -82,14 +82,25 @@ IndexedDB storage, and returns at most the newest 100 retained messages. Separat
 group IDs use separate cache scopes. A malformed cached page clears only that
 scope and restarts from genesis; fresh malformed logs fail before cursor commit.
 
+The selected-group membership stream applies the same chain, runtime,
+confirmation, cancellation, and cache rules to the exact indexed
+`GroupMembershipSet` filter. Each invocation scans at most one range and exposes
+at most the newest 200 validated join or leave signals. That recent page is not a
+current member list: repeated signals must be reduced across complete history.
+Only a caught-up stream issues an immutable, page-local projection anchor bound
+to the exact group, cache generation, revision, cursor, provider, and confirmed
+checkpoint. Its authenticator brackets later cache work with canonical wallet
+checks so a projection cannot publish from a copied, stale, or reorganized
+anchor.
+
 The stream rechecks its final checkpoint, confirmation depth, head, and wallet
 chain after cache work. It cannot claim catch-up unless its checkpoint anchors the
 twice-sampled safe head. Partial catch-up remains identifiable to the caller, and
 no history is read merely because a wallet connected or a component rendered.
-The Anvil integration covers create, join, send, and confirmed exact-group
-readback as well as discovery of the immutable group definition. Later slices
-will add membership projections and the React interface without a hosted
-indexer, application server, or database.
+The Anvil integration covers create, join, send, confirmed exact-group message
+and membership readback, and discovery of the immutable group definition. Later
+slices will reduce complete membership history and add the React interface
+without a hosted indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
