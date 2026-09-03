@@ -14,10 +14,13 @@ import {
 import {
   PostCommentProjection,
   type PostCommentProjectionProgress,
+  type PostCommentProjectionReadOptions,
 } from './post-comment-projection'
 import {
   POST_COMMENT_EVENT_PAGE_SIZE,
   POST_COMMENT_EVENT_START_BLOCK,
+  assertIssuedPostCommentProjectionAnchor,
+  authenticateIssuedPostCommentProjectionAnchor,
   type PostCommentProjectionAnchor,
   type PostCommentStreamStorageOptions,
 } from './post-comment-stream'
@@ -48,6 +51,7 @@ type NormalizedProjectionAnchor = {
   chainId: bigint
   comments: EventCachePosition
   head: bigint
+  issued: PostCommentProjectionAnchor
   safeHead?: bigint
 }
 
@@ -190,10 +194,12 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
       throw projectionRunError('anchor safe-head checkpoint')
     }
   }
+  assertIssuedPostCommentProjectionAnchor(value)
   return {
     chainId: value.chainId,
     comments,
     head: value.head,
+    issued: value,
     safeHead,
   }
 }
@@ -228,6 +234,7 @@ export class PostCommentProjectionRun {
   #cache?: BrowserEventCache
   #continuation?: EventCacheScanCursor
   #failure?: Error
+  readonly #interruption = new AbortController()
   #logsProcessed = 0n
   #pagesScanned = 0n
   #phase: PostCommentProjectionRunPhase = 'comments'
@@ -299,11 +306,11 @@ export class PostCommentProjectionRun {
     return this.#projection.trackedPostIds
   }
 
-  getComments(postId: unknown) {
+  readComments(postId: unknown, options?: PostCommentProjectionReadOptions) {
     if (this.#phase !== 'complete') {
       throw new Error('The post comment projection is not complete.')
     }
-    return this.#projection.getComments(postId)
+    return this.#projection.readComments(postId, options)
   }
 
   async advance(): Promise<PostCommentProjectionRunSnapshot> {
@@ -359,6 +366,7 @@ export class PostCommentProjectionRun {
       return
     }
     this.#phase = 'closed'
+    this.#interruption.abort()
     this.#projection.reset()
     this.#baseline = undefined
     this.#continuation = undefined
@@ -413,7 +421,31 @@ export class PostCommentProjectionRun {
         seed: getSeed(this.#anchor.comments),
       },
     ])
-    const currentPhase = this.#readPhase()
+    let currentPhase = this.#readPhase()
+    if (currentPhase === 'closed') {
+      throw new Error('The post comment projection run is closed.')
+    }
+    if (currentPhase !== 'authenticate') throw projectionRunError('phase')
+    await authenticateIssuedPostCommentProjectionAnchor(
+      this.#anchor.issued,
+      async () => {
+        if (this.#readPhase() !== 'authenticate') {
+          throw new Error('The post comment projection run is closed.')
+        }
+        await cache.authenticateBaselines([
+          {
+            baseline,
+            filter: PUBLISHED_COMMENT_FILTER,
+            seed: getSeed(this.#anchor.comments),
+          },
+        ])
+        if (this.#readPhase() !== 'authenticate') {
+          throw new Error('The post comment projection run is closed.')
+        }
+      },
+      this.#interruption.signal,
+    )
+    currentPhase = this.#readPhase()
     if (currentPhase === 'closed') {
       throw new Error('The post comment projection run is closed.')
     }
@@ -432,6 +464,7 @@ export class PostCommentProjectionRun {
   #fail(error: Error) {
     this.#failure = error
     this.#phase = 'failed'
+    this.#interruption.abort()
     this.#projection.reset()
     this.#baseline = undefined
     this.#continuation = undefined

@@ -12,6 +12,8 @@ import {
 
 export const MAX_POST_COMMENT_PROJECTION_PAGE_LOGS = 5_199
 export const MAX_POST_COMMENT_PROJECTION_POSTS = 50
+export const POST_COMMENT_PROJECTION_READ_PAGE_SIZE = 50
+export const MAX_POST_COMMENT_PROJECTION_READ_PAGE_SIZE = 200
 
 const MAX_UINT256 = (1n << 256n) - 1n
 
@@ -26,6 +28,18 @@ export type PostCommentProjectionProgress = {
   confirmedThrough?: EventCheckpoint
   last?: PostCommentProjectionPosition
   retainedCommentCount: bigint
+}
+
+export type PostCommentProjectionReadPage = {
+  comments: readonly PublishedComment[]
+  complete: boolean
+  nextOffset?: number
+  totalComments: bigint
+}
+
+export type PostCommentProjectionReadOptions = {
+  limit?: number
+  offset?: number
 }
 
 type DecodedCommentPage = {
@@ -82,6 +96,26 @@ function normalizeTrackedPostIds(value: unknown) {
   return postIds.toSorted((first, second) =>
     first === second ? 0 : first < second ? -1 : 1,
   )
+}
+
+function normalizeReadOptions(value: unknown) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw projectionError('read options')
+  }
+  const options = value as PostCommentProjectionReadOptions
+  const limit = options.limit ?? POST_COMMENT_PROJECTION_READ_PAGE_SIZE
+  const offset = options.offset ?? 0
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_POST_COMMENT_PROJECTION_READ_PAGE_SIZE
+  ) {
+    throw projectionError('read limit')
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw projectionError('read offset')
+  }
+  return { limit, offset }
 }
 
 function normalizeCheckpoint(value: unknown) {
@@ -258,13 +292,26 @@ export class PostCommentProjection {
     this.#confirmedThrough = checkpoint
   }
 
-  getComments(postIdValue: unknown) {
+  readComments(
+    postIdValue: unknown,
+    optionsValue: PostCommentProjectionReadOptions = {},
+  ): PostCommentProjectionReadPage {
     const postId = normalizePostId(postIdValue)
     const key = postId.toString(16)
     if (!this.#tracked.has(key)) {
       throw projectionError('untracked post')
     }
-    return (this.#comments.get(key) ?? []).map(copyComment)
+    const { limit, offset } = normalizeReadOptions(optionsValue)
+    const comments = this.#comments.get(key) ?? []
+    if (offset > comments.length) throw projectionError('read offset')
+    const end = Math.min(offset + limit, comments.length)
+    const complete = end >= comments.length
+    return {
+      comments: comments.slice(offset, end).map(copyComment),
+      complete,
+      nextOffset: complete ? undefined : end,
+      totalComments: BigInt(comments.length),
+    }
   }
 
   reset() {

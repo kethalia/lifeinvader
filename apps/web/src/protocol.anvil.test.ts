@@ -240,7 +240,7 @@ describe('wallet transaction helpers on Anvil', () => {
     )
     await commentProjection.advance()
     await commentProjection.advance()
-    expect(commentProjection.getComments(1n)).toMatchObject([
+    expect(commentProjection.readComments(1n).comments).toMatchObject([
       {
         author: account,
         body: 'Nothing here is private.',

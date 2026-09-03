@@ -10,6 +10,7 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
+  MAX_POST_COMMENT_PROJECTION_READ_PAGE_SIZE,
   MAX_POST_COMMENT_PROJECTION_PAGE_LOGS,
   MAX_POST_COMMENT_PROJECTION_POSTS,
   PostCommentProjection,
@@ -89,10 +90,10 @@ describe('post comment projection', () => {
 
     expect(projection.trackedPostIds).toEqual([7n, 9n])
     expect(
-      projection.getComments(7n).map(({ commentId }) => commentId),
+      projection.readComments(7n).comments.map(({ commentId }) => commentId),
     ).toEqual([1n, 4n])
     expect(
-      projection.getComments(9n).map(({ commentId }) => commentId),
+      projection.readComments(9n).comments.map(({ commentId }) => commentId),
     ).toEqual([3n])
     expect(projection.progress).toEqual({
       commentCount: 4n,
@@ -112,25 +113,72 @@ describe('post comment projection', () => {
 
     const postIds = projection.trackedPostIds
     postIds[0] = 99n
-    const comments = projection.getComments(7n)
+    const comments = projection.readComments(7n).comments
     comments[0]!.body = 'mutated'
     const progress = projection.progress
     progress.last!.blockNumber = 99n
 
     expect(projection.trackedPostIds).toEqual([7n])
-    expect(projection.getComments(7n)[0]!.body).toBe('comment 1')
+    expect(projection.readComments(7n).comments[0]!.body).toBe('comment 1')
     expect(projection.progress.last!.blockNumber).toBe(1n)
+  })
+
+  it('copies completed histories through strictly bounded read pages', () => {
+    const projection = new PostCommentProjection([7n])
+    projection.applyLogs(
+      Array.from({ length: 205 }, (_, index) => {
+        const commentId = BigInt(index + 1)
+        return commentLog(commentId, commentId)
+      }),
+    )
+
+    const first = projection.readComments(7n, { limit: 2 })
+    expect(first).toMatchObject({
+      complete: false,
+      nextOffset: 2,
+      totalComments: 205n,
+    })
+    expect(first.comments.map(({ commentId }) => commentId)).toEqual([1n, 2n])
+
+    const middle = projection.readComments(7n, {
+      limit: MAX_POST_COMMENT_PROJECTION_READ_PAGE_SIZE,
+      offset: first.nextOffset,
+    })
+    expect(middle.comments).toHaveLength(200)
+    expect(middle.nextOffset).toBe(202)
+    expect(middle.complete).toBe(false)
+
+    const last = projection.readComments(7n, { offset: middle.nextOffset })
+    expect(last.comments.map(({ commentId }) => commentId)).toEqual([
+      203n,
+      204n,
+      205n,
+    ])
+    expect(last).toMatchObject({ complete: true, totalComments: 205n })
+    expect(last.nextOffset).toBeUndefined()
+
+    expect(() => projection.readComments(7n, { limit: 0 })).toThrow(
+      /read limit/i,
+    )
+    expect(() =>
+      projection.readComments(7n, {
+        limit: MAX_POST_COMMENT_PROJECTION_READ_PAGE_SIZE + 1,
+      }),
+    ).toThrow(/read limit/i)
+    expect(() => projection.readComments(7n, { offset: 206 })).toThrow(
+      /read offset/i,
+    )
   })
 
   it('enforces the protocol-wide comment identifier sequence atomically', () => {
     const projection = new PostCommentProjection([7n])
     projection.applyLogs([commentLog(1n, 1n)])
-    const before = projection.getComments(7n)
+    const before = projection.readComments(7n).comments
 
     expect(() => projection.applyLogs([commentLog(3n, 2n)])).toThrow(
       /comment identifier sequence/i,
     )
-    expect(projection.getComments(7n)).toEqual(before)
+    expect(projection.readComments(7n).comments).toEqual(before)
     expect(projection.progress.commentCount).toBe(1n)
 
     const fresh = new PostCommentProjection([7n])
@@ -241,7 +289,7 @@ describe('post comment projection', () => {
     expect(() => new PostCommentProjection([0n])).toThrow(/post identifier/i)
 
     const projection = new PostCommentProjection([7n])
-    expect(() => projection.getComments(8n)).toThrow(/untracked post/i)
+    expect(() => projection.readComments(8n)).toThrow(/untracked post/i)
     expect(() =>
       projection.applyLogs(
         Array(MAX_POST_COMMENT_PROJECTION_PAGE_LOGS + 1).fill(
@@ -262,7 +310,7 @@ describe('post comment projection', () => {
     projection.reset()
 
     expect(projection.trackedPostIds).toEqual([7n])
-    expect(projection.getComments(7n)).toEqual([])
+    expect(projection.readComments(7n).comments).toEqual([])
     expect(projection.progress).toEqual({
       commentCount: 0n,
       confirmedThrough: undefined,

@@ -11,6 +11,7 @@ import {
   type Hex,
 } from 'viem'
 import { openEventCache, type EventCachePosition } from './event-cache'
+import type { Eip1193Provider } from './ethereum'
 import {
   createEventCursor,
   type EventCursor,
@@ -23,10 +24,14 @@ import {
 } from './post-comment-projection-run'
 import {
   POST_COMMENT_EVENT_START_BLOCK,
-  type PostCommentProjectionAnchor,
+  synchronizePostCommentStream,
 } from './post-comment-stream'
 import { PUBLISHED_COMMENT_FILTER } from './protocol-events'
-import { COMMENT_PUBLISHED_TOPIC, PROTOCOL_ADDRESS } from './protocol'
+import {
+  COMMENT_PUBLISHED_TOPIC,
+  LIFEINVADER_INIT_CODE,
+  PROTOCOL_ADDRESS,
+} from './protocol'
 
 const ACCOUNT_A = '0x000000000000000000000000000000000000aaaa' as Address
 const ACCOUNT_B = '0x000000000000000000000000000000000000bbbb' as Address
@@ -34,14 +39,31 @@ const COMMENT_DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
 const FINALITY_DEPTH = 12n
 const HEAD = 17n
 const SAFE_HEAD = HEAD - FINALITY_DEPTH
+const PROTOCOL_RUNTIME_CODE =
+  `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}` as Hex
 
 type TestStorage = Required<
   Pick<OpenPostCommentProjectionRunOptions, 'databaseName' | 'factory'>
 > &
   Pick<OpenPostCommentProjectionRunOptions, 'keyRange'>
 
+type AnchorProviderControl = {
+  beforeCheckpointReturn?: () => Promise<void>
+  chainId: bigint
+  head: bigint
+  safeHeadHash: Hex
+}
+
 function hash(value: string) {
   return keccak256(stringToHex(value))
+}
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((next) => {
+    resolve = next
+  })
+  return { promise, resolve }
 }
 
 function blockHash(blockNumber: bigint) {
@@ -54,7 +76,6 @@ function commentLog(
   options: {
     author?: Address
     body?: string
-    data?: Hex
     logIndex?: number
     postId?: bigint
     transactionIndex?: number
@@ -69,9 +90,7 @@ function commentLog(
     address: PROTOCOL_ADDRESS,
     blockHash: blockHash(blockNumber),
     blockNumber,
-    data:
-      options.data ??
-      encodeAbiParameters(COMMENT_DATA_PARAMETERS, [body, '0x']),
+    data: encodeAbiParameters(COMMENT_DATA_PARAMETERS, [body, '0x']),
     logIndex,
     topics: [
       COMMENT_PUBLISHED_TOPIC,
@@ -125,6 +144,40 @@ function storage(): TestStorage {
   }
 }
 
+function anchorProvider() {
+  const control: AnchorProviderControl = {
+    chainId: 1n,
+    head: HEAD,
+    safeHeadHash: blockHash(SAFE_HEAD),
+  }
+  const provider: Eip1193Provider = {
+    async request({ method, params }) {
+      if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+      if (method === 'eth_chainId') return toHex(control.chainId)
+      if (method === 'eth_blockNumber') return toHex(control.head)
+      if (method === 'eth_getBlockByNumber') {
+        const [number] = params as [Hex]
+        const blockNumber = BigInt(number)
+        if (blockNumber === SAFE_HEAD) {
+          await control.beforeCheckpointReturn?.()
+        }
+        return {
+          hash:
+            blockNumber === SAFE_HEAD
+              ? control.safeHeadHash
+              : blockHash(blockNumber),
+          number,
+        }
+      }
+      if (method === 'eth_getLogs') {
+        throw new Error('A caught-up comment stream must not request logs.')
+      }
+      throw new Error(`Unexpected RPC method: ${method}`)
+    },
+  }
+  return { control, provider }
+}
+
 async function populateComments(
   storageOptions: TestStorage,
   logs: readonly IndexedEventLog[],
@@ -152,14 +205,17 @@ async function populateComments(
 
 async function prepareProjection(logs: readonly IndexedEventLog[]) {
   const storageOptions = storage()
-  const comments = await populateComments(storageOptions, logs)
+  await populateComments(storageOptions, logs)
+  const { control, provider } = anchorProvider()
+  const synchronized = await synchronizePostCommentStream(provider, 1n, {
+    storage: storageOptions,
+  })
+  if (!synchronized.projectionAnchor) {
+    throw new Error('The test stream did not issue a projection anchor.')
+  }
   return {
-    anchor: {
-      chainId: 1n,
-      comments,
-      head: HEAD,
-      safeHead: SAFE_HEAD,
-    } satisfies PostCommentProjectionAnchor,
+    anchor: synchronized.projectionAnchor,
+    control,
     storage: storageOptions,
   }
 }
@@ -186,7 +242,7 @@ describe('post comment projection run', () => {
       safeHead: SAFE_HEAD,
     })
     expect(run.trackedPostIds).toEqual([7n, 8n])
-    expect(() => run.getComments(7n)).toThrow(/not complete/i)
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
     expect(() => run.progress).toThrow(/not complete/i)
     expect(() => run.baseline).toThrow(/not complete/i)
 
@@ -205,16 +261,15 @@ describe('post comment projection run', () => {
       pagesScanned: 3n,
       phase: 'authenticate',
     })
-    expect(() => run.getComments(7n)).toThrow(/not complete/i)
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
 
     await run.advance()
 
     expect(run.snapshot.phase).toBe('complete')
-    expect(run.getComments(7n).map(({ commentId }) => commentId)).toEqual([
-      1n,
-      3n,
-    ])
-    expect(run.getComments(8n)[0]).toMatchObject({
+    expect(
+      run.readComments(7n).comments.map(({ commentId }) => commentId),
+    ).toEqual([1n, 3n])
+    expect(run.readComments(8n).comments[0]).toMatchObject({
       author: getAddress(ACCOUNT_B),
       commentId: 2n,
       postId: 8n,
@@ -235,7 +290,7 @@ describe('post comment projection run', () => {
     expect(run.baseline.logCount).toBe(3)
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
-    expect(run.getComments(7n)).toHaveLength(2)
+    expect(run.readComments(7n).comments).toHaveLength(2)
   })
 
   it('validates every global event while retaining only selected posts', async () => {
@@ -257,9 +312,11 @@ describe('post comment projection run', () => {
     })
     await run.advance()
 
-    expect(run.getComments(7n).map(({ commentId }) => commentId)).toEqual([2n])
+    expect(
+      run.readComments(7n).comments.map(({ commentId }) => commentId),
+    ).toEqual([2n])
     expect(run.progress.commentCount).toBe(2n)
-    expect(() => run.getComments(9n)).toThrow(/untracked post/i)
+    expect(() => run.readComments(9n)).toThrow(/untracked post/i)
   })
 
   it('handles an authenticated empty history without inventing comments', async () => {
@@ -280,7 +337,7 @@ describe('post comment projection run', () => {
     await run.advance()
 
     expect(run.snapshot.phase).toBe('complete')
-    expect(run.getComments(7n)).toEqual([])
+    expect(run.readComments(7n).comments).toEqual([])
     expect(run.progress.confirmedThrough).toEqual({
       blockHash: blockHash(SAFE_HEAD),
       blockNumber: SAFE_HEAD,
@@ -308,7 +365,7 @@ describe('post comment projection run', () => {
 
     await expect(run.advance()).rejects.toThrow(/cache anchor/i)
     expect(run.snapshot.phase).toBe('failed')
-    expect(() => run.getComments(7n)).toThrow(/not complete/i)
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
     await expect(run.advance()).rejects.toThrow(/cache anchor/i)
   })
 
@@ -339,7 +396,7 @@ describe('post comment projection run', () => {
       commentsRetained: 0n,
       phase: 'failed',
     })
-    expect(() => run.getComments(7n)).toThrow(/not complete/i)
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
   })
 
   it('reauthenticates the completed baseline before publication', async () => {
@@ -364,21 +421,89 @@ describe('post comment projection run', () => {
 
     await expect(run.advance()).rejects.toThrow(/baseline snapshot changed/i)
     expect(run.snapshot.phase).toBe('failed')
-    expect(() => run.getComments(7n)).toThrow(/not complete/i)
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
   })
 
-  it('rejects malformed cached comments and identifier gaps atomically', async () => {
-    const malformed = await prepareProjection([
-      commentLog(1n, 1n, { data: '0x' }),
-    ])
-    const malformedRun = await openPostCommentProjectionRun(
-      malformed.anchor,
+  it('rejects an anchor whose confirmed block left the provider chain', async () => {
+    const prepared = await prepareProjection([commentLog(1n, 1n)])
+    const run = await openPostCommentProjectionRun(
+      prepared.anchor,
       [7n],
-      malformed.storage,
+      prepared.storage,
     )
-    await expect(malformedRun.advance()).rejects.toThrow(/projection event/i)
-    expect(malformedRun.snapshot.phase).toBe('failed')
+    await run.advance()
+    prepared.control.safeHeadHash = hash('replacement safe head')
 
+    await expect(run.advance()).rejects.toThrow(/checkpoint changed/i)
+    expect(run.snapshot).toMatchObject({
+      commentsRetained: 0n,
+      phase: 'failed',
+    })
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
+  })
+
+  it('brackets provider authentication with exact cache proofs', async () => {
+    const prepared = await prepareProjection([commentLog(1n, 1n)])
+    const run = await openPostCommentProjectionRun(
+      prepared.anchor,
+      [7n],
+      prepared.storage,
+    )
+    await run.advance()
+    const started = deferred()
+    const release = deferred()
+    prepared.control.beforeCheckpointReturn = async () => {
+      started.resolve()
+      await release.promise
+    }
+
+    const authenticating = run.advance()
+    await started.promise
+    const cache = await openEventCache({
+      ...prepared.storage,
+      filter: PUBLISHED_COMMENT_FILTER,
+    })
+    try {
+      await cache.clear(seedCursor())
+    } finally {
+      cache.close()
+    }
+    release.resolve()
+
+    await expect(authenticating).rejects.toThrow(/baseline snapshot changed/i)
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
+  })
+
+  it('cancels provider authentication when the local run closes', async () => {
+    const prepared = await prepareProjection([commentLog(1n, 1n)])
+    const run = await openPostCommentProjectionRun(
+      prepared.anchor,
+      [7n],
+      prepared.storage,
+    )
+    await run.advance()
+    const started = deferred()
+    const release = deferred()
+    prepared.control.beforeCheckpointReturn = async () => {
+      started.resolve()
+      await release.promise
+    }
+
+    const authenticating = run.advance()
+    await started.promise
+    run.close()
+    release.resolve()
+
+    await expect(authenticating).rejects.toThrow(/cancelled|closed/i)
+    expect(run.snapshot).toMatchObject({
+      commentsRetained: 0n,
+      phase: 'closed',
+    })
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
+  })
+
+  it('rejects cached identifier gaps atomically', async () => {
     const gap = await prepareProjection([
       commentLog(1n, 1n),
       commentLog(3n, 2n),
@@ -397,6 +522,16 @@ describe('post comment projection run', () => {
 
   it('rejects malformed, non-caught-up, and cross-chain anchors', async () => {
     const prepared = await prepareProjection([])
+    expect(Object.isFrozen(prepared.anchor)).toBe(true)
+    expect(Object.isFrozen(prepared.anchor.comments)).toBe(true)
+    expect(Object.isFrozen(prepared.anchor.comments.cursor)).toBe(true)
+    await expect(
+      openPostCommentProjectionRun(
+        { ...prepared.anchor },
+        [7n],
+        prepared.storage,
+      ),
+    ).rejects.toThrow(/not issued by this page/i)
     await expect(
       openPostCommentProjectionRun(
         { ...prepared.anchor, safeHead: SAFE_HEAD - 1n },
@@ -458,12 +593,12 @@ describe('post comment projection run', () => {
     await run.advance()
     await run.advance()
 
-    const comments = run.getComments(7n)
+    const comments = run.readComments(7n).comments
     comments[0]!.body = 'mutated'
     const baseline = run.baseline
     baseline.cursor.checkpoints[0]!.blockNumber = 99n
     baseline.last!.logIndex = 99
-    expect(run.getComments(7n)[0]!.body).toBe('comment 1')
+    expect(run.readComments(7n).comments[0]!.body).toBe('comment 1')
     expect(run.baseline.cursor.checkpoints[0]!.blockNumber).toBe(SAFE_HEAD)
     expect(run.baseline.last).toEqual({ blockNumber: 1n, logIndex: 0 })
 
@@ -499,7 +634,7 @@ describe('post comment projection run', () => {
       commentsRetained: 0n,
       phase: 'closed',
     })
-    expect(() => run.getComments(7n)).toThrow(/not complete/i)
+    expect(() => run.readComments(7n)).toThrow(/not complete/i)
     await expect(run.advance()).rejects.toThrow(/run is closed/i)
   })
 })

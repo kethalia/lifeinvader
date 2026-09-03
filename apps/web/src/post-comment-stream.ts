@@ -29,10 +29,10 @@ export const POST_COMMENT_EVENT_PAGE_SIZE = 200
 export const POST_COMMENT_EVENT_START_BLOCK = 0n
 
 export type PostCommentProjectionAnchor = {
-  chainId: bigint
-  comments: EventCachePosition
-  head: bigint
-  safeHead?: bigint
+  readonly chainId: bigint
+  readonly comments: EventCachePosition
+  readonly head: bigint
+  readonly safeHead?: bigint
 }
 
 export type PostCommentStreamSnapshot = {
@@ -62,12 +62,80 @@ export type PostCommentStreamSynchronizer = (
   options?: SynchronizePostCommentStreamOptions,
 ) => Promise<PostCommentStreamSnapshot>
 
+type IssuedPostCommentProjectionAnchor = {
+  chainId: bigint
+  checkpoint?: EventCheckpoint
+  head: bigint
+  provider: Eip1193Provider
+}
+
+const issuedProjectionAnchors = new WeakMap<
+  PostCommentProjectionAnchor,
+  IssuedPostCommentProjectionAnchor
+>()
+
 function cancelledError() {
   return new Error('Post comment synchronization was cancelled.')
 }
 
 function assertActive(signal?: AbortSignal) {
   if (signal?.aborted) throw cancelledError()
+}
+
+function copyCursor(cursor: EventCursor): EventCursor {
+  return {
+    ...cursor,
+    checkpoints: cursor.checkpoints.map((checkpoint) => ({ ...checkpoint })),
+  }
+}
+
+function issueProjectionAnchor(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  comments: EventCachePosition,
+  head: bigint,
+  safeHead: bigint | undefined,
+) {
+  const checkpoints = comments.cursor.checkpoints.map((checkpoint) =>
+    Object.freeze({ ...checkpoint }),
+  )
+  const cursor = Object.freeze({
+    ...copyCursor(comments.cursor),
+    checkpoints: Object.freeze(checkpoints),
+  }) as EventCursor
+  const position = Object.freeze({
+    cursor,
+    generation: comments.generation,
+    revision: comments.revision,
+  }) as EventCachePosition
+  const anchor = Object.freeze({
+    chainId,
+    comments: position,
+    head,
+    safeHead,
+  }) satisfies PostCommentProjectionAnchor
+  const checkpoint = cursor.checkpoints.at(-1)
+  issuedProjectionAnchors.set(anchor, {
+    chainId,
+    checkpoint: checkpoint ? { ...checkpoint } : undefined,
+    head,
+    provider,
+  })
+  return anchor
+}
+
+export function assertIssuedPostCommentProjectionAnchor(
+  value: unknown,
+): asserts value is PostCommentProjectionAnchor {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !issuedProjectionAnchors.has(value as PostCommentProjectionAnchor)
+  ) {
+    throw new Error(
+      'The post comment projection anchor was not issued by this page.',
+    )
+  }
 }
 
 async function requestInContext(
@@ -162,6 +230,87 @@ async function assertCanonicalCheckpoint(
     throw new Error(
       'The confirmed post comment checkpoint changed. Retry the bounded range.',
     )
+  }
+}
+
+export async function authenticateIssuedPostCommentProjectionAnchor(
+  anchor: PostCommentProjectionAnchor,
+  authenticateCache: () => Promise<void>,
+  signal?: AbortSignal,
+) {
+  assertIssuedPostCommentProjectionAnchor(anchor)
+  if (typeof authenticateCache !== 'function') {
+    throw new Error('The post comment cache authenticator is invalid.')
+  }
+  const issued = issuedProjectionAnchors.get(anchor)!
+  const interruption = new AbortController()
+  let contextChanged = false
+  const interruptContext = () => {
+    contextChanged = true
+    interruption.abort()
+  }
+  const interruptRequest = () => interruption.abort()
+  issued.provider.on?.('chainChanged', interruptContext)
+  issued.provider.on?.('disconnect', interruptContext)
+  signal?.addEventListener('abort', interruptRequest, { once: true })
+  const assertContextActive = () => {
+    assertActive(signal)
+    if (contextChanged) {
+      throw new Error(
+        'The wallet chain changed during post comment anchor authentication.',
+      )
+    }
+  }
+  try {
+    await assertSelectedChain(
+      issued.provider,
+      issued.chainId,
+      interruption.signal,
+    )
+    assertContextActive()
+    if (issued.checkpoint) {
+      await assertCanonicalCheckpoint(
+        issued.provider,
+        issued.checkpoint,
+        interruption.signal,
+      )
+      assertContextActive()
+    }
+    const currentHead = await readSelectedHead(
+      issued.provider,
+      issued.chainId,
+      interruption.signal,
+    )
+    assertContextActive()
+    if (currentHead < issued.head) {
+      throw new Error(
+        'The wallet head moved behind the post comment projection anchor.',
+      )
+    }
+    await authenticateCache()
+    assertContextActive()
+    if (issued.checkpoint) {
+      await assertCanonicalCheckpoint(
+        issued.provider,
+        issued.checkpoint,
+        interruption.signal,
+      )
+      assertContextActive()
+    }
+    await assertSelectedChain(
+      issued.provider,
+      issued.chainId,
+      interruption.signal,
+    )
+    assertContextActive()
+  } catch (error) {
+    assertContextActive()
+    throw error
+  } finally {
+    interruption.abort()
+    signal?.removeEventListener('abort', interruptRequest)
+    issued.provider.removeListener?.('chainChanged', interruptContext)
+    issued.provider.removeListener?.('disconnect', interruptContext)
   }
 }
 
@@ -348,7 +497,13 @@ export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
           head: finalHead,
           indexedThrough,
           projectionAnchor: caughtUp
-            ? { chainId, comments: position, head: finalHead, safeHead }
+            ? issueProjectionAnchor(
+                provider,
+                chainId,
+                position,
+                finalHead,
+                safeHead,
+              )
             : undefined,
           recentComments,
           safeHead,
