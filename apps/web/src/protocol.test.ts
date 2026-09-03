@@ -157,7 +157,6 @@ describe('post transactions', () => {
     const request = vi.fn(async () => {
       throw new Error('Wallet disconnected.')
     })
-
     await expect(
       waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH),
     ).rejects.toThrow(/wallet disconnected/i)
@@ -170,7 +169,6 @@ describe('post transactions', () => {
       status: '0x1',
       transactionHash: OTHER_BLOCK_HASH,
     }))
-
     await expect(
       waitForTransactionReceipt(provider, TRANSACTION_HASH),
     ).rejects.toThrow(/different transaction/i)
@@ -178,7 +176,6 @@ describe('post transactions', () => {
 
   it('bounds repeated null receipts without discarding the hash', async () => {
     const request = vi.fn(async () => null)
-
     await expect(
       waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH, {
         pollIntervalMs: 10,
@@ -190,7 +187,6 @@ describe('post transactions', () => {
 
   it('times out a receipt request that never settles', async () => {
     const request = vi.fn(() => new Promise<unknown>(() => undefined))
-
     await expect(
       waitForTransactionReceipt(providerFrom(request), TRANSACTION_HASH, {
         timeoutMs: 5,
@@ -212,7 +208,6 @@ describe('post transactions', () => {
         transactionHash: TRANSACTION_HASH,
       }
     })
-
     await expect(
       waitForTransactionReceipt(provider, TRANSACTION_HASH, {
         assertCurrentChain,
@@ -229,7 +224,6 @@ describe('transaction chain binding', () => {
       if (method === 'eth_accounts') return [ACCOUNT]
       throw new Error(`Unexpected method: ${method}`)
     })
-
     await expect(
       deployProtocol(providerFrom(request), ACCOUNT, 1n),
     ).rejects.toThrow(/network changed/i)
@@ -254,7 +248,6 @@ describe('transaction chain binding', () => {
       if (method === 'eth_sendTransaction') return TRANSACTION_HASH
       throw new Error(`Unexpected method: ${method}`)
     })
-
     await expect(
       deployProtocol(
         {
@@ -294,7 +287,6 @@ describe('transaction chain binding', () => {
       }
       throw new Error(`Unexpected method: ${method}`)
     })
-
     await expect(
       deployProtocol(
         {
@@ -333,7 +325,6 @@ describe('transaction chain binding', () => {
       if (method === 'eth_sendTransaction') return TRANSACTION_HASH
       throw new Error(`Unexpected method: ${method}`)
     })
-
     await expect(
       deployProtocol(
         {
@@ -363,13 +354,18 @@ describe('local wallet network', () => {
       verifyLocalChain(fingerprintProvider(), fingerprintProvider()),
     ).resolves.toBeUndefined()
   })
-
   it('rejects a reused chain ID that points at a different RPC', async () => {
     await expect(
       verifyLocalChain(
         fingerprintProvider(OTHER_BLOCK_HASH),
         fingerprintProvider(),
       ),
+    ).rejects.toThrow(/does not match Anvil/i)
+  })
+  it('bounds stalled local fingerprint reads', async () => {
+    const stalled = providerFrom(() => new Promise<unknown>(() => undefined))
+    await expect(
+      verifyLocalChain(fingerprintProvider(), stalled, 5),
     ).rejects.toThrow(/does not match Anvil/i)
   })
 
@@ -379,7 +375,6 @@ describe('local wallet network', () => {
       if (method === 'eth_blockNumber') return `0x${'1'.repeat(65)}`
       throw new Error(`Unexpected method: ${method}`)
     })
-
     await expect(
       verifyLocalChain(fingerprintProvider(), localProvider),
     ).rejects.toThrow(/invalid local block number/i)
@@ -400,9 +395,7 @@ describe('local wallet network', () => {
       }
       return null
     })
-
     await switchToLocalChain(providerFrom(request), fingerprintProvider())
-
     expect(request.mock.calls.map(([request]) => request.method)).toEqual([
       'wallet_switchEthereumChain',
       'wallet_addEthereumChain',
@@ -432,9 +425,7 @@ describe('local wallet network', () => {
       }
       return null
     })
-
     await switchToLocalChain(providerFrom(request), fingerprintProvider())
-
     expect(request.mock.calls.map(([request]) => request.method)).toEqual([
       'wallet_switchEthereumChain',
       'wallet_addEthereumChain',

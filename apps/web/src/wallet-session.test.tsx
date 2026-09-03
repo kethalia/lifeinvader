@@ -58,5 +58,12 @@ describe('useWalletSession', () => {
       status: 'disconnected',
     })
     expect(result.current.session.error).toMatch(/invalid chain identifier/i)
+
+    await act(async () => emit('accountsChanged', [newAccount]))
+    expect(result.current.session).toMatchObject({
+      account: newAccount,
+      chainId: 1n,
+      status: 'connected',
+    })
   })
 })

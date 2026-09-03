@@ -18,6 +18,18 @@ const REVERTED_TRANSACTION_HASH =
   '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 const UNKNOWN_TRANSACTION_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+const ACCOUNT = '0x000000000000000000000000000000000000a11c'
+
+function announceWallet(name: string, uuid: string, provider: unknown) {
+  const announce = () =>
+    window.dispatchEvent(
+      new CustomEvent('eip6963:announceProvider', {
+        detail: { info: { name, uuid }, provider },
+      }),
+    )
+  window.addEventListener('eip6963:requestProvider', announce)
+  return () => window.removeEventListener('eip6963:requestProvider', announce)
+}
 
 afterEach(() => {
   cleanup()
@@ -54,11 +66,9 @@ describe('App', () => {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
           if (method === 'eth_requestAccounts') {
-            return ['0x000000000000000000000000000000000000a11c']
+            return [ACCOUNT]
           }
-          if (method === 'eth_accounts') {
-            return ['0x000000000000000000000000000000000000a11c']
-          }
+          if (method === 'eth_accounts') return [ACCOUNT]
           if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_getCode') {
             const [address] = params as [string]
@@ -71,17 +81,11 @@ describe('App', () => {
         },
       ),
     }
-    const announce = () => {
-      window.dispatchEvent(
-        new CustomEvent('eip6963:announceProvider', {
-          detail: {
-            info: { name: 'Test Wallet', uuid: 'test-wallet' },
-            provider,
-          },
-        }),
-      )
-    }
-    window.addEventListener('eip6963:requestProvider', announce)
+    const stopAnnouncing = announceWallet(
+      'Test Wallet',
+      'test-wallet',
+      provider,
+    )
 
     render(<App />)
 
@@ -98,7 +102,7 @@ describe('App', () => {
       await screen.findByText(/verified Lifeinvader v1 code is ready/i),
     ).toBeTruthy()
 
-    window.removeEventListener('eip6963:requestProvider', announce)
+    stopAnnouncing()
   })
 
   it('does not trust a reused local chain ID with a different fingerprint', async () => {
@@ -121,11 +125,9 @@ describe('App', () => {
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
         if (method === 'eth_requestAccounts') {
-          return ['0x000000000000000000000000000000000000a11c']
+          return [ACCOUNT]
         }
-        if (method === 'eth_accounts') {
-          return ['0x000000000000000000000000000000000000a11c']
-        }
+        if (method === 'eth_accounts') return [ACCOUNT]
         if (method === 'eth_chainId') return '0x7a69'
         if (method === 'eth_getBlockByNumber') {
           return { hash: walletBlockHash, number: '0x2a' }
@@ -133,17 +135,11 @@ describe('App', () => {
         throw new Error(`Unexpected method: ${method}`)
       }),
     }
-    const announce = () => {
-      window.dispatchEvent(
-        new CustomEvent('eip6963:announceProvider', {
-          detail: {
-            info: { name: 'Other Local Wallet', uuid: 'other-local-wallet' },
-            provider,
-          },
-        }),
-      )
-    }
-    window.addEventListener('eip6963:requestProvider', announce)
+    const stopAnnouncing = announceWallet(
+      'Other Local Wallet',
+      'other-local-wallet',
+      provider,
+    )
 
     render(<App />)
     fireEvent.click(
@@ -158,7 +154,7 @@ describe('App', () => {
     ).toBeNull()
     expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
 
-    window.removeEventListener('eip6963:requestProvider', announce)
+    stopAnnouncing()
   })
 
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
@@ -167,18 +163,20 @@ describe('App', () => {
     let transactionNumber = 0
     let unknownReceiptAttempts = 0
     let resolveReceipt: ((value: unknown) => void) | undefined
+    let resolvePostSubmission: ((value: string) => void) | undefined
     const receiptResponse = new Promise<unknown>((resolve) => {
       resolveReceipt = resolve
+    })
+    const postSubmission = new Promise<string>((resolve) => {
+      resolvePostSubmission = resolve
     })
     const provider = {
       request: vi.fn(
         async ({ method, params }: { method: string; params?: unknown }) => {
           if (method === 'eth_requestAccounts') {
-            return ['0x000000000000000000000000000000000000a11c']
+            return [ACCOUNT]
           }
-          if (method === 'eth_accounts') {
-            return ['0x000000000000000000000000000000000000a11c']
-          }
+          if (method === 'eth_accounts') return [ACCOUNT]
           if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_getCode') {
             if (failNextInspection) {
@@ -193,11 +191,12 @@ describe('App', () => {
           }
           if (method === 'eth_sendTransaction') {
             transactionNumber += 1
-            return [
+            const hash = [
               TRANSACTION_HASH,
               REVERTED_TRANSACTION_HASH,
               UNKNOWN_TRANSACTION_HASH,
             ][transactionNumber - 1]
+            return transactionNumber === 2 ? postSubmission : hash
           }
           if (method === 'eth_getTransactionReceipt') {
             if (transactionNumber === 1) {
@@ -227,17 +226,11 @@ describe('App', () => {
         },
       ),
     }
-    const announce = () => {
-      window.dispatchEvent(
-        new CustomEvent('eip6963:announceProvider', {
-          detail: {
-            info: { name: 'Pending Wallet', uuid: 'pending-wallet' },
-            provider,
-          },
-        }),
-      )
-    }
-    window.addEventListener('eip6963:requestProvider', announce)
+    const stopAnnouncing = announceWallet(
+      'Pending Wallet',
+      'pending-wallet',
+      provider,
+    )
 
     render(<App />)
     fireEvent.click(
@@ -277,6 +270,8 @@ describe('App', () => {
     const textarea = screen.getByLabelText(/permanent public statement/i)
     fireEvent.change(textarea, { target: { value: 'Try, try again.' } })
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect(textarea.hasAttribute('disabled')).toBe(true)
+    await act(async () => resolvePostSubmission?.(REVERTED_TRANSACTION_HASH))
     expect((await screen.findByRole('alert')).textContent).toMatch(
       /reverted on-chain/i,
     )
@@ -307,6 +302,6 @@ describe('App', () => {
     expect(await screen.findByText(/confirmed in block 44/i)).toBeTruthy()
     expect((textarea as HTMLTextAreaElement).value).toBe('')
 
-    window.removeEventListener('eip6963:requestProvider', announce)
+    stopAnnouncing()
   })
 })

@@ -445,7 +445,7 @@ export function WalletPanel() {
                 id="post-body"
                 rows={5}
                 value={body}
-                disabled={transactionWriteLocked}
+                disabled={busyAction === 'post' || transactionWriteLocked}
                 onChange={(event) => setBody(event.target.value)}
                 placeholder="What should survive every rebrand?"
               />

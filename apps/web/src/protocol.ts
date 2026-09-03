@@ -218,13 +218,17 @@ export async function inspectProtocol(
 export async function verifyLocalChain(
   provider: Eip1193Provider,
   localProvider: Eip1193Provider = LOCAL_RPC_PROVIDER,
+  timeoutMs = WALLET_READ_TIMEOUT_MS,
 ) {
+  const deadline = Date.now() + timeoutMs
+  const read = (source: Eip1193Provider, request: ProviderRequest) =>
+    beforeDeadline(() => source.request(request), deadline, localChainMismatch)
   const walletChainId = parseRpcQuantity(
-    await provider.request({ method: 'eth_chainId' }),
+    await read(provider, { method: 'eth_chainId' }),
     'wallet chain identifier',
   )
   const localChainId = parseRpcQuantity(
-    await localProvider.request({ method: 'eth_chainId' }),
+    await read(localProvider, { method: 'eth_chainId' }),
     'local chain identifier',
   )
   if (walletChainId !== LOCAL_CHAIN_ID || localChainId !== LOCAL_CHAIN_ID) {
@@ -232,16 +236,16 @@ export async function verifyLocalChain(
   }
 
   const localBlockNumber = parseRpcQuantity(
-    await localProvider.request({ method: 'eth_blockNumber' }),
+    await read(localProvider, { method: 'eth_blockNumber' }),
     'local block number',
   )
   const blockTag = `0x${localBlockNumber.toString(16)}`
   const [localBlockValue, walletBlockValue] = await Promise.all([
-    localProvider.request({
+    read(localProvider, {
       method: 'eth_getBlockByNumber',
       params: [blockTag, false],
     }),
-    provider.request({
+    read(provider, {
       method: 'eth_getBlockByNumber',
       params: [blockTag, false],
     }),

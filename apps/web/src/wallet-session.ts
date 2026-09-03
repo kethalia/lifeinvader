@@ -123,35 +123,38 @@ export function useWalletSession() {
   useEffect(() => {
     const provider = session.provider
     if (!provider?.on) return
+    const update = (changes: Partial<WalletSession>) =>
+      setSession((current) =>
+        current.provider === provider ? { ...current, ...changes } : current,
+      )
 
     const handleAccounts = (value: unknown) => {
       try {
         const account = parseAccounts(value)[0]
-        setSession((current) => ({
-          ...current,
-          account,
+        update({
+          account: undefined,
           error: account ? undefined : 'The wallet disconnected every account.',
-          status: account ? 'connected' : 'disconnected',
-        }))
+          status: 'disconnected',
+        })
+        if (account) void refresh()
       } catch (error) {
-        setSession((current) => ({
-          ...current,
+        update({
+          account: undefined,
           error: describeRpcError(
             error,
             'The wallet emitted invalid account data.',
           ),
           status: 'disconnected',
-        }))
+        })
       }
     }
 
     const handleChain = (value: unknown) => {
       try {
         const chainId = parseChainId(value)
-        setSession((current) => ({ ...current, chainId, error: undefined }))
+        update({ chainId, error: undefined })
       } catch (error) {
-        setSession((current) => ({
-          ...current,
+        update({
           account: undefined,
           chainId: undefined,
           error: describeRpcError(
@@ -159,17 +162,17 @@ export function useWalletSession() {
             'The wallet emitted an invalid chain identifier.',
           ),
           status: 'disconnected',
-        }))
+        })
       }
     }
 
     const handleDisconnect = () => {
-      setSession((current) => ({
-        ...current,
+      update({
         account: undefined,
+        chainId: undefined,
         error: 'The wallet disconnected.',
         status: 'disconnected',
-      }))
+      })
     }
 
     provider.on('accountsChanged', handleAccounts)
@@ -181,7 +184,7 @@ export function useWalletSession() {
       provider.removeListener?.('chainChanged', handleChain)
       provider.removeListener?.('disconnect', handleDisconnect)
     }
-  }, [session.provider])
+  }, [refresh, session.provider])
 
   return { connect, refresh, session }
 }
