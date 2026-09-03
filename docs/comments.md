@@ -20,4 +20,8 @@ A successful receipt clears only the exact draft revision that produced it, even
 
 ## Read boundary
 
-Comment history is not rendered yet. Its read model will be a separate bounded, reorg-aware event stream rather than mixing comment volume into the newest-post cache or launching one RPC query for every visible card.
+Comment history is not rendered yet. The read foundation uses one separate global `CommentPublished` stream rather than mixing comment volume into the newest-post cache or launching one RPC query for every visible card. Its filter fixes the predetermined contract and event signature while retaining every indexed post identifier in the returned logs.
+
+Each explicit synchronization call verifies the selected chain and exact protocol runtime, advances at most one accepted adaptive block range, validates every comment payload, and atomically advances its own IndexedDB scope. Any bounded split retries remain inside the shared indexer's request and result limits. The stream uses the same twelve-block confirmation depth, canonical checkpoint checks, rollback behavior, request timeout, cancellation, and hard RPC/cache work limits as the other event streams.
+
+The returned recent-comment page is only a bounded preview. Its nominal limit is 200 logs and the shared cache may extend through the rest of the boundary block under its existing hard cap. It must never be described as a complete thread. A projection anchor is issued only after the stream catches up to one authenticated confirmed safe head; a later read-model slice will use bounded local pages to derive complete comment lists for visible posts.

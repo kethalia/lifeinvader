@@ -12,13 +12,16 @@ import {
 import type { IndexedEventLog } from './event-indexer'
 import {
   decodePostLikeSet,
+  decodePublishedComment,
   decodePublishedPost,
   decodePublishedRepost,
   POST_CONTENT_KIND_TOPIC,
   POST_LIKE_SET_FILTER,
+  PUBLISHED_COMMENT_FILTER,
   PUBLISHED_REPOST_FILTER,
 } from './protocol-events'
 import {
+  COMMENT_PUBLISHED_TOPIC,
   LIKE_SET_TOPIC,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
@@ -81,6 +84,35 @@ function likeLog(
       options.contentKindTopic ?? POST_CONTENT_KIND_TOPIC,
       padHex(toHex(postId), { size: 32 }),
       options.accountTopic ?? padHex(ACCOUNT, { size: 32 }),
+    ],
+  }
+}
+
+function commentLog(
+  options: {
+    authorTopic?: Hex
+    body?: string
+    commentId?: bigint
+    data?: Hex
+    mediaCid?: Hex
+    postId?: bigint
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const body = options.body ?? 'Privacy is still a bug.'
+  const commentId = options.commentId ?? 11n
+  const mediaCid = options.mediaCid ?? '0x01701220'
+  const postId = options.postId ?? 7n
+  return {
+    ...postLog(),
+    data:
+      options.data ?? encodeAbiParameters(DATA_PARAMETERS, [body, mediaCid]),
+    topics: options.topics ?? [
+      options.topic ?? COMMENT_PUBLISHED_TOPIC,
+      padHex(toHex(commentId), { size: 32 }),
+      padHex(toHex(postId), { size: 32 }),
+      options.authorTopic ?? padHex(AUTHOR, { size: 32 }),
     ],
   }
 }
@@ -162,7 +194,77 @@ describe('PostPublished decoding', () => {
   })
 })
 
+describe('CommentPublished decoding', () => {
+  it('decodes both identifiers, author, and bounded publication data', () => {
+    expect(decodePublishedComment(commentLog())).toEqual({
+      author: AUTHOR,
+      blockHash: keccak256(stringToHex('block')),
+      blockNumber: 12n,
+      body: 'Privacy is still a bug.',
+      commentId: 11n,
+      logIndex: 2,
+      mediaCid: '0x01701220',
+      postId: 7n,
+      transactionHash: keccak256(stringToHex('transaction')),
+      transactionIndex: 1,
+    })
+  })
+
+  it.each([
+    ['another event family', commentLog({ topic: POST_PUBLISHED_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...commentLog(), address: AUTHOR },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodePublishedComment(log)).toBeUndefined()
+  })
+
+  it.each([
+    [
+      'missing indexed topics',
+      commentLog({ topics: [COMMENT_PUBLISHED_TOPIC] }),
+    ],
+    [
+      'surplus indexed topics',
+      commentLog({
+        topics: [...commentLog().topics, keccak256(stringToHex('surplus'))],
+      }),
+    ],
+    ['zero comment identifier', commentLog({ commentId: 0n })],
+    ['zero post identifier', commentLog({ postId: 0n })],
+    ['empty publication', commentLog({ body: '', mediaCid: '0x' })],
+    ['oversized body', commentLog({ body: 'x'.repeat(4_097) })],
+    [
+      'oversized media CID',
+      commentLog({ mediaCid: `0x${'00'.repeat(129)}` as Hex }),
+    ],
+    [
+      'non-canonical author padding',
+      commentLog({ authorTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed ABI data', commentLog({ data: '0x01' })],
+    [
+      'surplus ABI data',
+      commentLog({
+        data: `${commentLog().data}${'00'.repeat(32)}` as Hex,
+      }),
+    ],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodePublishedComment(log)).toThrow(
+      /invalid CommentPublished/i,
+    )
+  })
+})
+
 describe('post reaction filters', () => {
+  it('keeps all comments in one independent global RPC filter', () => {
+    expect(PUBLISHED_COMMENT_FILTER).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [COMMENT_PUBLISHED_TOPIC],
+    })
+  })
+
   it('isolates post likes from comment likes in the RPC filter', () => {
     expect(POST_LIKE_SET_FILTER).toEqual({
       address: PROTOCOL_ADDRESS,

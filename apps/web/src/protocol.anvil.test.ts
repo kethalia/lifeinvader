@@ -11,6 +11,7 @@ import {
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
+import { synchronizePostCommentStream } from './post-comment-stream'
 import { PostReactionProjection } from './post-reaction-projection'
 import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
@@ -203,6 +204,27 @@ describe('wallet transaction helpers on Anvil', () => {
       body: '',
       mediaCid: MEDIA_CID.bytes,
       postId: 1n,
+    })
+    await expect(
+      synchronizePostCommentStream(provider, LOCAL_CHAIN_ID, {
+        storage: {
+          databaseName: 'lifeinvader-anvil-post-comments',
+          factory: new IDBFactory(),
+          keyRange: IDBKeyRange,
+        },
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      projectionAnchor: { chainId: LOCAL_CHAIN_ID },
+      recentComments: [
+        {
+          author: account,
+          body: 'Nothing here is private.',
+          commentId: 1n,
+          mediaCid: '0x',
+          postId: 1n,
+        },
+      ],
     })
     const reactionStorage = {
       databaseName: 'lifeinvader-anvil-post-reactions',
