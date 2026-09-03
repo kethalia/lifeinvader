@@ -215,6 +215,10 @@ export function WalletPanel({
             blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
             chainId: submittedContext.chainId,
+            expectedPost: {
+              author: submittedContext.account,
+              body: submittedContext.postBody,
+            },
             hash: nextReceipt.hash,
             provider: submittedContext.provider,
           })
@@ -313,6 +317,10 @@ export function WalletPanel({
             blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
             chainId: transaction.chainId,
+            expectedPost: {
+              author: transaction.account,
+              body: transaction.postBody,
+            },
             hash: nextReceipt.hash,
             provider: transaction.provider,
           })

@@ -218,6 +218,7 @@ describe('App', () => {
       expect.objectContaining({
         blockHash: RECEIPT_BLOCK_HASH,
         blockNumber: 42n,
+        expectedPost: { author: ACCOUNT, body },
         hash: TRANSACTION_HASH,
       }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),

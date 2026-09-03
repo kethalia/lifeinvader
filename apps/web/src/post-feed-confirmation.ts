@@ -4,6 +4,7 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import { DEFAULT_FINALITY_DEPTH } from './event-indexer'
+import { assertExpectedPost, type ExpectedPost } from './protocol'
 import type { Hash } from 'viem'
 
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
@@ -23,13 +24,14 @@ export type IncludedPost = {
   blockHash: Hash
   blockNumber: bigint
   chainId: bigint
+  expectedPost: ExpectedPost
   hash: Hash
   provider: Eip1193Provider
 }
 
 export type PostInclusion = Pick<
   IncludedPost,
-  'blockHash' | 'blockNumber' | 'hash'
+  'blockHash' | 'blockNumber' | 'expectedPost' | 'hash'
 >
 
 export type PostFeedConfirmationWaiter = (
@@ -87,6 +89,7 @@ function parseReceiptInclusion(value: unknown, expectedHash: Hash) {
   return {
     blockHash: parseHash(receipt.blockHash, 'receipt block hash'),
     blockNumber: parseBlockNumber(receipt.blockNumber),
+    logs: receipt.logs,
   }
 }
 
@@ -289,21 +292,37 @@ export const waitForPostFeedConfirmation: PostFeedConfirmationWaiter = async (
               candidate.blockNumber,
             )
             if (canonicalBlock?.blockHash === candidate.blockHash) {
-              const finalChainId = parseChainId(
-                await requestBeforeDeadline(
+              const [finalChainValue, finalHeadValue] = await Promise.all([
+                requestBeforeDeadline(
                   provider,
                   { method: 'eth_chainId' },
                   deadline,
                   interruption.signal,
                 ),
-              )
+                requestBeforeDeadline(
+                  provider,
+                  { method: 'eth_blockNumber' },
+                  deadline,
+                  interruption.signal,
+                ),
+              ])
               assertActive()
-              if (finalChainId !== chainId) {
+              if (parseChainId(finalChainValue) !== chainId) {
                 throw new Error(
                   'The wallet chain changed while awaiting confirmation.',
                 )
               }
-              return
+              const finalHead = parseBlockNumber(finalHeadValue)
+              if (
+                finalHead >=
+                candidate.blockNumber + POST_FEED_CONFIRMATION_DEPTH
+              ) {
+                assertExpectedPost(
+                  currentInclusion.logs,
+                  inclusion.expectedPost,
+                )
+                return
+              }
             }
           }
         }

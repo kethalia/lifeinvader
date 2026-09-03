@@ -130,7 +130,13 @@ describe('wallet transaction helpers on Anvil', () => {
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,
-      postReceipt,
+      {
+        ...postReceipt,
+        expectedPost: {
+          author: account,
+          body: 'Local chain, globally embarrassing.',
+        },
+      },
       { pollIntervalMs: 1, timeoutMs: 2_000 },
     )
     await provider.request({ method: 'anvil_mine', params: ['0xc'] })

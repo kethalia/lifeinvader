@@ -128,6 +128,7 @@ describe('PostFeedPanel', () => {
           blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
+          expectedPost: { author: ACCOUNT, body: 'Now safely confirmed.' },
           hash: TRANSACTION_HASH,
           provider,
         }}
@@ -163,6 +164,7 @@ describe('PostFeedPanel', () => {
           blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
+          expectedPost: { author: ACCOUNT, body: 'Pending post.' },
           hash: TRANSACTION_HASH,
           provider,
         }}
@@ -181,6 +183,7 @@ describe('PostFeedPanel', () => {
           blockHash: BLOCK_HASH,
           blockNumber: 8n,
           chainId: 1n,
+          expectedPost: { author: ACCOUNT, body: 'Pending post.' },
           hash: TRANSACTION_HASH,
           provider,
         }}
