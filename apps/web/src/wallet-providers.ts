@@ -43,9 +43,11 @@ function isAnnouncement(value: unknown): value is Eip6963Announcement {
   return (
     'name' in value.info &&
     typeof value.info.name === 'string' &&
+    value.info.name.length <= 1_000 &&
     value.info.name.trim().length > 0 &&
     'uuid' in value.info &&
     typeof value.info.uuid === 'string' &&
+    value.info.uuid.length <= 200 &&
     value.info.uuid.length > 0
   )
 }

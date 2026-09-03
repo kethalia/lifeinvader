@@ -43,7 +43,7 @@ export function isEip1193Provider(value: unknown): value is Eip1193Provider {
 }
 
 export function parseAccounts(value: unknown): readonly Address[] {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > 1_000) {
     throw new Error('The wallet returned an invalid account list.')
   }
 
@@ -95,8 +95,11 @@ export function describeRpcError(error: unknown, fallback: string): string {
   if (code === -32002)
     return 'That wallet already has a request waiting for approval.'
 
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.replace(/\s+/g, ' ').trim().slice(0, 240)
+  if (error instanceof Error && error.message.length > 0) {
+    return (
+      error.message.slice(0, 1_000).replace(/\s+/g, ' ').trim().slice(0, 240) ||
+      fallback
+    )
   }
 
   return fallback

@@ -18,6 +18,7 @@ const REVERTED_TRANSACTION_HASH =
   '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 const UNKNOWN_TRANSACTION_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+const RECEIPT_BLOCK_HASH = `0x${'dd'.repeat(32)}`
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 
 function announceWallet(name: string, uuid: string, provider: unknown) {
@@ -192,6 +193,7 @@ describe('App', () => {
             }
             if (transactionNumber === 2) {
               return {
+                blockHash: RECEIPT_BLOCK_HASH,
                 blockNumber: '0x2b',
                 status: '0x0',
                 transactionHash: REVERTED_TRANSACTION_HASH,
@@ -202,10 +204,15 @@ describe('App', () => {
               throw new Error('Wallet disconnected.')
             }
             return {
+              blockHash: RECEIPT_BLOCK_HASH,
               blockNumber: '0x2c',
               status: '0x1',
               transactionHash: UNKNOWN_TRANSACTION_HASH,
             }
+          }
+          if (method === 'eth_getBlockByNumber') {
+            const [number] = params as [string]
+            return { hash: RECEIPT_BLOCK_HASH, number }
           }
           throw new Error(`Unexpected method: ${method}`)
         },
@@ -233,6 +240,7 @@ describe('App', () => {
 
     await act(async () => {
       resolveReceipt?.({
+        blockHash: RECEIPT_BLOCK_HASH,
         blockNumber: '0x2a',
         status: '0x1',
         transactionHash: TRANSACTION_HASH,

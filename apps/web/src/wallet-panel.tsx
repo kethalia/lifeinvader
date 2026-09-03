@@ -453,6 +453,7 @@ export function WalletPanel() {
               <label htmlFor="post-body">Permanent public statement</label>
               <textarea
                 id="post-body"
+                maxLength={MAX_POST_BODY_BYTES}
                 rows={5}
                 value={body}
                 disabled={busyAction === 'post' || transactionWriteLocked}

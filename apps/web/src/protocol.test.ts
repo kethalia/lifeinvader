@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  parseAccounts,
   parseChainId,
   type Eip1193Provider,
   type ProviderRequest,
@@ -49,6 +50,24 @@ function fingerprintProvider(
     throw new Error(`Unexpected method: ${method}`)
   })
 }
+function receiptProvider(
+  status = '0x1',
+  transactionHash = TRANSACTION_HASH,
+  canonicalHash = BLOCK_HASH,
+) {
+  return providerFrom(async ({ method }) => {
+    if (method === 'eth_getTransactionReceipt')
+      return {
+        blockHash: BLOCK_HASH,
+        blockNumber: '0x2a',
+        status,
+        transactionHash,
+      }
+    if (method === 'eth_getBlockByNumber')
+      return { hash: canonicalHash, number: '0x2a' }
+    throw new Error(`Unexpected method: ${method}`)
+  })
+}
 describe('protocol configuration', () => {
   it('keeps the browser deployment inputs frozen to the published v1 address', () => {
     expect(() => assertProtocolConfiguration()).not.toThrow()
@@ -57,6 +76,9 @@ describe('protocol configuration', () => {
   it('rejects chain quantities wider than an EVM word', () => {
     expect(() => parseChainId(`0x${'1'.repeat(65)}`)).toThrow(
       /invalid chain identifier/i,
+    )
+    expect(() => parseAccounts(Array(1_001).fill(ACCOUNT))).toThrow(
+      /invalid account list/i,
     )
   })
   it('recognizes a chain where the canonical factory can deploy v1', async () => {
@@ -84,12 +106,15 @@ describe('protocol configuration', () => {
       await expect(inspectProtocol(provider)).resolves.toEqual({ kind })
     },
   )
-  it('rejects unexpected code at the predetermined protocol address', async () => {
+  it('rejects unexpected or oversized code at the protocol address', async () => {
     const request = vi.fn(async () => '0x00')
     await expect(inspectProtocol(providerFrom(request))).resolves.toEqual({
       kind: 'address-conflict',
     })
     expect(request).toHaveBeenCalledTimes(1)
+    await expect(
+      inspectProtocol(providerFrom(async () => `0x${'00'.repeat(24_577)}`)),
+    ).rejects.toThrow(/invalid contract code/i)
   })
   it('bounds stalled contract-code reads', async () => {
     const request = vi.fn(() => new Promise<unknown>(() => undefined))
@@ -105,14 +130,13 @@ describe('post transactions', () => {
     expect(getPostBodyByteLength('👁️')).toBe(7)
   })
   it('parses a successful transaction receipt', async () => {
-    const provider = providerFrom(async () => ({
-      blockNumber: '0x2a',
-      status: '0x1',
-      transactionHash: TRANSACTION_HASH,
-    }))
     await expect(
-      waitForTransactionReceipt(provider, TRANSACTION_HASH),
-    ).resolves.toEqual({ blockNumber: 42n, hash: TRANSACTION_HASH })
+      waitForTransactionReceipt(receiptProvider(), TRANSACTION_HASH),
+    ).resolves.toEqual({
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    })
   })
   it('rejects an oversized UTF-8 body before opening the wallet', async () => {
     const request = vi.fn()
@@ -127,13 +151,8 @@ describe('post transactions', () => {
     expect(request).not.toHaveBeenCalled()
   })
   it('surfaces an on-chain revert from the receipt', async () => {
-    const provider = providerFrom(async () => ({
-      blockNumber: '0x2a',
-      status: '0x0',
-      transactionHash: TRANSACTION_HASH,
-    }))
     const error = await waitForTransactionReceipt(
-      provider,
+      receiptProvider('0x0'),
       TRANSACTION_HASH,
     ).catch((error: unknown) => error)
     expect(isTransactionRevertedError(error)).toBe(true)
@@ -150,14 +169,21 @@ describe('post transactions', () => {
     expect(request).toHaveBeenCalledTimes(1)
   })
   it('rejects a receipt for a different transaction', async () => {
-    const provider = providerFrom(async () => ({
-      blockNumber: '0x2a',
-      status: '0x1',
-      transactionHash: OTHER_BLOCK_HASH,
-    }))
     await expect(
-      waitForTransactionReceipt(provider, TRANSACTION_HASH),
+      waitForTransactionReceipt(
+        receiptProvider('0x1', OTHER_BLOCK_HASH),
+        TRANSACTION_HASH,
+      ),
     ).rejects.toThrow(/different transaction/i)
+  })
+  it('does not confirm a receipt from a noncanonical block', async () => {
+    await expect(
+      waitForTransactionReceipt(
+        receiptProvider('0x1', TRANSACTION_HASH, OTHER_BLOCK_HASH),
+        TRANSACTION_HASH,
+        { pollIntervalMs: 10, timeoutMs: 5 },
+      ),
+    ).rejects.toThrow(TRANSACTION_HASH)
   })
   it('bounds repeated null receipts without discarding the hash', async () => {
     const request = vi.fn(async () => null)
@@ -186,6 +212,7 @@ describe('post transactions', () => {
     const provider = providerFrom(async () => {
       changed = true
       return {
+        blockHash: BLOCK_HASH,
         blockNumber: '0x2a',
         status: '0x1',
         transactionHash: TRANSACTION_HASH,

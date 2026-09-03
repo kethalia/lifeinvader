@@ -57,6 +57,7 @@ export type ProtocolInspection =
   | { kind: 'address-conflict' }
 
 export type TransactionReceipt = {
+  blockHash: Hash
   blockNumber: bigint
   hash: Hash
 }
@@ -90,7 +91,6 @@ async function requestLocalRpc({ method, params }: ProviderRequest) {
       `Local Anvil returned HTTP ${response.status} at ${LOCAL_RPC_URL}.`,
     )
   }
-
   const payload: unknown = await response.json()
   if (
     typeof payload !== 'object' ||
@@ -99,7 +99,6 @@ async function requestLocalRpc({ method, params }: ProviderRequest) {
   ) {
     throw new Error('Local Anvil returned an invalid RPC response.')
   }
-
   const error = 'error' in payload ? payload.error : undefined
   if (error !== undefined && error !== null) {
     const message =
@@ -113,12 +112,10 @@ async function requestLocalRpc({ method, params }: ProviderRequest) {
   if (!Object.hasOwn(payload, 'result')) {
     throw new Error('Local Anvil returned an invalid RPC response.')
   }
-
   return (payload as { result: unknown }).result
 }
 
 const LOCAL_RPC_PROVIDER: Eip1193Provider = { request: requestLocalRpc }
-
 function parseRpcQuantity(value: unknown, field: string): bigint {
   if (
     typeof value !== 'string' ||
@@ -134,33 +131,31 @@ function parseBlockFingerprint(value: unknown): BlockFingerprint {
   if (typeof value !== 'object' || value === null) {
     throw new Error('The RPC returned invalid block data.')
   }
-
   const hash = 'hash' in value ? value.hash : undefined
   const number = 'number' in value ? value.number : undefined
   if (typeof hash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(hash)) {
     throw new Error('The RPC returned an invalid block hash.')
   }
-
   return {
     hash: hash.toLowerCase() as Hash,
     number: parseRpcQuantity(number, 'block number'),
   }
 }
-
 function localChainMismatch() {
   return new Error(
     `Chain ${LOCAL_CHAIN_ID} in the wallet does not match Anvil at ${LOCAL_RPC_URL}. Remove or update that wallet network before continuing.`,
   )
 }
-
 function parseCode(value: unknown): Hex {
-  if (typeof value !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(value)) {
+  if (
+    typeof value !== 'string' ||
+    value.length > 49_154 ||
+    !/^0x(?:[0-9a-f]{2})*$/i.test(value)
+  ) {
     throw new Error('The wallet returned invalid contract code.')
   }
-
   return value.toLowerCase() as Hex
 }
-
 async function getCode(
   provider: Eip1193Provider,
   address: Address,
@@ -178,12 +173,10 @@ async function getCode(
     ),
   )
 }
-
 export function assertProtocolConfiguration() {
   if (keccak256(LIFEINVADER_INIT_CODE) !== INIT_CODE_HASH) {
     throw new Error('The bundled Lifeinvader creation code does not match v1.')
   }
-
   const derivedAddress = getCreate2Address({
     bytecodeHash: INIT_CODE_HASH,
     from: FACTORY_ADDRESS,
@@ -195,27 +188,23 @@ export function assertProtocolConfiguration() {
     )
   }
 }
-
 export async function inspectProtocol(
   provider: Eip1193Provider,
   timeoutMs = WALLET_READ_TIMEOUT_MS,
 ): Promise<ProtocolInspection> {
   const deadline = Date.now() + timeoutMs
   const protocolCode = await getCode(provider, PROTOCOL_ADDRESS, deadline)
-
   if (protocolCode !== '0x') {
     return keccak256(protocolCode) === PROTOCOL_CODE_HASH
       ? { kind: 'ready' }
       : { kind: 'address-conflict' }
   }
-
   const factoryCode = await getCode(provider, FACTORY_ADDRESS, deadline)
   if (factoryCode === '0x') return { kind: 'missing-factory' }
   if (keccak256(factoryCode) !== FACTORY_CODE_HASH)
     return { kind: 'unsafe-factory' }
   return { kind: 'deployable' }
 }
-
 export async function verifyLocalChain(
   provider: Eip1193Provider,
   localProvider: Eip1193Provider = LOCAL_RPC_PROVIDER,
@@ -235,7 +224,6 @@ export async function verifyLocalChain(
   if (walletChainId !== LOCAL_CHAIN_ID || localChainId !== LOCAL_CHAIN_ID) {
     throw localChainMismatch()
   }
-
   const localBlockNumber = parseRpcQuantity(
     await read(localProvider, { method: 'eth_blockNumber' }),
     'local block number',
@@ -251,7 +239,6 @@ export async function verifyLocalChain(
       params: [blockTag, false],
     }),
   ])
-
   let localBlock: BlockFingerprint
   let walletBlock: BlockFingerprint
   try {
@@ -260,7 +247,6 @@ export async function verifyLocalChain(
   } catch {
     throw localChainMismatch()
   }
-
   if (
     localBlock.number !== localBlockNumber ||
     walletBlock.number !== localBlockNumber ||
@@ -269,13 +255,11 @@ export async function verifyLocalChain(
     throw localChainMismatch()
   }
 }
-
 export async function switchToLocalChain(
   provider: Eip1193Provider,
   localProvider?: Eip1193Provider,
 ) {
   const chainId = `0x${LOCAL_CHAIN_ID.toString(16)}`
-
   try {
     await provider.request({
       method: 'wallet_switchEthereumChain',
@@ -283,7 +267,6 @@ export async function switchToLocalChain(
     })
   } catch (error) {
     if (getRpcErrorCode(error) !== 4902) throw error
-
     await provider.request({
       method: 'wallet_addEthereumChain',
       params: [
@@ -295,7 +278,6 @@ export async function switchToLocalChain(
         },
       ],
     })
-
     const selectedChainId = await beforeDeadline(
       () => provider.request({ method: 'eth_chainId' }),
       Date.now() + WALLET_READ_TIMEOUT_MS,
@@ -311,29 +293,24 @@ export async function switchToLocalChain(
       })
     }
   }
-
   await verifyLocalChain(provider, localProvider)
 }
-
 type TransactionGuard = {
   assertChain(): Promise<void>
   assertSubmission(): Promise<void>
   chainId: bigint
   release(): void
 }
-
 function chainChangedError() {
   return new Error(
     'The wallet network changed during this action. If the wallet showed a transaction, check it before trying again.',
   )
 }
-
 function accountChangedError() {
   return new Error(
     'The selected wallet account changed during this action. If the wallet showed a transaction, check it before trying again.',
   )
 }
-
 async function createTransactionGuard(
   provider: Eip1193Provider,
   account: Address,
@@ -360,7 +337,6 @@ async function createTransactionGuard(
   }
   provider.on?.('chainChanged', handleChainChanged)
   provider.on?.('accountsChanged', handleAccountsChanged)
-
   const release = () => {
     provider.removeListener?.('chainChanged', handleChainChanged)
     provider.removeListener?.('accountsChanged', handleAccountsChanged)
@@ -403,17 +379,14 @@ async function createTransactionGuard(
   const assertSubmission = async () => {
     await Promise.all([assertChain(), assertSender()])
   }
-
   try {
     await assertSubmission()
   } catch (error) {
     release()
     throw error
   }
-
   return { assertChain, assertSubmission, chainId, release }
 }
-
 async function sendTransaction(
   provider: Eip1193Provider,
   transaction: { data: Hex; from: Address; to: Address },
@@ -436,17 +409,17 @@ async function sendTransaction(
   await guard.assertSubmission()
   return hash
 }
-
 function parseReceipt(
   value: unknown,
   hash: Hash,
-): TransactionReceipt | undefined {
+): { receipt: TransactionReceipt; reverted: boolean } | undefined {
   if (value === null) return undefined
   if (typeof value !== 'object' || value === null) {
     throw new Error('The wallet returned an invalid transaction receipt.')
   }
 
   const status = 'status' in value ? value.status : undefined
+  const blockHash = 'blockHash' in value ? value.blockHash : undefined
   const blockNumber = 'blockNumber' in value ? value.blockNumber : undefined
   const transactionHash = parseTransactionHash(
     'transactionHash' in value ? value.transactionHash : undefined,
@@ -459,38 +432,41 @@ function parseReceipt(
   if (status !== '0x0' && status !== '0x1') {
     throw new Error('The wallet returned an invalid transaction status.')
   }
+  if (typeof blockHash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(blockHash)) {
+    throw new Error('The wallet returned an invalid receipt block hash.')
+  }
   const parsedBlockNumber = parseRpcQuantity(
     blockNumber,
     'receipt block number',
   )
-  if (status === '0x0') throw new TransactionRevertedError(hash)
-
-  return { blockNumber: parsedBlockNumber, hash }
+  return {
+    receipt: {
+      blockHash: blockHash.toLowerCase() as Hash,
+      blockNumber: parsedBlockNumber,
+      hash,
+    },
+    reverted: status === '0x0',
+  }
 }
-
 class TransactionRevertedError extends Error {
   constructor(hash: Hash) {
     super(`Transaction ${hash} reverted on-chain.`)
     this.name = 'TransactionRevertedError'
   }
 }
-
 export function isTransactionRevertedError(
   error: unknown,
 ): error is TransactionRevertedError {
   return error instanceof TransactionRevertedError
 }
-
 function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
 }
-
 function receiptUnavailableError(hash: Hash) {
   return new Error(
     `Receipt for transaction ${hash} is still unavailable. Check its status before trying again.`,
   )
 }
-
 export async function waitForTransactionReceipt(
   provider: Eip1193Provider,
   hash: Hash,
@@ -525,8 +501,35 @@ export async function waitForTransactionReceipt(
       )
     }
 
-    const receipt = parseReceipt(receiptValue, hash)
-    if (receipt) return receipt
+    const parsedReceipt = parseReceipt(receiptValue, hash)
+    if (parsedReceipt) {
+      const { receipt, reverted } = parsedReceipt
+      const blockTag = `0x${receipt.blockNumber.toString(16)}`
+      const blockValue = await beforeDeadline(
+        () =>
+          provider.request({
+            method: 'eth_getBlockByNumber',
+            params: [blockTag, false],
+          }),
+        deadline,
+        () => receiptUnavailableError(hash),
+      )
+      if (options.assertCurrentChain) {
+        await beforeDeadline(options.assertCurrentChain, deadline, () =>
+          receiptUnavailableError(hash),
+        )
+      }
+      if (blockValue !== null) {
+        const canonicalBlock = parseBlockFingerprint(blockValue)
+        if (
+          canonicalBlock.number === receipt.blockNumber &&
+          canonicalBlock.hash === receipt.blockHash
+        ) {
+          if (reverted) throw new TransactionRevertedError(hash)
+          return receipt
+        }
+      }
+    }
     if (Date.now() >= deadline) {
       throw receiptUnavailableError(hash)
     }
@@ -560,7 +563,7 @@ export async function deployProtocol(
       onSubmitted,
     )
     return await waitForTransactionReceipt(provider, hash, {
-      assertCurrentChain: guard.assertChain,
+      assertCurrentChain: guard.assertSubmission,
     })
   } finally {
     guard.release()
@@ -578,7 +581,10 @@ export async function publishPost(
   body: string,
   onSubmitted?: TransactionSubmitted,
 ): Promise<TransactionReceipt> {
-  const bodyLength = getPostBodyByteLength(body)
+  const bodyLength =
+    body.length > MAX_POST_BODY_BYTES
+      ? MAX_POST_BODY_BYTES + 1
+      : getPostBodyByteLength(body)
   if (bodyLength === 0) throw new Error('Write something before publishing.')
   if (bodyLength > MAX_POST_BODY_BYTES) {
     throw new Error(`Posts are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`)
@@ -606,7 +612,7 @@ export async function publishPost(
       onSubmitted,
     )
     return await waitForTransactionReceipt(provider, hash, {
-      assertCurrentChain: guard.assertChain,
+      assertCurrentChain: guard.assertSubmission,
     })
   } finally {
     guard.release()

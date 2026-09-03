@@ -39,7 +39,7 @@ pnpm test
 pnpm build
 ```
 
-Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`. The MetaMask-compatible Anvil and local-fork workflow is documented in [`docs/local-wallet.md`](./docs/local-wallet.md).
+Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`.
 
 ## Protocol address
 
