@@ -24,13 +24,13 @@ The frozen creation bytecode and v1 salt use the canonical EIP-7997 CREATE2 fact
 
 The web application uses React with Vite because it does not require a server runtime. Production assets use relative paths so a build remains usable beneath CID and gateway path prefixes. Client routes must not rely on an HTTP server fallback.
 
-Injected wallets are discovered through EIP-6963 and submit writes through their EIP-1193 transport. The client compares exact code hashes before enabling deployment or publishing and repeats the protocol check immediately before every post. Independently configurable RPC transports will serve feed reads. The application must not ship a mandatory vendor API key.
+Injected wallets are discovered through EIP-6963 and submit writes through their EIP-1193 transport. The client compares exact code hashes before enabling deployment or publishing and repeats the protocol check immediately before every post. The initial [confirmed post feed](./feed.md) also reads through the connected wallet; independently configurable user-selected RPC transports can be added later. The application must not ship a mandatory vendor API key.
 
 ## Browser indexing
 
 The browser indexer requests logs in bounded block ranges and emits canonical additions and rollback instructions. A versioned, disposable IndexedDB cache persists checkpoints and validated logs locally, or clears and rebuilds them when integrity checks fail. Screens request only the event families and indexed topics they need. A new device can always reconstruct its view from RPC without trusting a Lifeinvader service. The synchronization and rollback contract is specified in [`indexing.md`](./indexing.md), and the local transaction boundary is specified in [`cache.md`](./cache.md).
 
-The initial interface is allowed to contain fixture content while protocol and indexer work proceeds, but fixtures must be visibly identified and isolated from chain-derived models.
+The global post feed is chain-derived and allows one bounded range per invocation. It never performs a full-history catch-up loop during normal page load. Other unfinished screens may contain fixture content only when fixtures are visibly identified and isolated from chain-derived models.
 
 ## Media
 

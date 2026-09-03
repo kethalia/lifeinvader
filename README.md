@@ -41,6 +41,8 @@ pnpm build
 
 Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`.
 
+The current client discovers injected wallets, verifies or permissionlessly deploys the predetermined protocol, publishes text posts, and reconstructs a confirmed global feed through bounded wallet-RPC reads. Feed behavior and its deliberate work budget are documented in [`docs/feed.md`](./docs/feed.md).
+
 ## Protocol address
 
 On supported EVM chains, Lifeinvader v1 deterministically deploys to `0x779DEb5AD0B27BF40BDBFF3A81caB2d9049d7ad1`. Deployment is permissionless and grants the sender no role. The frozen CREATE2 inputs and local deployment workflow are documented in [`docs/deployment.md`](./docs/deployment.md).

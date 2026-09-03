@@ -25,7 +25,7 @@ import {
   type TransactionSubmitted,
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
-import { useWalletSession } from './wallet-session'
+import type { WalletSessionController } from './wallet-session'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -91,9 +91,15 @@ function TransactionStatus({
     </div>
   )
 }
-export function WalletPanel() {
+export function WalletPanel({
+  onPostConfirmed,
+  walletSession,
+}: {
+  onPostConfirmed(): void
+  walletSession: WalletSessionController
+}) {
   const wallets = useWalletProviders()
-  const { connect, refresh, session } = useWalletSession()
+  const { connect, refresh, session } = walletSession
   const [inspection, setInspection] = useState<ProtocolInspection>()
   const [inspectionError, setInspectionError] = useState<string>()
   const [localChainState, setLocalChainState] = useState<
@@ -203,6 +209,7 @@ export function WalletPanel() {
       if (nextReceipt) {
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
+        if (action === 'post') onPostConfirmed()
       }
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
@@ -291,8 +298,10 @@ export function WalletPanel() {
         ).finally(guard.release)
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
-        if (transaction.action === 'post') setBody('')
-        else await refreshInspection()
+        if (transaction.action === 'post') {
+          setBody('')
+          onPostConfirmed()
+        } else await refreshInspection()
       } catch (error) {
         setSubmittedTransaction({
           ...transaction,

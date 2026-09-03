@@ -427,6 +427,148 @@ h1 span {
   font-weight: 800;
 }
 
+.post-feed {
+  padding: 5rem 0 6rem;
+  border-top: 1px solid var(--line);
+}
+
+.post-feed-heading {
+  display: grid;
+  margin-bottom: 2rem;
+  align-items: end;
+  gap: 3rem;
+  grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr);
+}
+
+.post-feed-heading h2 {
+  max-width: 850px;
+  margin: 0;
+  font-size: clamp(2.7rem, 6vw, 6.5rem);
+  letter-spacing: -0.06em;
+  line-height: 0.9;
+}
+
+.feed-controls {
+  display: grid;
+  align-items: start;
+  gap: 1rem;
+}
+
+.feed-controls p,
+.feed-feedback,
+.post-card header,
+.post-media-commitment {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.feed-controls p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.feed-controls button {
+  min-height: 46px;
+  width: fit-content;
+  padding: 0.65rem 1rem;
+  border: 1px solid var(--ink);
+  color: var(--paper);
+  background: var(--ink);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.feed-controls button:hover:not(:disabled),
+.feed-controls button:focus-visible {
+  color: var(--ink);
+  background: var(--acid);
+}
+
+.feed-controls button:disabled {
+  cursor: wait;
+  opacity: 0.54;
+}
+
+.feed-feedback {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid currentColor;
+}
+
+.post-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--ink);
+  border-left: 1px solid var(--ink);
+  list-style: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.post-list > li {
+  min-width: 0;
+  border-right: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+
+.post-card {
+  min-height: 260px;
+  padding: 1.5rem;
+}
+
+.post-card header {
+  display: flex;
+  margin-bottom: 3rem;
+  justify-content: space-between;
+  gap: 1rem;
+  color: rgba(25, 24, 23, 0.68);
+}
+
+.post-card header p {
+  display: flex;
+  margin: 0;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.post-card header p:last-child {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.post-body {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: clamp(1.15rem, 2vw, 1.65rem);
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.post-media-commitment {
+  margin: 2rem 0 0;
+  overflow-wrap: anywhere;
+  color: var(--red);
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.empty-feed,
+.feed-placeholder {
+  min-height: 220px;
+  margin: 0;
+  padding: 2rem;
+  border: 1px solid var(--ink);
+  background: rgba(255, 255, 255, 0.24);
+  font-size: 1.15rem;
+  line-height: 1.5;
+}
+
+.feed-placeholder p {
+  max-width: 48ch;
+  margin: 0;
+}
+
 .principles {
   padding: 5rem 0 6rem;
   border-top: 1px solid var(--line);
@@ -515,6 +657,8 @@ footer p {
 
   .wallet-panel-heading,
   .wallet-console,
+  .post-feed-heading,
+  .post-list,
   .section-heading,
   .principle-grid {
     grid-template-columns: 1fr;
@@ -540,6 +684,16 @@ footer p {
   .compose-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .post-card header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .post-card header p:last-child {
+    justify-content: flex-start;
+    text-align: left;
   }
 
   .ledger-card {

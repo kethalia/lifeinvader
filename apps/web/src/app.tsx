@@ -1,4 +1,8 @@
+import { useReducer } from 'react'
+import { PostFeedPanel } from './post-feed-panel'
+import type { PostFeedSynchronizer } from './post-feed'
 import { WalletPanel } from './wallet-panel'
+import { useWalletSession } from './wallet-session'
 
 const principles = [
   {
@@ -24,7 +28,16 @@ const networkFacts = [
   ['Privacy', 'Absolutely not'],
 ] as const
 
-export function App() {
+export function App({
+  synchronizePostFeed,
+}: {
+  synchronizePostFeed?: PostFeedSynchronizer
+} = {}) {
+  const walletSession = useWalletSession()
+  const [feedRevision, refreshFeed] = useReducer(
+    (revision: number) => revision + 1,
+    0,
+  )
   return (
     <div className="site-shell">
       <a className="skip-link" href="#main-content">
@@ -79,7 +92,16 @@ export function App() {
           </aside>
         </section>
 
-        <WalletPanel />
+        <WalletPanel
+          onPostConfirmed={refreshFeed}
+          walletSession={walletSession}
+        />
+
+        <PostFeedPanel
+          refreshRevision={feedRevision}
+          session={walletSession.session}
+          synchronize={synchronizePostFeed}
+        />
 
         <section className="principles" aria-labelledby="principles-title">
           <div className="section-heading">

@@ -17,6 +17,11 @@ export type WalletSession = {
   provider?: Eip1193Provider
   status: 'disconnected' | 'connecting' | 'connected'
 }
+export type WalletSessionController = {
+  connect(wallet: DiscoveredWallet): Promise<void>
+  refresh(): Promise<void>
+  session: WalletSession
+}
 const INITIAL_SESSION: WalletSession = { status: 'disconnected' }
 async function readConnection(provider: Eip1193Provider) {
   let revision = 0
@@ -59,7 +64,7 @@ async function readConnection(provider: Eip1193Provider) {
     provider.removeListener?.('disconnect', trackDisconnect)
   }
 }
-export function useWalletSession() {
+export function useWalletSession(): WalletSessionController {
   const [session, setSession] = useState<WalletSession>(INITIAL_SESSION)
   const requestSequence = useRef(0)
   const connect = useCallback(async (wallet: DiscoveredWallet) => {
