@@ -1,5 +1,5 @@
 import {
-  eventTransactionOrderMatchesLogOrder,
+  eventTransactionsAreConsistent,
   indexedEventLogMatchesFilter,
   normalizeEventLogFilter,
   validateEventCursor,
@@ -142,7 +142,6 @@ function getLogStreamProblem(
   filter: NormalizedEventLogFilter,
 ) {
   const identities = new Set<string>()
-  let previous: IndexedEventLog | undefined
   const blockHashes = new Map(
     cursor.checkpoints.map((checkpoint) => [
       checkpoint.blockNumber.toString(),
@@ -154,9 +153,6 @@ function getLogStreamProblem(
     const identity = getLogIdentity(log)
     if (identities.has(identity)) return 'duplicate block/log-index pairs'
     identities.add(identity)
-    if (previous && !eventTransactionOrderMatchesLogOrder(previous, log)) {
-      return 'inconsistent transaction indexes'
-    }
     const block = log.blockNumber.toString()
     const blockHash = log.blockHash.toLowerCase()
     const knownHash = blockHashes.get(block)
@@ -164,7 +160,9 @@ function getLogStreamProblem(
       return 'conflicting block hashes'
     }
     blockHashes.set(block, blockHash)
-    previous = log
+  }
+  if (!eventTransactionsAreConsistent(logs)) {
+    return 'inconsistent transaction metadata'
   }
   return undefined
 }
@@ -559,7 +557,7 @@ export class BrowserEventCache {
           page = {
             cursor,
             generation: state.generation,
-            logs,
+            logs: logs.slice(0, limit),
             reset: false,
             revision: state.revision,
           }
@@ -614,7 +612,7 @@ export class BrowserEventCache {
           return
         }
         logRecords.push(cursor.value)
-        if (logRecords.length < limit) {
+        if (logRecords.length <= limit) {
           cursor.continue()
           return
         }
@@ -738,36 +736,40 @@ export class BrowserEventCache {
             throw cacheError('The event cache changed during synchronization.')
           }
           if (rollbackTo !== undefined) {
-            const rollbackRequest = logStore
-              .index(LOG_IDENTITY_INDEX)
-              .openCursor(
-                this.#keyRange.bound(
-                  [scope, `${fixedHex(rollbackTo, 64)}:${'0'.repeat(16)}`],
-                  [scope, '\uffff'],
-                ),
-                'prev',
-              )
-            rollbackRequest.onsuccess = () => {
-              const rollbackCursor = rollbackRequest.result
-              if (!rollbackCursor) {
-                commitUpdate(currentState)
-                return
-              }
-              try {
-                const cachedLog = asLogRecord(rollbackCursor.value, scope)
-                if (cachedLog.blockNumber >= rollbackTo) {
+            const rollbackRange = this.#keyRange.bound(
+              [scope, `${fixedHex(rollbackTo, 64)}:${'0'.repeat(16)}`],
+              [scope, '\uffff'],
+            )
+            const traverseRollback = (
+              source: IDBIndex | IDBObjectStore,
+              onComplete: () => void,
+            ) => {
+              const rollbackRequest = source.openCursor(rollbackRange, 'prev')
+              rollbackRequest.onsuccess = () => {
+                const rollbackCursor = rollbackRequest.result
+                if (!rollbackCursor) {
+                  onComplete()
+                  return
+                }
+                try {
+                  asLogRecord(rollbackCursor.value, scope)
                   logStore.delete(rollbackCursor.primaryKey)
-                }
-                rollbackCursor.continue()
-              } catch (error) {
-                if (error instanceof EventCacheCorruptionError) {
-                  resetFromCorruption()
-                } else {
-                  fail(error)
+                  rollbackCursor.continue()
+                } catch (error) {
+                  if (error instanceof EventCacheCorruptionError) {
+                    resetFromCorruption()
+                  } else {
+                    fail(error)
+                  }
                 }
               }
+              rollbackRequest.onerror = () => fail(rollbackRequest.error)
             }
-            rollbackRequest.onerror = () => fail(rollbackRequest.error)
+            traverseRollback(logStore, () =>
+              traverseRollback(logStore.index(LOG_IDENTITY_INDEX), () =>
+                commitUpdate(currentState),
+              ),
+            )
           } else {
             commitUpdate(currentState)
           }

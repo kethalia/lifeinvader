@@ -28,8 +28,10 @@ afterEach(() => cache?.close())
 function blockHash(blockNumber: bigint, branch = 'a') {
   return keccak256(stringToHex(`${branch}:block:${blockNumber}`))
 }
-function transactionHash(blockNumber: bigint, logIndex = 0) {
-  return keccak256(stringToHex(`transaction:${blockNumber}:${logIndex}`))
+function transactionHash(blockNumber: bigint, transactionIndex = 0) {
+  return keccak256(
+    stringToHex(`transaction:${blockNumber}:${transactionIndex}`),
+  )
 }
 function seedCursor(filter: EventLogFilter = FILTER) {
   return createEventCursor({
@@ -60,6 +62,7 @@ function eventLog(
   } = {},
 ): IndexedEventLog {
   const logIndex = options.logIndex ?? 0
+  const transactionIndex = options.transactionIndex ?? 0
   return {
     address: PROTOCOL_ADDRESS,
     blockHash: blockHash(blockNumber, options.branch),
@@ -67,8 +70,8 @@ function eventLog(
     data: '0x',
     logIndex,
     topics: [POST_PUBLISHED_TOPIC],
-    transactionHash: transactionHash(blockNumber, logIndex),
-    transactionIndex: options.transactionIndex ?? 0,
+    transactionHash: transactionHash(blockNumber, transactionIndex),
+    transactionIndex,
   }
 }
 function logIdentity(log: IndexedEventLog) {
@@ -506,13 +509,16 @@ describe('browser event cache', () => {
     })
   })
 
-  it('resets cached logs whose transaction indexes contradict log order', async () => {
+  it('validates transaction metadata across the page boundary', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
     const initial = await opened.readLatest(seed)
-    const first = eventLog(1n, { transactionIndex: 1 })
+    const first = eventLog(1n)
     await opened.apply(initial, syncResult(cursorAt(seed, 4n), [first]))
-    const second = eventLog(1n, { logIndex: 1, transactionIndex: 0 })
+    const second = {
+      ...eventLog(1n, { logIndex: 1 }),
+      transactionHash: OTHER_TOPIC,
+    }
     await putRawRecord(factory, 'logs', {
       identity: logIdentity(second),
       log: second,
@@ -521,7 +527,7 @@ describe('browser event cache', () => {
       scope: getEventCacheScope(seed),
     })
 
-    expect(await opened.readLatest(seed)).toMatchObject({
+    expect(await opened.readLatest(seed, 1)).toMatchObject({
       cursor: seed,
       generation: initial.generation,
       logs: [],
@@ -708,6 +714,41 @@ describe('browser event cache', () => {
     expect(await countRawScopeLogs(factory, scope)).toBe(0)
   })
 
+  it('resets a rollback suffix record with a corrupted identity key', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const active = await opened.readLatest(seed)
+    const scope = getEventCacheScope(seed)
+    const corrupt = eventLog(3n)
+    await putRawRecord(factory, 'logs', {
+      identity: '0',
+      log: corrupt,
+      position: logIdentity(corrupt),
+      schemaVersion: 6,
+      scope,
+    })
+
+    await expect(
+      opened.apply(
+        active,
+        syncResult(
+          cursorAt(seed, 4n, 'b'),
+          [eventLog(2n, { branch: 'b' })],
+          2n,
+        ),
+      ),
+    ).rejects.toThrow(/corrupt/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      revision: 2n,
+    })
+    expect(await countRawScopeLogs(factory, scope)).toBe(0)
+  })
+
   it('seeks directly to the affected rollback suffix', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
@@ -776,7 +817,7 @@ describe('browser event cache', () => {
           eventLog(1n, { logIndex: 1, transactionIndex: 0 }),
         ]),
       ),
-    ).rejects.toThrow(/transaction indexes/i)
+    ).rejects.toThrow(/transaction metadata/i)
     await expect(
       opened.apply(
         initial,

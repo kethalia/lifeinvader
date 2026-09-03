@@ -29,8 +29,10 @@ function quantity(value: bigint | number) {
 function blockHash(block: bigint | number, branch = 'a') {
   return keccak256(stringToHex(`${branch}:${block.toString()}`))
 }
-function transactionHash(block: bigint | number, logIndex = 0) {
-  return keccak256(stringToHex(`transaction:${block.toString()}:${logIndex}`))
+function transactionHash(block: bigint | number, transactionIndex = 0) {
+  return keccak256(
+    stringToHex(`transaction:${block.toString()}:${transactionIndex}`),
+  )
 }
 function rpcLog(
   block: bigint,
@@ -38,9 +40,11 @@ function rpcLog(
     branch?: string
     logIndex?: number
     overrides?: Record<string, unknown>
+    transactionIndex?: number
   } = {},
 ) {
   const logIndex = options.logIndex ?? 0
+  const transactionIndex = options.transactionIndex ?? 0
   return {
     address: PROTOCOL_ADDRESS.toLowerCase(),
     blockHash: blockHash(block, options.branch),
@@ -49,8 +53,8 @@ function rpcLog(
     logIndex: quantity(logIndex),
     removed: false,
     topics: [TOPIC],
-    transactionHash: transactionHash(block, logIndex),
-    transactionIndex: '0x0',
+    transactionHash: transactionHash(block, transactionIndex),
+    transactionIndex: quantity(transactionIndex),
     ...options.overrides,
   }
 }
@@ -462,12 +466,9 @@ describe('untrusted RPC and cursor data', () => {
       getLogs: () => [
         rpcLog(0n, {
           logIndex: 0,
-          overrides: { transactionIndex: '0x1' },
+          transactionIndex: 1,
         }),
-        rpcLog(0n, {
-          logIndex: 1,
-          overrides: { transactionIndex: '0x0' },
-        }),
+        rpcLog(0n, { logIndex: 1, transactionIndex: 0 }),
       ],
     })
     await expect(
@@ -475,7 +476,42 @@ describe('untrusted RPC and cursor data', () => {
         maxRangeSize: 1,
         maxRanges: 1,
       }),
-    ).rejects.toThrow(/transaction index order/i)
+    ).rejects.toThrow(/transaction metadata/i)
+  })
+
+  it.each([
+    [
+      'different hashes for one transaction index',
+      [
+        rpcLog(0n),
+        rpcLog(0n, {
+          logIndex: 1,
+          overrides: { transactionHash: OTHER_TOPIC },
+        }),
+      ],
+    ],
+    [
+      'one transaction hash at different indexes',
+      [
+        rpcLog(0n),
+        rpcLog(0n, {
+          logIndex: 1,
+          overrides: { transactionHash: transactionHash(0n) },
+          transactionIndex: 1,
+        }),
+      ],
+    ],
+  ])('rejects %s', async (_description, logs) => {
+    const { provider } = chainProvider({
+      head: () => 0n,
+      getLogs: () => logs,
+    })
+    await expect(
+      syncEventLogs(provider, FILTER, eventCursor(0n, 1), {
+        maxRangeSize: 1,
+        maxRanges: 1,
+      }),
+    ).rejects.toThrow(/transaction metadata/i)
   })
 
   it('requires every positional wildcard topic to exist', async () => {

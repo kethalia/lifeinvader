@@ -63,7 +63,7 @@ RPC responses are treated as external input. Quantities must use canonical bound
 (blockNumber, logIndex)
 ```
 
-Within a block, transaction indexes must be monotonic with that order. They are retained as validated metadata but never control reducer order.
+Within a block, transaction indexes must be monotonic with that order. One transaction index must map to one transaction hash and one hash must map back to one index. Transaction positions are retained as validated metadata but never control reducer order.
 
 Malformed or mismatched responses fail the invocation without mutating the input cursor. The cache layer must likewise treat persisted cursor and log records as disposable and versioned.
 

@@ -391,21 +391,39 @@ function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
   }
   return first.logIndex - second.logIndex
 }
-export function eventTransactionOrderMatchesLogOrder(
-  first: IndexedEventLog,
-  second: IndexedEventLog,
+export function eventTransactionsAreConsistent(
+  logs: readonly IndexedEventLog[],
 ) {
-  if (
-    first.blockNumber !== second.blockNumber ||
-    first.logIndex === second.logIndex ||
-    first.transactionIndex === second.transactionIndex
-  ) {
-    return true
+  const hashesByIndex = new Map<string, Hash>()
+  const indexesByHash = new Map<string, number>()
+  for (let index = 0; index < logs.length; index += 1) {
+    const log = logs[index]!
+    const previous = logs[index - 1]
+    if (
+      previous?.blockNumber === log.blockNumber &&
+      previous.logIndex !== log.logIndex &&
+      previous.transactionIndex !== log.transactionIndex
+    ) {
+      const logIndexesAscending = previous.logIndex < log.logIndex
+      const transactionIndexesAscending =
+        previous.transactionIndex < log.transactionIndex
+      if (logIndexesAscending !== transactionIndexesAscending) return false
+    }
+    const block = log.blockNumber.toString()
+    const indexKey = `${block}:${log.transactionIndex}`
+    const hashKey = `${block}:${log.transactionHash}`
+    const knownHash = hashesByIndex.get(indexKey)
+    const knownIndex = indexesByHash.get(hashKey)
+    if (
+      (knownHash !== undefined && knownHash !== log.transactionHash) ||
+      (knownIndex !== undefined && knownIndex !== log.transactionIndex)
+    ) {
+      return false
+    }
+    hashesByIndex.set(indexKey, log.transactionHash)
+    indexesByHash.set(hashKey, log.transactionIndex)
   }
-  const logIndexesAscending = first.logIndex < second.logIndex
-  const transactionIndexesAscending =
-    first.transactionIndex < second.transactionIndex
-  return logIndexesAscending === transactionIndexesAscending
+  return true
 }
 function parseLogs(
   value: readonly unknown[],
@@ -427,10 +445,8 @@ function parseLogs(
     uniqueLogs.set(key, log)
   }
   const logs = [...uniqueLogs.values()].toSorted(compareLogs)
-  for (let index = 1; index < logs.length; index += 1) {
-    if (!eventTransactionOrderMatchesLogOrder(logs[index - 1]!, logs[index]!)) {
-      throw invalidRpc('event transaction index order')
-    }
+  if (!eventTransactionsAreConsistent(logs)) {
+    throw invalidRpc('event transaction metadata')
   }
   return logs
 }

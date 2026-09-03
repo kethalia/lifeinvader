@@ -14,7 +14,7 @@ Post, comment, message, and group identifiers start at one. An identifier is mea
 (chainId, protocolAddress, entityKind, identifier)
 ```
 
-Clients order events by `(blockNumber, logIndex)`, the canonical block-wide log position. They validate transaction indexes as metadata but never use them to reorder events. Clients must retain block hashes for unfinalized checkpoints and roll back events displaced by a chain reorganization.
+Clients order events by `(blockNumber, logIndex)`, the canonical block-wide log position. They validate the monotonic, one-to-one transaction index/hash mapping as metadata but never use it to reorder events. Clients must retain block hashes for unfinalized checkpoints and roll back events displaced by a chain reorganization.
 
 ## Payload limits
 
