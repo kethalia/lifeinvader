@@ -20,6 +20,7 @@ import type {
   PostReactionStreamSnapshot,
 } from './post-reaction-stream'
 import {
+  publishComment,
   publishRepost,
   setPostLike,
   TransactionSubmissionUnknownError,
@@ -32,6 +33,7 @@ import type { WalletSession } from './wallet-session'
 
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
+const REPLACEMENT_BLOCK_HASH = `0x${'33'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
 const REACTION_ANCHOR = { chainId: 1n } as PostReactionProjectionAnchor
 
@@ -338,6 +340,183 @@ describe('PostFeedPanel', () => {
     )
   })
 
+  it('publishes a text and media comment as one verified post action', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const mediaCid = parseMediaCid(
+      'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
+    )!
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    }
+    const publishCommentAction = vi.fn<typeof publishComment>(
+      async (_provider, _account, _chainId, _postId, _payload, onSubmitted) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        return receipt
+      },
+    )
+    render(
+      <PostFeedPanel
+        publishCommentAction={publishCommentAction}
+        session={connectedSession(provider)}
+        synchronize={vi.fn().mockResolvedValue(snapshot([post('Discuss.')]))}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /write comment for post 1/i,
+      }),
+    )
+    fireEvent.change(
+      screen.getByRole('textbox', { name: /permanent public comment/i }),
+      { target: { value: 'This comment is public forever.' } },
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: /IPFS media CID/i }), {
+      target: { value: mediaCid.text },
+    })
+    fireEvent.click(
+      screen.getByRole('button', { name: /publish comment on-chain/i }),
+    )
+
+    expect(
+      await screen.findByText(/comment for post #1 was included in block 42/i),
+    ).toBeTruthy()
+    expect(publishCommentAction).toHaveBeenCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      1n,
+      {
+        body: 'This comment is public forever.',
+        mediaCid: mediaCid.bytes,
+      },
+      expect.any(Function),
+    )
+    expect(
+      screen.queryByRole('textbox', { name: /permanent public comment/i }),
+    ).toBeNull()
+  })
+
+  it('retains independent unsent comment drafts across chain contexts', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi.fn().mockResolvedValue(snapshot([post('Move.')]))
+    const { rerender } = render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /write comment for post 1/i,
+      }),
+    )
+    fireEvent.change(
+      screen.getByRole('textbox', { name: /permanent public comment/i }),
+      { target: { value: 'Chain-one draft.' } },
+    )
+
+    rerender(
+      <PostFeedPanel
+        session={connectedSession(provider, 2n)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /write comment for post 1/i,
+      }),
+    )
+    fireEvent.change(
+      screen.getByRole('textbox', { name: /permanent public comment/i }),
+      { target: { value: 'Chain-two draft.' } },
+    )
+
+    rerender(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(3))
+    expect(
+      (await screen.findByRole('textbox', {
+        name: /permanent public comment/i,
+      })) as HTMLTextAreaElement,
+    ).toHaveProperty('value', 'Chain-one draft.')
+
+    rerender(
+      <PostFeedPanel
+        session={connectedSession(provider, 2n)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(4))
+    expect(
+      (await screen.findByRole('textbox', {
+        name: /permanent public comment/i,
+      })) as HTMLTextAreaElement,
+    ).toHaveProperty('value', 'Chain-two draft.')
+  })
+
+  it('pauses a draft when its canonical post event is replaced', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const replacement = {
+      ...post('Replacement content.'),
+      blockHash: REPLACEMENT_BLOCK_HASH,
+      logIndex: 2,
+    }
+    const synchronize = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot([post('Original content.')]))
+      .mockResolvedValueOnce(snapshot([replacement]))
+    render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /write comment for post 1/i,
+      }),
+    )
+    fireEvent.change(
+      screen.getByRole('textbox', { name: /permanent public comment/i }),
+      { target: { value: 'Only for the original.' } },
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /check for newer posts/i }),
+    )
+
+    expect(await screen.findByText('Replacement content.')).toBeTruthy()
+    expect(screen.getByText(/comment draft paused/i)).toBeTruthy()
+    expect(
+      screen.getByRole('textbox', { name: /paused draft text/i }),
+    ).toHaveProperty('value', 'Only for the original.')
+    expect(
+      screen
+        .getByRole('button', { name: /write comment for post 1/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /discard paused draft/i }),
+    )
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole('button', { name: /write comment for post 1/i })
+          .hasAttribute('disabled'),
+      ).toBe(false),
+    )
+  })
+
   it('locks duplicate actions around an unknown hash and safely retries its receipt', async () => {
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
@@ -501,6 +680,105 @@ describe('PostFeedPanel', () => {
         screen.queryByText(/belongs to another wallet context/i),
       ).toBeNull(),
     )
+  })
+
+  it('clears the published context draft without clearing a new-chain draft', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const delayedComment = deferred<TransactionReceipt>()
+    const publishCommentAction = vi
+      .fn<typeof publishComment>()
+      .mockImplementationOnce(
+        async (
+          _provider,
+          _account,
+          _chainId,
+          _postId,
+          _payload,
+          onSubmitted,
+        ) => {
+          onSubmitted?.(TRANSACTION_HASH)
+          return delayedComment.promise
+        },
+      )
+    const synchronize = vi.fn().mockResolvedValue(snapshot([post('Move.')]))
+    const { rerender } = render(
+      <PostFeedPanel
+        publishCommentAction={publishCommentAction}
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /write comment for post 1/i,
+      }),
+    )
+    fireEvent.change(
+      screen.getByRole('textbox', { name: /permanent public comment/i }),
+      { target: { value: 'Old-chain draft.' } },
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /publish comment on-chain/i }),
+    )
+    await waitFor(() => expect(publishCommentAction).toHaveBeenCalledTimes(1))
+
+    rerender(
+      <PostFeedPanel
+        publishCommentAction={publishCommentAction}
+        session={connectedSession(provider, 2n)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
+    fireEvent.click(
+      screen.getByRole('button', { name: /write comment for post 1/i }),
+    )
+    const newDraft = screen.getByRole('textbox', {
+      name: /permanent public comment/i,
+    })
+    fireEvent.change(newDraft, { target: { value: 'New-chain draft.' } })
+
+    await act(async () =>
+      delayedComment.resolve({
+        blockHash: BLOCK_HASH,
+        blockNumber: 42n,
+        hash: TRANSACTION_HASH,
+      }),
+    )
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: /permanent public comment/i,
+        }) as HTMLTextAreaElement
+      ).value,
+    ).toBe('New-chain draft.')
+
+    rerender(
+      <PostFeedPanel
+        publishCommentAction={publishCommentAction}
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(3))
+    expect(
+      screen.queryByRole('textbox', { name: /permanent public comment/i }),
+    ).toBeNull()
+
+    rerender(
+      <PostFeedPanel
+        publishCommentAction={publishCommentAction}
+        session={connectedSession(provider, 2n)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(4))
+    expect(
+      (await screen.findByRole('textbox', {
+        name: /permanent public comment/i,
+      })) as HTMLTextAreaElement,
+    ).toHaveProperty('value', 'New-chain draft.')
   })
 
   it('refreshes automatically only after an included post reaches feed depth', async () => {

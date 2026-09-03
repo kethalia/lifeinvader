@@ -506,6 +506,40 @@ h1 span {
   border: 1px solid currentColor;
 }
 
+.orphaned-comment-draft {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.orphaned-comment-draft p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.orphaned-comment-draft label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.orphaned-comment-draft input,
+.orphaned-comment-draft textarea {
+  width: 100%;
+  padding: 0.7rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font: inherit;
+  line-height: 1.45;
+  text-transform: none;
+}
+
+.orphaned-comment-draft button {
+  width: fit-content;
+}
+
 .reaction-read-model {
   display: flex;
   align-items: center;
@@ -609,6 +643,49 @@ h1 span {
   flex-wrap: wrap;
 }
 
+.comment-composer {
+  display: grid;
+  padding: 1rem;
+  gap: 0.65rem;
+  border: 1px solid var(--ink);
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.comment-composer label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.comment-composer input,
+.comment-composer textarea {
+  width: 100%;
+  padding: 0.7rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.comment-composer textarea {
+  resize: vertical;
+}
+
+.comment-compose-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.comment-compose-actions span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+}
+
 .post-actions button,
 .feed-feedback button {
   min-height: 38px;
@@ -629,7 +706,19 @@ h1 span {
   background: var(--ink);
 }
 
-.post-actions button:disabled {
+.post-actions .button-accent {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.post-actions .button-accent:hover:not(:disabled),
+.post-actions .button-accent:focus-visible {
+  color: var(--ink);
+  background: var(--acid);
+}
+
+.post-actions button:disabled,
+.feed-feedback button:disabled {
   cursor: wait;
   opacity: 0.45;
 }
@@ -791,6 +880,11 @@ footer p {
   }
 
   .reaction-read-model {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .comment-compose-actions {
     align-items: stretch;
     flex-direction: column;
   }

@@ -41,7 +41,7 @@ pnpm build
 
 Run the web client with `pnpm dev`. Contract-only commands can be run with `pnpm --filter @lifeinvader/contracts test`.
 
-The current client discovers injected wallets, verifies or permissionlessly deploys the predetermined protocol, publishes text and optional canonical IPFS CID commitments, reconstructs a confirmed global feed through bounded wallet-RPC reads, writes explicit like, unlike, and repost events, and derives exact confirmed reaction totals through user-stepped RPC and local-cache work. Feed behavior and its deliberate work budget are documented in [`docs/feed.md`](./docs/feed.md); reaction semantics are documented in [`docs/reactions.md`](./docs/reactions.md), and the distinction between a CID and paid persistence is documented in [`docs/media.md`](./docs/media.md).
+The current client discovers injected wallets, verifies or permissionlessly deploys the predetermined protocol, publishes posts and comments with optional canonical IPFS CID commitments, reconstructs a confirmed global feed through bounded wallet-RPC reads, writes explicit like, unlike, and repost events, and derives exact confirmed reaction totals through user-stepped RPC and local-cache work. Feed behavior and its deliberate work budget are documented in [`docs/feed.md`](./docs/feed.md); comment writes are documented in [`docs/comments.md`](./docs/comments.md), reaction semantics are documented in [`docs/reactions.md`](./docs/reactions.md), and the distinction between a CID and paid persistence is documented in [`docs/media.md`](./docs/media.md).
 
 ## Protocol address
 

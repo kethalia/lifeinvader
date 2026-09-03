@@ -49,6 +49,19 @@ const PUBLISH_POST_ABI = [
     outputs: [{ name: 'postId', type: 'uint256' }],
   },
 ] as const
+const PUBLISH_COMMENT_ABI = [
+  {
+    type: 'function',
+    name: 'publishComment',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'postId', type: 'uint256' },
+      { name: 'body', type: 'string' },
+      { name: 'mediaCid', type: 'bytes' },
+    ],
+    outputs: [{ name: 'commentId', type: 'uint256' }],
+  },
+] as const
 const PUBLISH_REPOST_ABI = [
   {
     type: 'function',
@@ -84,6 +97,20 @@ export const POST_PUBLISHED_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const COMMENT_PUBLISHED_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'commentId', type: 'uint256' },
+      { indexed: true, name: 'postId', type: 'uint256' },
+      { indexed: true, name: 'author', type: 'address' },
+      { indexed: false, name: 'body', type: 'string' },
+      { indexed: false, name: 'mediaCid', type: 'bytes' },
+    ],
+    name: 'CommentPublished',
+    type: 'event',
+  },
+] as const
 export const REPOST_PUBLISHED_EVENT_ABI = [
   {
     anonymous: false,
@@ -110,6 +137,8 @@ export const LIKE_SET_EVENT_ABI = [
 ] as const
 export const POST_PUBLISHED_TOPIC =
   '0xe5fc58b1da4793a6b63868a467012805821ecfc10f870a845faf34a4dd5c53db'
+export const COMMENT_PUBLISHED_TOPIC =
+  '0xdab0b0dd807460349a9bdbcf1e964a6f69ea6e241e844257a8ea7a47d7ea7076'
 export const REPOST_PUBLISHED_TOPIC =
   '0x48b2667530535dfe389ce140bb7872ab9a922083158958ed14099b3565381b99'
 export const LIKE_SET_TOPIC =
@@ -574,6 +603,11 @@ function parseReceipt(
 export type PostPayload = { body: string; mediaCid: Hex }
 export type ExpectedPost = PostPayload & { author: Address }
 export type ExpectedPostAction =
+  | (PostPayload & {
+      account: Address
+      kind: 'comment'
+      postId: bigint
+    })
   | { account: Address; kind: 'like'; liked: boolean; postId: bigint }
   | { account: Address; kind: 'repost'; postId: bigint }
 
@@ -658,19 +692,29 @@ export function assertExpectedPostAction(
   const account = expectedTopic(expected.account)
   const postId = expectedTopic(expected.postId)
   const found =
-    expected.kind === 'repost'
+    expected.kind === 'comment'
       ? hasExpectedProtocolLog(
           logs,
           receipt,
-          [REPOST_PUBLISHED_TOPIC, postId, account],
-          '0x',
+          [COMMENT_PUBLISHED_TOPIC, undefined, postId, account],
+          encodeAbiParameters(POST_DATA_PARAMETERS, [
+            expected.body,
+            expected.mediaCid,
+          ]),
         )
-      : hasExpectedProtocolLog(
-          logs,
-          receipt,
-          [LIKE_SET_TOPIC, expectedTopic(0n), postId, account],
-          encodeAbiParameters(LIKE_DATA_PARAMETERS, [expected.liked]),
-        )
+      : expected.kind === 'repost'
+        ? hasExpectedProtocolLog(
+            logs,
+            receipt,
+            [REPOST_PUBLISHED_TOPIC, postId, account],
+            '0x',
+          )
+        : hasExpectedProtocolLog(
+            logs,
+            receipt,
+            [LIKE_SET_TOPIC, expectedTopic(0n), postId, account],
+            encodeAbiParameters(LIKE_DATA_PARAMETERS, [expected.liked]),
+          )
   if (!found) {
     throw new Error(
       `The receipt did not contain the expected ${expected.kind} event.`,
@@ -879,6 +923,45 @@ export async function publishPost(
   }
 }
 
+export async function publishComment(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  postId: bigint,
+  payload: PostPayload,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertPostId(postId)
+  const { body, mediaCid } = payload
+  const bodyLength =
+    body.length > MAX_POST_BODY_BYTES
+      ? MAX_POST_BODY_BYTES + 1
+      : getPostBodyByteLength(body)
+  if (bodyLength === 0 && mediaCid === '0x') {
+    throw new Error('Write something or add a media CID before commenting.')
+  }
+  if (bodyLength > MAX_POST_BODY_BYTES) {
+    throw new Error(
+      `Comments are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`,
+    )
+  }
+  if (mediaCid !== '0x') decodeMediaCid(mediaCid)
+  return await submitPostAction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: PUBLISH_COMMENT_ABI,
+      functionName: 'publishComment',
+      args: [postId, body, mediaCid],
+    }),
+    { account, body, kind: 'comment', mediaCid, postId },
+    onSubmitted,
+    localProvider,
+  )
+}
+
 function assertPostId(postId: bigint) {
   if (postId < 1n || postId > MAX_UINT256) {
     throw new Error('The selected post identifier is invalid.')
@@ -899,7 +982,7 @@ async function submitPostAction(
   try {
     if ((await inspectProtocol(provider)).kind !== 'ready') {
       throw new Error(
-        'Verified Lifeinvader v1 code is required before reacting.',
+        `Verified Lifeinvader v1 code is required before ${expectedPostAction.kind === 'comment' ? 'commenting' : 'reacting'}.`,
       )
     }
     const hash = await sendTransaction(
