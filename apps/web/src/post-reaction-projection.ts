@@ -495,11 +495,12 @@ export class PostReactionProjection {
     repostCounts.sort(compareRepostCounts)
     const progress = this.progress
     const frontierStart = getFrontierStart(progress)
+    if (frontierStart !== undefined) {
+      for (const blockNumber of this.#blockHashes.keys()) {
+        if (blockNumber <= frontierStart) this.#blockHashes.delete(blockNumber)
+      }
+    }
     const blockHashes = [...this.#blockHashes]
-      .filter(
-        ([blockNumber]) =>
-          frontierStart === undefined || blockNumber > frontierStart,
-      )
       .map(([blockNumber, blockHash]) => ({ blockHash, blockNumber }))
       .toSorted(compareBlockFingerprints)
     return {

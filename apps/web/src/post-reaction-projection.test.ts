@@ -158,6 +158,7 @@ describe('post reaction projection', () => {
     ])
 
     const snapshot = projection.snapshot
+    expect(projection.snapshot).toEqual(snapshot)
     expect(snapshot).toEqual({
       activeLikes: [
         { account: getAddress(ACCOUNT_B), postId: 7n },
