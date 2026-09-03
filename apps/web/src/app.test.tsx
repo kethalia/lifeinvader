@@ -276,6 +276,74 @@ describe('App', () => {
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     stop()
   })
+  it('preserves an unknown post while another chain starts a write', async () => {
+    let chainId = '0x1'
+    let submissions = 0
+    const listeners = new Map<string, Set<(value: unknown) => void>>()
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return chainId
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_sendTransaction') {
+          submissions += 1
+          if (submissions === 1) return UNKNOWN_TRANSACTION_HASH
+          throw Object.assign(new Error('User rejected.'), { code: 4001 })
+        }
+        if (method === 'eth_getTransactionReceipt') {
+          throw new Error('Temporary receipt outage.')
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+      on: vi.fn((event: string, listener: (value: unknown) => void) => {
+        const registered = listeners.get(event) ?? new Set()
+        registered.add(listener)
+        listeners.set(event, registered)
+      }),
+      removeListener: vi.fn(
+        (event: string, listener: (value: unknown) => void) => {
+          listeners.get(event)?.delete(listener)
+        },
+      ),
+    }
+    const emitChain = (value: string) => {
+      chainId = value
+      listeners.get('chainChanged')?.forEach((listener) => listener(value))
+    }
+    const stop = announceWallet('Context Wallet', 'context', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect context wallet/i,
+      }),
+    )
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'Uncertain on chain A.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+
+    expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
+    expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
+    await act(async () => emitChain('0x2'))
+    expect(
+      await screen.findByText(/another wallet context.*current console/i),
+    ).toBeTruthy()
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
+
+    fireEvent.change(textarea, { target: { value: 'Rejected on chain B.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /request was rejected/i,
+    )
+
+    await act(async () => emitChain('0x1'))
+    expect(
+      await screen.findByRole('button', { name: /check receipt again/i }),
+    ).toBeTruthy()
+    expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    stop()
+  })
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
     let deployed = false
     let failNextInspection = false

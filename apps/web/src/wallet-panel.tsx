@@ -26,7 +26,7 @@ import {
   type TransactionSubmitted,
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
-import type { WalletSessionController } from './wallet-session'
+import type { WalletSession, WalletSessionController } from './wallet-session'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
@@ -49,16 +49,47 @@ function TransactionResult({ receipt }: { receipt: TransactionReceipt }) {
     </p>
   )
 }
-type SubmittedTransaction = {
+type TransactionContext = {
   account: Address
   action: 'deploy' | 'post'
   chainId: bigint
-  hash?: TransactionReceipt['hash']
   postBody: string
   postMediaCid: Hex
   provider: Eip1193Provider
-  status: 'ambiguous' | 'failed' | 'pending' | 'unknown'
   walletName: string
+}
+type SubmittedTransaction = TransactionContext & {
+  hash?: TransactionReceipt['hash']
+  id: number
+  status: 'ambiguous' | 'failed' | 'pending' | 'unknown'
+}
+type TransactionProblem = {
+  context?: TransactionContext
+  message: string
+}
+type TransactionResultState = TransactionContext & {
+  receipt: TransactionReceipt
+}
+function transactionContextMatchesSession(
+  transaction: TransactionContext,
+  session: WalletSession,
+) {
+  return (
+    session.status === 'connected' &&
+    transaction.provider === session.provider &&
+    transaction.chainId === session.chainId &&
+    transaction.account.toLowerCase() === session.account?.toLowerCase()
+  )
+}
+function sameTransactionContext(
+  first: TransactionContext,
+  second: TransactionContext,
+) {
+  return (
+    first.provider === second.provider &&
+    first.chainId === second.chainId &&
+    first.account.toLowerCase() === second.account.toLowerCase()
+  )
 }
 function TransactionStatus({
   currentContext,
@@ -111,7 +142,8 @@ function TransactionStatus({
           : null}
       </span>
       {transaction.status === 'unknown' ||
-      transaction.status === 'ambiguous' ? (
+      transaction.status === 'ambiguous' ||
+      transaction.status === 'failed' ? (
         <div className="transaction-recovery-actions">
           {transaction.status === 'unknown' && currentContext ? (
             <button type="button" onClick={onRetry}>
@@ -143,10 +175,11 @@ export function WalletPanel({
   const [busyAction, setBusyAction] = useState<
     'chain' | 'deploy' | 'post' | 'receipt'
   >()
-  const [actionError, setActionError] = useState<string>()
-  const [receipt, setReceipt] = useState<TransactionReceipt>()
-  const [submittedTransaction, setSubmittedTransaction] =
-    useState<SubmittedTransaction>()
+  const [actionProblem, setActionProblem] = useState<TransactionProblem>()
+  const [result, setResult] = useState<TransactionResultState>()
+  const [submittedTransactions, setSubmittedTransactions] = useState<
+    SubmittedTransaction[]
+  >([])
   const [body, setBody] = useState('')
   const [mediaCidInput, setMediaCidInput] = useState('')
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
@@ -158,6 +191,7 @@ export function WalletPanel({
       error instanceof Error ? error.message : 'The media CID is invalid.'
   }
   const inspectionSequence = useRef(0)
+  const transactionSequence = useRef(0)
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
     const provider = session.provider
@@ -213,8 +247,8 @@ export function WalletPanel({
     void refreshInspection()
   }, [refreshInspection, session.chainId])
   useEffect(() => {
-    setActionError(undefined)
-    setReceipt(undefined)
+    setActionProblem(undefined)
+    setResult(undefined)
   }, [session.account, session.chainId])
   const runAction = async (
     action: 'chain' | 'deploy' | 'post',
@@ -232,6 +266,7 @@ export function WalletPanel({
             account: session.account,
             action,
             chainId: session.chainId,
+            id: ++transactionSequence.current,
             postBody: action === 'post' ? body : '',
             postMediaCid:
               action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
@@ -240,23 +275,36 @@ export function WalletPanel({
           }
         : undefined
     setBusyAction(action)
-    setActionError(undefined)
-    setReceipt(undefined)
-    if (action !== 'chain') setSubmittedTransaction(undefined)
+    setActionProblem(undefined)
+    setResult(undefined)
+    if (submittedContext) {
+      setSubmittedTransactions((current) =>
+        current.filter(
+          (transaction) =>
+            transaction.status !== 'failed' ||
+            !sameTransactionContext(transaction, submittedContext),
+        ),
+      )
+    }
     try {
       const nextReceipt = await operation((hash) => {
         if (!submittedContext) return
         submittedHash = hash
-        setSubmittedTransaction({
-          ...submittedContext,
-          hash,
-          status: 'pending',
-        })
+        setSubmittedTransactions((current) => [
+          ...current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+          { ...submittedContext, hash, status: 'pending' },
+        ])
       })
-      if (nextReceipt) {
-        setReceipt(nextReceipt)
-        setSubmittedTransaction(undefined)
-        if (action === 'post' && submittedContext) {
+      if (nextReceipt && submittedContext) {
+        setResult({ ...submittedContext, receipt: nextReceipt })
+        setSubmittedTransactions((current) =>
+          current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+        )
+        if (action === 'post') {
           onPostConfirmed({
             blockHash: nextReceipt.blockHash,
             blockNumber: nextReceipt.blockNumber,
@@ -274,22 +322,38 @@ export function WalletPanel({
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
       if (submittedHash && submittedContext) {
-        setSubmittedTransaction({
-          ...submittedContext,
-          hash: submittedHash,
-          status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
-        })
+        setSubmittedTransactions((current) => [
+          ...current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+          {
+            ...submittedContext,
+            hash: submittedHash,
+            status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
+          },
+        ])
       } else if (
         submittedContext &&
         isTransactionSubmissionUnknownError(error)
       ) {
-        setSubmittedTransaction({
-          ...submittedContext,
-          status: 'ambiguous',
-        })
+        setSubmittedTransactions((current) => [
+          ...current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+          { ...submittedContext, status: 'ambiguous' },
+        ])
+      } else if (submittedContext) {
+        setSubmittedTransactions((current) =>
+          current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+        )
       }
       if (action !== 'chain') await refreshInspection()
-      setActionError(describeRpcError(error, 'The wallet action failed.'))
+      setActionProblem({
+        context: submittedContext,
+        message: describeRpcError(error, 'The wallet action failed.'),
+      })
     } finally {
       setBusyAction(undefined)
     }
@@ -337,16 +401,27 @@ export function WalletPanel({
       return nextReceipt
     })
   }
-  const handleRetryReceipt = () => {
-    const transaction = submittedTransaction
-    const hash = transaction?.hash
-    if (transaction?.status !== 'unknown' || !hash) return
+  const handleRetryReceipt = (transaction: SubmittedTransaction) => {
+    const hash = transaction.hash
+    if (
+      transaction.status !== 'unknown' ||
+      !hash ||
+      !transactionContextMatchesSession(transaction, session)
+    ) {
+      return
+    }
     const provider = transaction.provider
     void (async () => {
       setBusyAction('receipt')
-      setActionError(undefined)
-      setReceipt(undefined)
-      setSubmittedTransaction({ ...transaction, status: 'pending' })
+      setActionProblem(undefined)
+      setResult(undefined)
+      setSubmittedTransactions((current) =>
+        current.map((candidate) =>
+          candidate.id === transaction.id
+            ? { ...candidate, status: 'pending' }
+            : candidate,
+        ),
+      )
       try {
         if (session.provider !== provider) {
           throw new Error(
@@ -372,8 +447,10 @@ export function WalletPanel({
           expectProtocol: transaction.action === 'deploy',
           selectedChainId: transaction.chainId,
         }).finally(guard.release)
-        setReceipt(nextReceipt)
-        setSubmittedTransaction(undefined)
+        setResult({ ...transaction, receipt: nextReceipt })
+        setSubmittedTransactions((current) =>
+          current.filter((candidate) => candidate.id !== transaction.id),
+        )
         if (transaction.action === 'post') {
           setBody('')
           setMediaCidInput('')
@@ -391,13 +468,25 @@ export function WalletPanel({
           })
         } else await refreshInspection()
       } catch (error) {
-        setSubmittedTransaction({
-          ...transaction,
-          status: isTransactionRevertedError(error) ? 'failed' : 'unknown',
-        })
-        setActionError(
-          describeRpcError(error, 'The transaction receipt could not be read.'),
+        setSubmittedTransactions((current) =>
+          current.map((candidate) =>
+            candidate.id === transaction.id
+              ? {
+                  ...candidate,
+                  status: isTransactionRevertedError(error)
+                    ? 'failed'
+                    : 'unknown',
+                }
+              : candidate,
+          ),
         )
+        setActionProblem({
+          context: transaction,
+          message: describeRpcError(
+            error,
+            'The transaction receipt could not be read.',
+          ),
+        })
       } finally {
         setBusyAction(undefined)
       }
@@ -407,16 +496,21 @@ export function WalletPanel({
   const connected =
     session.status === 'connected' &&
     Boolean(session.account && session.provider)
-  const submittedTransactionMatchesSession =
-    submittedTransaction !== undefined &&
-    session.status === 'connected' &&
-    submittedTransaction.provider === session.provider &&
-    submittedTransaction.chainId === session.chainId &&
-    submittedTransaction.account.toLowerCase() ===
-      session.account?.toLowerCase()
-  const transactionWriteLocked =
-    submittedTransactionMatchesSession &&
-    submittedTransaction.status !== 'failed'
+  const activeActionProblem =
+    actionProblem?.context === undefined ||
+    transactionContextMatchesSession(actionProblem.context, session)
+      ? actionProblem
+      : undefined
+  const activeResult =
+    result && transactionContextMatchesSession(result, session)
+      ? result
+      : undefined
+  const activeSubmittedTransactions = submittedTransactions.filter(
+    (transaction) => transactionContextMatchesSession(transaction, session),
+  )
+  const transactionWriteLocked = activeSubmittedTransactions.some(
+    (transaction) => transaction.status !== 'failed',
+  )
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
       <div className="wallet-panel-heading">
@@ -611,23 +705,34 @@ export function WalletPanel({
           )}
         </div>
       </div>
-      {actionError ? (
+      {activeActionProblem ? (
         <p className="error-message action-feedback" role="alert">
-          {actionError}
+          {activeActionProblem.message}
         </p>
       ) : null}
-      {submittedTransaction ? (
-        <TransactionStatus
-          currentContext={submittedTransactionMatchesSession}
-          transaction={submittedTransaction}
-          onRetry={handleRetryReceipt}
-          onDismiss={() => {
-            setSubmittedTransaction(undefined)
-            setActionError(undefined)
-          }}
-        />
+      {submittedTransactions.map((transaction) => {
+        const currentContext = transactionContextMatchesSession(
+          transaction,
+          session,
+        )
+        return (
+          <TransactionStatus
+            currentContext={currentContext}
+            key={transaction.id}
+            transaction={transaction}
+            onRetry={() => handleRetryReceipt(transaction)}
+            onDismiss={() => {
+              setSubmittedTransactions((current) =>
+                current.filter((candidate) => candidate.id !== transaction.id),
+              )
+              if (currentContext) setActionProblem(undefined)
+            }}
+          />
+        )
+      })}
+      {activeResult ? (
+        <TransactionResult receipt={activeResult.receipt} />
       ) : null}
-      {receipt ? <TransactionResult receipt={receipt} /> : null}
     </section>
   )
 }
