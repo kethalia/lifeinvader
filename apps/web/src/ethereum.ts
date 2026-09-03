@@ -1,0 +1,89 @@
+import { getAddress, isAddress, type Address, type Hash } from 'viem'
+export type ProviderRequest = {
+  method: string
+  params?: readonly unknown[] | object
+}
+export interface Eip1193Provider {
+  request(args: ProviderRequest): Promise<unknown>
+  on?(event: string, listener: (...args: unknown[]) => void): void
+  removeListener?(event: string, listener: (...args: unknown[]) => void): void
+}
+export const WALLET_READ_TIMEOUT_MS = 15_000
+export async function beforeDeadline<T>(
+  operation: () => Promise<T>,
+  deadline: number,
+  timeoutError: () => Error,
+): Promise<T> {
+  const remainingMs = deadline - Date.now()
+  if (remainingMs <= 0) throw timeoutError()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(timeoutError()), remainingMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+export function isEip1193Provider(value: unknown): value is Eip1193Provider {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'request' in value &&
+    typeof value.request === 'function'
+  )
+}
+export function parseAccounts(value: unknown): readonly Address[] {
+  if (!Array.isArray(value) || value.length > 1_000) {
+    throw new Error('The wallet returned an invalid account list.')
+  }
+  return value.map((account) => {
+    if (typeof account !== 'string' || !isAddress(account)) {
+      throw new Error('The wallet returned an invalid account address.')
+    }
+    return getAddress(account)
+  })
+}
+export function parseChainId(value: unknown): bigint {
+  if (
+    typeof value !== 'string' ||
+    value.length > 66 ||
+    !/^0x[0-9a-f]+$/i.test(value)
+  ) {
+    throw new Error('The wallet returned an invalid chain identifier.')
+  }
+  return BigInt(value)
+}
+export function parseTransactionHash(value: unknown): Hash {
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/i.test(value)) {
+    throw new Error('The wallet returned an invalid transaction hash.')
+  }
+  return value as Hash
+}
+export function getRpcErrorCode(error: unknown): number | undefined {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof error.code === 'number'
+  ) {
+    return error.code
+  }
+  return undefined
+}
+export function describeRpcError(error: unknown, fallback: string): string {
+  const code = getRpcErrorCode(error)
+  if (code === 4001) return 'The wallet request was rejected.'
+  if (code === -32002)
+    return 'That wallet already has a request waiting for approval.'
+  if (error instanceof Error && error.message.length > 0) {
+    return (
+      error.message.slice(0, 1_000).replace(/\s+/g, ' ').trim().slice(0, 240) ||
+      fallback
+    )
+  }
+  return fallback
+}

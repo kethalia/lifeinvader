@@ -24,7 +24,7 @@ The frozen creation bytecode and v1 salt use the canonical EIP-7997 CREATE2 fact
 
 The web application uses React with Vite because it does not require a server runtime. Production assets use relative paths so a build remains usable beneath CID and gateway path prefixes. Client routes must not rely on an HTTP server fallback.
 
-Wallet transports submit writes. Independently configurable RPC transports serve reads. The application must not ship a mandatory vendor API key.
+Injected wallets are discovered through EIP-6963 and submit writes through their EIP-1193 transport. The client compares exact code hashes before enabling deployment or publishing and repeats the protocol check immediately before every post. Independently configurable RPC transports will serve feed reads. The application must not ship a mandatory vendor API key.
 
 ## Browser indexing
 

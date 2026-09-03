@@ -1,3 +1,5 @@
+import { WalletPanel } from './wallet-panel'
+
 const principles = [
   {
     number: '01',
@@ -53,14 +55,9 @@ export function App() {
               confidentiality.
             </p>
 
-            <div className="hero-actions">
-              <button type="button" disabled aria-describedby="wallet-note">
-                Invade with your wallet
-              </button>
-              <p id="wallet-note">
-                Wallet connection arrives in a focused milestone.
-              </p>
-            </div>
+            <a className="hero-cta" href="#wallet-panel-title">
+              Invade with your wallet
+            </a>
           </div>
 
           <aside className="ledger-card" aria-label="Network prospectus">
@@ -81,6 +78,8 @@ export function App() {
             </p>
           </aside>
         </section>
+
+        <WalletPanel />
 
         <section className="principles" aria-labelledby="principles-title">
           <div className="section-heading">
@@ -104,7 +103,7 @@ export function App() {
 
       <footer>
         <p>Lifeinvader is an unofficial parody project.</p>
-        <p>Nothing is deployed. Everything will be public.</p>
+        <p>No hosted backend. Everything is public.</p>
       </footer>
     </div>
   )
