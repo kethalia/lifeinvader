@@ -18,10 +18,13 @@ The filter identifier commits to the normalized contract address and topics. Cha
 
 ## Stored records
 
-The cache stores two record families:
+The cache stores three record families:
 
-- one validated synchronization cursor and monotonic revision per scope;
+- one independently persisted generation token and monotonic revision per scope;
+- one validated synchronization cursor per scope;
 - normalized event logs keyed by scope and fixed-width canonical position.
+
+The generation is a random 256-bit value created with browser Web Crypto. It stays stable while its independent scope record is valid. Separating it from the cursor means cursor-record loss cannot recreate an old compare-and-swap token; if the scope record itself is corrupt, recovery rotates to a fresh generation.
 
 The position key is `(blockNumber, transactionIndex, logIndex)`. Fixed-width hexadecimal components preserve numeric order in IndexedDB without using unsupported `bigint` keys. The log itself retains bigint quantities and is validated again after structured cloning.
 
@@ -29,19 +32,19 @@ Reads use a descending key cursor and stop after 50 records by default. Callers 
 
 ## Atomic synchronization
 
-Applying a synchronization result uses one read-write transaction across cursor and log stores:
+Applying a synchronization result uses one read-write transaction across scope, cursor, and log stores:
 
-1. Compare the stored cursor and revision with the exact cache position used to start the RPC synchronization.
+1. Compare the stored generation, revision, and cursor with the exact cache position used to start the RPC synchronization.
 2. Reject the result if another synchronization advanced the cache first.
 3. When `rollbackTo` is present, delete cached positions at or after that block.
 4. Insert the validated canonical replacement and addition logs.
 5. Store the returned cursor and incremented revision.
 
-The transaction either commits all five effects or none. The revision prevents an ABA race when a reorg returns the cursor fields to an earlier value, so a stale tab cannot overwrite newer canonical history.
+The transaction either commits all five effects or none. The generation and revision prevent an ABA race when a reorg returns the cursor fields to an earlier value, so a stale tab cannot overwrite newer canonical history.
 
 ## Corruption and recovery
 
-Persisted browser data is untrusted input. Cursor structure, scope identity, schema markers, revision, log fields, key positions, ordering, and cursor bounds are checked when records are read. Validation and any required reset happen in the same read-write transaction, so a stale corruption response cannot erase a concurrent repair. A malformed page clears its logs, stores the fresh seed cursor with an incremented revision, and asks the caller to rebuild from RPC.
+Persisted browser data is untrusted input. Cursor structure, scope identity, schema markers, generation, revision, log fields, key positions, ordering, and cursor bounds are checked when records are read. Validation and any required reset happen in the same read-write transaction, so a stale corruption response cannot erase a concurrent repair. Cursor or log corruption clears the logs, stores the fresh seed cursor, and increments the independent revision. Corrupt independent scope metadata instead rotates the generation, ensuring recovery never recreates a previously issued token.
 
 If corruption is discovered while applying a batch, that same transaction resets the scope and the caller must synchronize again. Transport and quota errors are surfaced without pretending the cache committed.
 
