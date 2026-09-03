@@ -146,13 +146,31 @@ describe('post transactions', () => {
   it('rejects an oversized UTF-8 body before opening the wallet', async () => {
     const request = vi.fn()
     await expect(
-      publishPost(
-        providerFrom(request),
-        ACCOUNT,
-        1n,
-        '🫥'.repeat(MAX_POST_BODY_BYTES),
-      ),
+      publishPost(providerFrom(request), ACCOUNT, 1n, {
+        body: '🫥'.repeat(MAX_POST_BODY_BYTES),
+        mediaCid: '0x',
+      }),
     ).rejects.toThrow(/4096 UTF-8 bytes/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('rejects an empty publication before opening the wallet', async () => {
+    const request = vi.fn()
+    await expect(
+      publishPost(providerFrom(request), ACCOUNT, 1n, {
+        body: '',
+        mediaCid: '0x',
+      }),
+    ).rejects.toThrow(/write something or add a media CID/i)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('rejects malformed media CID bytes before opening the wallet', async () => {
+    const request = vi.fn()
+    await expect(
+      publishPost(providerFrom(request), ACCOUNT, 1n, {
+        body: 'This must not silently drop the attachment.',
+        mediaCid: '0x01',
+      }),
+    ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
   })
   it('surfaces an on-chain revert from the receipt', async () => {

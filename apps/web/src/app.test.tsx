@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
+import { parseMediaCid } from './media-cid'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
@@ -20,6 +21,8 @@ const UNKNOWN_TRANSACTION_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 const RECEIPT_BLOCK_HASH = `0x${'dd'.repeat(32)}`
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
+const MEDIA_CID_V0 = 'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C'
+const MEDIA_CID = parseMediaCid(MEDIA_CID_V0)!
 const synchronizeEmptyFeed = vi.fn(async () => ({
   cacheReset: false,
   caughtUp: true,
@@ -176,7 +179,7 @@ describe('App', () => {
                   address: PROTOCOL_ADDRESS,
                   data: encodeAbiParameters(
                     [{ type: 'string' }, { type: 'bytes' }],
-                    [body, '0x'],
+                    [body, MEDIA_CID.bytes],
                   ),
                   topics: [
                     POST_PUBLISHED_TOPIC,
@@ -209,6 +212,12 @@ describe('App', () => {
     const textarea = await screen.findByLabelText(/permanent public statement/i)
     expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(1)
     fireEvent.change(textarea, { target: { value: body } })
+    const mediaInput = screen.getByLabelText(/IPFS media CID/i)
+    fireEvent.change(mediaInput, { target: { value: 'not-a-cid' } })
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect(screen.getByText(/invalid media CID/i)).toBeTruthy()
+    fireEvent.change(mediaInput, { target: { value: MEDIA_CID_V0 } })
+    expect(screen.getByText(/canonical CIDv1 bytes/i)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
 
     expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
@@ -218,7 +227,7 @@ describe('App', () => {
       expect.objectContaining({
         blockHash: RECEIPT_BLOCK_HASH,
         blockNumber: 42n,
-        expectedPost: { author: ACCOUNT, body },
+        expectedPost: { author: ACCOUNT, body, mediaCid: MEDIA_CID.bytes },
         hash: TRANSACTION_HASH,
       }),
       expect.objectContaining({ signal: expect.any(AbortSignal) }),

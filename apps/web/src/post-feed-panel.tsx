@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { Hex } from 'viem'
 import { describeRpcError } from './ethereum'
+import { decodeMediaCid } from './media-cid'
 import {
   synchronizePostFeed,
   type PostFeedSnapshot,
@@ -15,6 +17,26 @@ import type { WalletSession } from './wallet-session'
 
 function shortValue(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`
+}
+
+function MediaCommitment({ value }: { value: Hex }) {
+  try {
+    const cid = decodeMediaCid(value)
+    return (
+      <div className="post-media-commitment">
+        <span>IPFS media commitment · {cid.codec}</span>
+        <code>{cid.text}</code>
+        <span>Address only; availability is not guaranteed.</span>
+      </div>
+    )
+  } catch {
+    return (
+      <div className="post-media-commitment invalid-media-commitment">
+        <span>Invalid media CID bytes committed on-chain.</span>
+        <code>{value}</code>
+      </div>
+    )
+  }
 }
 
 function syncStatus(snapshot: PostFeedSnapshot) {
@@ -263,10 +285,7 @@ export function PostFeedPanel({
                 </header>
                 {post.body ? <p className="post-body">{post.body}</p> : null}
                 {post.mediaCid !== '0x' ? (
-                  <p className="post-media-commitment">
-                    Media CID bytes committed on-chain:{' '}
-                    <code>{post.mediaCid}</code>
-                  </p>
+                  <MediaCommitment value={post.mediaCid} />
                 ) : null}
               </article>
             </li>

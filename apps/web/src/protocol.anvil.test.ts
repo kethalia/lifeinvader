@@ -11,12 +11,16 @@ import {
 } from './ethereum'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
+import { parseMediaCid } from './media-cid'
 import {
   deployProtocol,
   inspectProtocol,
   LOCAL_CHAIN_ID,
   publishPost,
 } from './protocol'
+const MEDIA_CID = parseMediaCid(
+  'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
+)!
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
   result?: unknown
@@ -104,7 +108,7 @@ afterAll(async () => {
   })
 })
 describe('wallet transaction helpers on Anvil', () => {
-  it('deploys v1 through the canonical factory and publishes an event', async () => {
+  it('deploys v1 and publishes a media-only event with canonical CID bytes', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
     )
@@ -122,7 +126,7 @@ describe('wallet transaction helpers on Anvil', () => {
       provider,
       account,
       LOCAL_CHAIN_ID,
-      'Local chain, globally embarrassing.',
+      { body: '', mediaCid: MEDIA_CID.bytes },
       undefined,
       provider,
     )
@@ -134,7 +138,8 @@ describe('wallet transaction helpers on Anvil', () => {
         ...postReceipt,
         expectedPost: {
           author: account,
-          body: 'Local chain, globally embarrassing.',
+          body: '',
+          mediaCid: MEDIA_CID.bytes,
         },
       },
       { pollIntervalMs: 1, timeoutMs: 2_000 },
@@ -153,8 +158,8 @@ describe('wallet transaction helpers on Anvil', () => {
     expect(feed.posts[0]).toMatchObject({
       author: account,
       blockNumber: postReceipt.blockNumber,
-      body: 'Local chain, globally embarrassing.',
-      mediaCid: '0x',
+      body: '',
+      mediaCid: MEDIA_CID.bytes,
       postId: 1n,
     })
   })

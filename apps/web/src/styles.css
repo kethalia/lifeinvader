@@ -376,16 +376,27 @@ h1 span {
   text-transform: uppercase;
 }
 
+.wallet-publish input,
 .wallet-publish textarea {
   width: 100%;
   padding: 0.85rem;
-  resize: vertical;
   border: 1px solid var(--ink);
   border-radius: 0;
   color: var(--ink);
   background: rgba(255, 255, 255, 0.34);
   font: inherit;
   line-height: 1.45;
+}
+
+.wallet-publish textarea {
+  resize: vertical;
+}
+
+.input-help {
+  margin: -0.25rem 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
 }
 
 .compose-actions {
@@ -546,11 +557,21 @@ h1 span {
 }
 
 .post-media-commitment {
+  display: grid;
+  gap: 0.35rem;
   margin: 2rem 0 0;
   overflow-wrap: anywhere;
   color: var(--red);
   font-weight: 800;
   line-height: 1.5;
+}
+
+.post-media-commitment code {
+  color: var(--ink);
+}
+
+.invalid-media-commitment code {
+  color: var(--red);
 }
 
 .empty-feed,

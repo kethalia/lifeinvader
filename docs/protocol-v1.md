@@ -30,6 +30,8 @@ Limits bound log size and make transaction cost estimable. Lengths are byte leng
 
 Posts, comments, and messages require a non-empty body, a non-empty media CID, or both. A media CID is the binary CID for an IPFS object, normally a manifest that describes one or more images, animated images, videos, or other attachments. The contract caps but does not parse CID bytes; clients must validate their multicodec and multihash before fetching content.
 
+The current publishing client's accepted CID profile, normalization rules, and optional paid-storage boundary are documented in [`media.md`](./media.md).
+
 Profile snapshots may be entirely empty. An empty `ProfileSet` event tells clients to derive an empty profile without pretending the historical events disappeared.
 
 ## Publications and relationships

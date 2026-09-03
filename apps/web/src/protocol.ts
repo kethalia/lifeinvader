@@ -19,6 +19,8 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import { decodeMediaCid } from './media-cid'
+export { MAX_MEDIA_CID_BYTES } from './media-cid'
 export const FACTORY_ADDRESS = '0x4e59b44847b379578588920cA78FbF26c0B4956C'
 export const FACTORY_CODE_HASH =
   '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989'
@@ -30,7 +32,6 @@ export const DEPLOYMENT_SALT =
 export const INIT_CODE_HASH =
   '0xa9bdddbbb0824a6b64f118b0eeb6b2c6051394933c5593ace3ee9495f4cc805e'
 export const MAX_POST_BODY_BYTES = 4_096
-export const MAX_MEDIA_CID_BYTES = 128
 export const LOCAL_CHAIN_ID = 31_337n
 export const LOCAL_RPC_URL = 'http://127.0.0.1:8545'
 export const LIFEINVADER_INIT_CODE =
@@ -467,14 +468,15 @@ function parseReceipt(
     reverted: status === '0x0',
   }
 }
-export type ExpectedPost = { author: Address; body: string }
+export type PostPayload = { body: string; mediaCid: Hex }
+export type ExpectedPost = PostPayload & { author: Address }
 
 export function assertExpectedPost(logs: unknown, expected: ExpectedPost) {
   if (!Array.isArray(logs) || logs.length > 1_000)
     throw new Error('The wallet returned invalid receipt logs.')
   const expectedData = encodeAbiParameters(POST_DATA_PARAMETERS, [
     expected.body,
-    '0x',
+    expected.mediaCid,
   ]).toLowerCase()
   const expectedAuthor = padHex(expected.author, { size: 32 }).toLowerCase()
   if (
@@ -652,18 +654,22 @@ export async function publishPost(
   provider: Eip1193Provider,
   account: Address,
   chainId: bigint,
-  body: string,
+  payload: PostPayload,
   onSubmitted?: TransactionSubmitted,
   localProvider?: Eip1193Provider,
 ): Promise<TransactionReceipt> {
+  const { body, mediaCid } = payload
   const bodyLength =
     body.length > MAX_POST_BODY_BYTES
       ? MAX_POST_BODY_BYTES + 1
       : getPostBodyByteLength(body)
-  if (bodyLength === 0) throw new Error('Write something before publishing.')
+  if (bodyLength === 0 && mediaCid === '0x') {
+    throw new Error('Write something or add a media CID before publishing.')
+  }
   if (bodyLength > MAX_POST_BODY_BYTES) {
     throw new Error(`Posts are limited to ${MAX_POST_BODY_BYTES} UTF-8 bytes.`)
   }
+  if (mediaCid !== '0x') decodeMediaCid(mediaCid)
   const guard = await createTransactionGuard(provider, account, chainId)
   try {
     if ((await inspectProtocol(provider)).kind !== 'ready') {
@@ -677,7 +683,7 @@ export async function publishPost(
         data: encodeFunctionData({
           abi: PUBLISH_POST_ABI,
           functionName: 'publishPost',
-          args: [body, '0x'],
+          args: [body, mediaCid],
         }),
         from: account,
         to: PROTOCOL_ADDRESS,
@@ -689,7 +695,7 @@ export async function publishPost(
     return await waitForTransactionReceipt(provider, hash, {
       assertCurrentChain: guard.assertSubmission,
       assertUnchanged: guard.assertUnchanged,
-      expectedPost: { author: account, body },
+      expectedPost: { author: account, body, mediaCid },
       localProvider,
       selectedChainId: chainId,
     })
