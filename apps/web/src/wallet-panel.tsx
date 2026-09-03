@@ -3,12 +3,12 @@ import type { Address } from 'viem'
 import {
   beforeDeadline,
   describeRpcError,
-  parseAccounts,
   parseChainId,
   WALLET_READ_TIMEOUT_MS,
   type Eip1193Provider,
 } from './ethereum'
 import {
+  createTransactionGuard,
   deployProtocol,
   getPostBodyByteLength,
   inspectProtocol,
@@ -270,38 +270,17 @@ export function WalletPanel() {
             'Reconnect the wallet that submitted this transaction to check its receipt.',
           )
         }
-        const assertOriginalContext = async () => {
-          const [chainValue, accountsValue] = await Promise.all([
-            provider.request({ method: 'eth_chainId' }),
-            provider.request({ method: 'eth_accounts' }),
-          ])
-          const selectedChainId = parseChainId(chainValue)
-          if (selectedChainId !== transaction.chainId) {
-            throw new Error(
-              `Switch the wallet back to chain ${transaction.chainId.toString()} to check this receipt.`,
-            )
-          }
-          const selectedAccount = parseAccounts(accountsValue)[0]
-          if (
-            selectedAccount?.toLowerCase() !== transaction.account.toLowerCase()
-          ) {
-            throw new Error(
-              'Select the account that submitted this transaction to check its receipt.',
-            )
-          }
-        }
-        await beforeDeadline(
-          assertOriginalContext,
-          Date.now() + WALLET_READ_TIMEOUT_MS,
-          () => new Error('Wallet receipt context read timed out.'),
+        const guard = await createTransactionGuard(
+          provider,
+          transaction.account,
+          transaction.chainId,
         )
-        if (transaction.chainId === LOCAL_CHAIN_ID)
-          await verifyLocalChain(provider)
         const nextReceipt = await waitForTransactionReceipt(
           provider,
           transaction.hash,
           {
-            assertCurrentChain: assertOriginalContext,
+            assertCurrentChain: guard.assertSubmission,
+            assertUnchanged: guard.assertUnchanged,
             expectedPost:
               transaction.action === 'post'
                 ? { author: transaction.account, body: transaction.postBody }
@@ -309,7 +288,7 @@ export function WalletPanel() {
             expectProtocol: transaction.action === 'deploy',
             selectedChainId: transaction.chainId,
           },
-        )
+        ).finally(guard.release)
         setReceipt(nextReceipt)
         setSubmittedTransaction(undefined)
         if (transaction.action === 'post') setBody('')

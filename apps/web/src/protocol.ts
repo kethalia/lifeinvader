@@ -287,6 +287,7 @@ export async function switchToLocalChain(
   await verifyLocalChain(provider, localProvider)
 }
 type TransactionGuard = {
+  assertUnchanged(): void
   assertSubmission(): Promise<void>
   chainId: bigint
   release(): void
@@ -301,7 +302,7 @@ function accountChangedError() {
     'The selected wallet account changed during this action. If the wallet showed a transaction, check it before trying again.',
   )
 }
-async function createTransactionGuard(
+export async function createTransactionGuard(
   provider: Eip1193Provider,
   account: Address,
   chainId: bigint,
@@ -328,6 +329,10 @@ async function createTransactionGuard(
   provider.on?.('chainChanged', handleChainChanged)
   provider.on?.('disconnect', handleChainChanged)
   provider.on?.('accountsChanged', handleAccountsChanged)
+  const assertUnchanged = () => {
+    if (chainChanged) throw chainChangedError()
+    if (accountChanged) throw accountChangedError()
+  }
   const release = () => {
     provider.removeListener?.('chainChanged', handleChainChanged)
     provider.removeListener?.('disconnect', handleChainChanged)
@@ -370,6 +375,7 @@ async function createTransactionGuard(
   }
   const assertSubmission = async () => {
     await Promise.all([assertChain(), assertSender()])
+    assertUnchanged()
   }
   try {
     await assertSubmission()
@@ -377,7 +383,7 @@ async function createTransactionGuard(
     release()
     throw error
   }
-  return { assertSubmission, chainId, release }
+  return { assertSubmission, assertUnchanged, chainId, release }
 }
 async function sendTransaction(
   provider: Eip1193Provider,
@@ -509,6 +515,7 @@ export async function waitForTransactionReceipt(
   hash: Hash,
   options: {
     assertCurrentChain?: () => Promise<void>
+    assertUnchanged?: () => void
     expectedPost?: { author: Address; body: string }
     expectProtocol?: boolean
     localProvider?: Eip1193Provider
@@ -548,14 +555,13 @@ export async function waitForTransactionReceipt(
           options.localProvider,
           Math.max(1, deadline - Date.now()),
         )
-        await assertCurrentContext()
       }
       let protocolCode: Hex | undefined
       if (!reverted && options.expectProtocol) {
         const address = PROTOCOL_ADDRESS
         protocolCode = await getCode(provider, address, deadline, blockTag)
-        await assertCurrentContext()
       }
+      await assertCurrentContext()
       const blockValue = await beforeDeadline(
         () =>
           provider.request({
@@ -565,7 +571,7 @@ export async function waitForTransactionReceipt(
         deadline,
         () => receiptUnavailableError(hash),
       )
-      await assertCurrentContext()
+      options.assertUnchanged?.()
       if (blockValue !== null) {
         const canonicalBlock = parseBlockFingerprint(blockValue)
         if (
@@ -617,6 +623,7 @@ export async function deployProtocol(
     )
     return await waitForTransactionReceipt(provider, hash, {
       assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
       expectProtocol: true,
       localProvider,
       selectedChainId: chainId,
@@ -668,6 +675,7 @@ export async function publishPost(
     )
     return await waitForTransactionReceipt(provider, hash, {
       assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
       expectedPost: { author: account, body },
       localProvider,
       selectedChainId: chainId,

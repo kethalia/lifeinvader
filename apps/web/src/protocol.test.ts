@@ -207,26 +207,31 @@ describe('post transactions', () => {
       }),
     ).rejects.toThrow(TRANSACTION_HASH)
   })
-  it('rechecks the selected chain after reading a receipt', async () => {
+  it('checks synchronous context after the final canonical read', async () => {
     let changed = false
-    const assertCurrentChain = vi.fn(async () => {
+    const assertUnchanged = vi.fn(() => {
       if (changed) throw new Error('Wallet network changed.')
     })
-    const provider = providerFrom(async () => {
-      changed = true
-      return {
-        blockHash: BLOCK_HASH,
-        blockNumber: '0x2a',
-        status: '0x1',
-        transactionHash: TRANSACTION_HASH,
+    const provider = providerFrom(async ({ method }) => {
+      if (method === 'eth_getTransactionReceipt')
+        return {
+          blockHash: BLOCK_HASH,
+          blockNumber: '0x2a',
+          status: '0x1',
+          transactionHash: TRANSACTION_HASH,
+        }
+      if (method === 'eth_getBlockByNumber') {
+        changed = true
+        return { hash: BLOCK_HASH, number: '0x2a' }
       }
+      throw new Error(`Unexpected method: ${method}`)
     })
     await expect(
       waitForTransactionReceipt(provider, TRANSACTION_HASH, {
-        assertCurrentChain,
+        assertUnchanged,
       }),
     ).rejects.toThrow(/network changed/i)
-    expect(assertCurrentChain).toHaveBeenCalledTimes(2)
+    expect(assertUnchanged).toHaveBeenCalledTimes(1)
   })
 })
 describe('transaction chain binding', () => {
