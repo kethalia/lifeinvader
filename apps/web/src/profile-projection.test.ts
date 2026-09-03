@@ -286,6 +286,16 @@ describe('profile projection', () => {
           valid.profiles[0]!,
           {
             ...valid.profiles[1]!,
+            blockHash: valid.profiles[0]!.blockHash,
+          },
+        ],
+      },
+      {
+        ...valid,
+        profiles: [
+          valid.profiles[0]!,
+          {
+            ...valid.profiles[1]!,
             transactionHash: valid.profiles[0]!.transactionHash,
           },
         ],
@@ -428,6 +438,22 @@ describe('profile projection', () => {
         }),
       ]),
     ).toThrow(/retained transaction block/i)
+    expect(projection.snapshot).toEqual(snapshot)
+  })
+
+  it('does not reuse a retained block hash at another height', () => {
+    const projection = new ProfileProjection([ACCOUNT_A])
+    projection.applyLogs([profileLog(1n)])
+    const snapshot = projection.snapshot
+
+    expect(() =>
+      projection.applyLogs([
+        profileLog(2n, {
+          account: ACCOUNT_C,
+          blockHash: hash('block:1'),
+        }),
+      ]),
+    ).toThrow(/retained block identity/i)
     expect(projection.snapshot).toEqual(snapshot)
   })
 

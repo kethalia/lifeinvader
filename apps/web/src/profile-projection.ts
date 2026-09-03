@@ -236,6 +236,27 @@ function assertTransactionHashesBelongToOneBlock(
   }
 }
 
+function assertBlockIdentities(
+  fingerprints: readonly { blockHash: Hash; blockNumber: bigint }[],
+  label: string,
+) {
+  const hashesByBlockNumber = new Map<bigint, Hash>()
+  const blockNumbersByHash = new Map<Hash, bigint>()
+  for (const fingerprint of fingerprints) {
+    const knownHash = hashesByBlockNumber.get(fingerprint.blockNumber)
+    const knownBlockNumber = blockNumbersByHash.get(fingerprint.blockHash)
+    if (
+      (knownHash !== undefined && knownHash !== fingerprint.blockHash) ||
+      (knownBlockNumber !== undefined &&
+        knownBlockNumber !== fingerprint.blockNumber)
+    ) {
+      throw projectionError(`${label} block identity`)
+    }
+    hashesByBlockNumber.set(fingerprint.blockNumber, fingerprint.blockHash)
+    blockNumbersByHash.set(fingerprint.blockHash, fingerprint.blockNumber)
+  }
+}
+
 function assertConsistentProfileMetadata(
   profiles: readonly ProfileSet[],
   label: string,
@@ -330,6 +351,14 @@ function normalizeSnapshot(value: unknown): ProfileProjectionSnapshot {
     assertCheckpointMatchesProfiles(confirmedThrough, profiles.values())
   }
   assertConsistentProfileMetadata([...profiles.values()], 'snapshot')
+  assertBlockIdentities(
+    [
+      ...profiles.values(),
+      ...(last ? [last] : []),
+      ...(confirmedThrough ? [confirmedThrough] : []),
+    ],
+    'snapshot',
+  )
   return {
     accounts,
     ...(confirmedThrough ? { confirmedThrough } : {}),
@@ -440,6 +469,7 @@ function decodePage(
     }
   })
   assertTransactionHashesBelongToOneBlock(events, 'page')
+  assertBlockIdentities(events, 'page')
   return {
     events,
     last: logs.length > 0 ? getPosition(logs.at(-1)!) : undefined,
@@ -540,6 +570,15 @@ export class ProfileProjection {
     const retainedProfiles = new Map(this.#profiles)
     for (const [key, profile] of updates) retainedProfiles.set(key, profile)
     assertConsistentProfileMetadata([...retainedProfiles.values()], 'retained')
+    const nextLast = page.last ?? this.#last
+    assertBlockIdentities(
+      [
+        ...retainedProfiles.values(),
+        ...(nextLast ? [nextLast] : []),
+        ...(this.#confirmedThrough ? [this.#confirmedThrough] : []),
+      ],
+      'retained',
+    )
     for (const [key, profile] of updates) {
       this.#profiles.set(key, copyProfile(profile))
     }
@@ -565,6 +604,14 @@ export class ProfileProjection {
     ) {
       throw projectionError('confirmation progress')
     }
+    assertBlockIdentities(
+      [
+        ...this.#profiles.values(),
+        ...(this.#last ? [this.#last] : []),
+        checkpoint,
+      ],
+      'confirmation',
+    )
     this.#confirmedThrough = checkpoint
   }
 
