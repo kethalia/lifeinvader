@@ -1,16 +1,21 @@
 import {
+  indexedEventLogMatchesFilter,
+  normalizeEventLogFilter,
   validateEventCursor,
   validateIndexedEventLog,
   type EventCursor,
+  type EventLogFilter,
   type EventSyncResult,
   type IndexedEventLog,
+  type NormalizedEventLogFilter,
 } from './event-indexer'
 
-const CACHE_SCHEMA_VERSION = 3
+const CACHE_SCHEMA_VERSION = 5
 const DEFAULT_DATABASE_NAME = 'lifeinvader-event-cache'
 const SCOPE_STORE = 'scopes'
 const CURSOR_STORE = 'cursors'
 const LOG_STORE = 'logs'
+const LOG_IDENTITY_INDEX = 'identity'
 const LOG_SCOPE_INDEX = 'scope'
 const DEFAULT_PAGE_SIZE = 50
 const MAX_PAGE_SIZE = 200
@@ -22,13 +27,19 @@ type CursorRecord = {
   scope: string
 }
 type ScopeRecord = {
+  filter: unknown
   generation: string
   revision: bigint
   schemaVersion: number
   scope: string
 }
-type ScopeState = Pick<EventCachePosition, 'generation' | 'revision'>
+type ScopeState = {
+  filter: NormalizedEventLogFilter
+  generation: string
+  revision: bigint
+}
 type LogRecord = {
+  identity: string
   log: unknown
   position: string
   schemaVersion: number
@@ -46,6 +57,7 @@ export type EventCachePage = EventCachePosition & {
 export type OpenEventCacheOptions = {
   databaseName?: string
   factory?: IDBFactory
+  filter: EventLogFilter
   keyRange?: typeof IDBKeyRange
 }
 
@@ -117,16 +129,21 @@ function getLogPosition(log: IndexedEventLog) {
     16,
   )}:${fixedHex(log.logIndex, 16)}`
 }
+function getLogIdentity(log: IndexedEventLog) {
+  return `${fixedHex(log.blockNumber, 64)}:${fixedHex(log.logIndex, 16)}`
+}
 function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
   const firstPosition = getLogPosition(first)
   const secondPosition = getLogPosition(second)
   if (firstPosition === secondPosition) return 0
   return firstPosition < secondPosition ? -1 : 1
 }
-function haveConsistentBlockHashes(
+function getLogStreamProblem(
   logs: readonly IndexedEventLog[],
   cursor: EventCursor,
+  filter: NormalizedEventLogFilter,
 ) {
+  const identities = new Set<string>()
   const blockHashes = new Map(
     cursor.checkpoints.map((checkpoint) => [
       checkpoint.blockNumber.toString(),
@@ -134,13 +151,19 @@ function haveConsistentBlockHashes(
     ]),
   )
   for (const log of logs) {
+    if (!indexedEventLogMatchesFilter(log, filter)) return 'out-of-filter logs'
+    const identity = getLogIdentity(log)
+    if (identities.has(identity)) return 'duplicate block/log-index pairs'
+    identities.add(identity)
     const block = log.blockNumber.toString()
     const blockHash = log.blockHash.toLowerCase()
     const knownHash = blockHashes.get(block)
-    if (knownHash !== undefined && knownHash !== blockHash) return false
+    if (knownHash !== undefined && knownHash !== blockHash) {
+      return 'conflicting block hashes'
+    }
     blockHashes.set(block, blockHash)
   }
-  return true
+  return undefined
 }
 function assertPageSize(limit: number) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
@@ -175,7 +198,11 @@ function asCachePosition(value: unknown): EventCachePosition {
     revision: position.revision,
   }
 }
-function asScopeRecord(value: unknown, scope: string) {
+function asScopeRecord(
+  value: unknown,
+  scope: string,
+  expectedFilter: NormalizedEventLogFilter,
+) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new EventCacheCorruptionError()
   }
@@ -189,7 +216,13 @@ function asScopeRecord(value: unknown, scope: string) {
   ) {
     throw new EventCacheCorruptionError()
   }
-  return { generation: record.generation, revision: record.revision }
+  try {
+    const filter = normalizeEventLogFilter(record.filter)
+    if (filter.id !== expectedFilter.id) throw new EventCacheCorruptionError()
+    return { filter, generation: record.generation, revision: record.revision }
+  } catch {
+    throw new EventCacheCorruptionError()
+  }
 }
 function asCursorRecord(value: unknown, scope: string) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -217,13 +250,17 @@ function asLogRecord(value: unknown, scope: string) {
   if (
     record.schemaVersion !== CACHE_SCHEMA_VERSION ||
     record.scope !== scope ||
+    typeof record.identity !== 'string' ||
     typeof record.position !== 'string'
   ) {
     throw new EventCacheCorruptionError()
   }
   try {
     const log = validateIndexedEventLog(record.log)
-    if (getLogPosition(log) !== record.position) {
+    if (
+      getLogIdentity(log) !== record.identity ||
+      getLogPosition(log) !== record.position
+    ) {
       throw new EventCacheCorruptionError()
     }
     return log
@@ -244,10 +281,16 @@ export function getEventCacheScope(value: unknown) {
 
 export class BrowserEventCache {
   readonly #database: IDBDatabase
+  readonly #filter: NormalizedEventLogFilter
   readonly #keyRange: typeof IDBKeyRange
 
-  constructor(database: IDBDatabase, keyRange: typeof IDBKeyRange) {
+  constructor(
+    database: IDBDatabase,
+    keyRange: typeof IDBKeyRange,
+    filter: NormalizedEventLogFilter,
+  ) {
     this.#database = database
+    this.#filter = filter
     this.#keyRange = keyRange
   }
 
@@ -257,6 +300,9 @@ export class BrowserEventCache {
 
   async clear(seedValue: unknown) {
     const seedCursor = validateEventCursor(seedValue)
+    if (seedCursor.filterId !== this.#filter.id) {
+      throw cacheError('The event cache cursor belongs to another filter.')
+    }
     if (!isSeedCursor(seedCursor)) {
       throw cacheError('The event cache requires a fresh seed cursor.')
     }
@@ -276,7 +322,7 @@ export class BrowserEventCache {
           let state: ScopeState | undefined
           if (scopeRequest.result) {
             try {
-              state = asScopeRecord(scopeRequest.result, scope)
+              state = asScopeRecord(scopeRequest.result, scope, this.#filter)
             } catch (error) {
               if (!(error instanceof EventCacheCorruptionError)) throw error
             }
@@ -319,6 +365,9 @@ export class BrowserEventCache {
     limit = DEFAULT_PAGE_SIZE,
   ): Promise<EventCachePage> {
     const seedCursor = validateEventCursor(seedValue)
+    if (seedCursor.filterId !== this.#filter.id) {
+      throw cacheError('The event cache cursor belongs to another filter.')
+    }
     if (!isSeedCursor(seedCursor)) {
       throw cacheError('The event cache requires a fresh seed cursor.')
     }
@@ -333,6 +382,9 @@ export class BrowserEventCache {
   ): Promise<void> {
     const expected = asCachePosition(expectedValue)
     const expectedCursor = expected.cursor
+    if (expectedCursor.filterId !== this.#filter.id) {
+      throw cacheError('The event cache cursor belongs to another filter.')
+    }
     const nextCursor = validateEventCursor(result.cursor)
     if (!sameCursorIdentity(expectedCursor, nextCursor)) {
       throw cacheError('The event sync result belongs to another cache.')
@@ -361,8 +413,9 @@ export class BrowserEventCache {
         throw cacheError('The event sync batch is not canonically ordered.')
       }
     }
-    if (!haveConsistentBlockHashes(logs, nextCursor)) {
-      throw cacheError('The event sync batch has conflicting block hashes.')
+    const streamProblem = getLogStreamProblem(logs, nextCursor, this.#filter)
+    if (streamProblem) {
+      throw cacheError(`The event sync batch has ${streamProblem}.`)
     }
     await this.#applyRaw(scope, expected, nextCursor, logs, rollbackTo)
   }
@@ -406,12 +459,17 @@ export class BrowserEventCache {
     if (!isGeneration(generation)) {
       throw cacheError('The event cache generated an invalid scope token.')
     }
-    return { generation, revision }
+    return { filter: this.#filter, generation, revision }
   }
 
   #putScopeState(scopeStore: IDBObjectStore, scope: string, state: ScopeState) {
     scopeStore.put({
-      ...state,
+      filter: {
+        address: state.filter.address,
+        topics: state.filter.topics,
+      },
+      generation: state.generation,
+      revision: state.revision,
       schemaVersion: CACHE_SCHEMA_VERSION,
       scope,
     } satisfies ScopeRecord)
@@ -455,7 +513,7 @@ export class BrowserEventCache {
         let state: ScopeState | undefined
         try {
           if (scopeRecord !== undefined) {
-            state = asScopeRecord(scopeRecord, scope)
+            state = asScopeRecord(scopeRecord, scope, this.#filter)
           } else if (cursorRecord !== undefined || logRecords.length > 0) {
             throw new EventCacheCorruptionError()
           } else {
@@ -484,10 +542,16 @@ export class BrowserEventCache {
               throw new EventCacheCorruptionError()
             }
           }
-          if (!haveConsistentBlockHashes(logs, cursor)) {
+          if (getLogStreamProblem(logs, cursor, state.filter)) {
             throw new EventCacheCorruptionError()
           }
-          page = { cursor, ...state, logs, reset: false }
+          page = {
+            cursor,
+            generation: state.generation,
+            logs,
+            reset: false,
+            revision: state.revision,
+          }
         } catch (error) {
           if (!(error instanceof EventCacheCorruptionError)) {
             fail(error)
@@ -504,9 +568,10 @@ export class BrowserEventCache {
             )
             page = {
               cursor: seedCursor,
-              ...nextState,
+              generation: nextState.generation,
               logs: [],
               reset: true,
+              revision: nextState.revision,
             }
           } catch (resetError) {
             fail(resetError)
@@ -619,6 +684,7 @@ export class BrowserEventCache {
           try {
             for (const log of logs) {
               logStore.put({
+                identity: getLogIdentity(log),
                 log,
                 position: getLogPosition(log),
                 schemaVersion: CACHE_SCHEMA_VERSION,
@@ -640,7 +706,7 @@ export class BrowserEventCache {
         }
         try {
           if (scopeRecord === undefined) throw new EventCacheCorruptionError()
-          const currentState = asScopeRecord(scopeRecord, scope)
+          const currentState = asScopeRecord(scopeRecord, scope, this.#filter)
           state = currentState
           if (
             currentState.revision === 0n
@@ -743,7 +809,8 @@ export class BrowserEventCache {
   }
 }
 
-export async function openEventCache(options: OpenEventCacheOptions = {}) {
+export async function openEventCache(options: OpenEventCacheOptions) {
+  const filter = normalizeEventLogFilter(options?.filter)
   const factory = options.factory ?? globalThis.indexedDB
   const keyRange = options.keyRange ?? globalThis.IDBKeyRange
   const databaseName = options.databaseName ?? DEFAULT_DATABASE_NAME
@@ -775,6 +842,9 @@ export async function openEventCache(options: OpenEventCacheOptions = {}) {
       const logStore = database.createObjectStore(LOG_STORE, {
         keyPath: ['scope', 'position'],
       })
+      logStore.createIndex(LOG_IDENTITY_INDEX, ['scope', 'identity'], {
+        unique: true,
+      })
       logStore.createIndex(LOG_SCOPE_INDEX, 'scope')
     }
     request.onerror = () =>
@@ -789,7 +859,7 @@ export async function openEventCache(options: OpenEventCacheOptions = {}) {
       }
       settled = true
       database.onversionchange = () => database.close()
-      resolve(new BrowserEventCache(database, keyRange))
+      resolve(new BrowserEventCache(database, keyRange, filter))
     }
   })
 }

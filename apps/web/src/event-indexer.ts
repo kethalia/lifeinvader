@@ -77,7 +77,7 @@ export type EventSyncResult = {
   safeHead?: bigint
   scannedRanges: number
 }
-type NormalizedFilter = {
+export type NormalizedEventLogFilter = {
   address: Address
   id: Hash
   topics: readonly EventTopicFilter[]
@@ -185,10 +185,13 @@ function assertQuantity(
 function parseTopic(value: unknown): Hex {
   return parseHash(value, 'log topic') as Hex
 }
-function normalizeFilter(filter: EventLogFilter): NormalizedFilter {
-  if (typeof filter !== 'object' || filter === null) {
+export function normalizeEventLogFilter(
+  value: unknown,
+): NormalizedEventLogFilter {
+  if (typeof value !== 'object' || value === null) {
     throw new Error('Invalid event filter.')
   }
+  const filter = value as Record<string, unknown>
   if (
     typeof filter.address !== 'string' ||
     filter.address.length !== 42 ||
@@ -277,7 +280,10 @@ export function validateEventCursor(value: unknown): EventCursor {
     startBlock: cursor.startBlock,
   }
 }
-function normalizeCursor(cursor: EventCursor, filter: NormalizedFilter) {
+function normalizeCursor(
+  cursor: EventCursor,
+  filter: NormalizedEventLogFilter,
+) {
   const normalized = validateEventCursor(cursor)
   if (normalized.filterId !== filter.id) {
     throw new Error('The event cursor belongs to a different filter.')
@@ -311,7 +317,10 @@ async function readBlock(
   })
   return parseBlock(value, blockNumber)
 }
-function topicsMatch(actual: readonly Hex[], expected: NormalizedFilter) {
+function topicsMatch(
+  actual: readonly Hex[],
+  expected: NormalizedEventLogFilter,
+) {
   return expected.topics.every((topic, index) => {
     if (topic === null) return true
     const actualTopic = actual[index]
@@ -321,9 +330,18 @@ function topicsMatch(actual: readonly Hex[], expected: NormalizedFilter) {
       : topic === actualTopic
   })
 }
+export function indexedEventLogMatchesFilter(
+  log: IndexedEventLog,
+  filter: NormalizedEventLogFilter,
+) {
+  return (
+    log.address.toLowerCase() === filter.address.toLowerCase() &&
+    topicsMatch(log.topics, filter)
+  )
+}
 function parseLog(
   value: unknown,
-  filter: NormalizedFilter,
+  filter: NormalizedEventLogFilter,
   fromBlock: bigint,
   toBlock: bigint,
 ): IndexedEventLog {
@@ -377,7 +395,7 @@ function compareLogs(first: IndexedEventLog, second: IndexedEventLog) {
 }
 function parseLogs(
   value: readonly unknown[],
-  filter: NormalizedFilter,
+  filter: NormalizedEventLogFilter,
   fromBlock: bigint,
   toBlock: bigint,
 ) {
@@ -520,7 +538,7 @@ export function createEventCursor({
   assertQuantity(chainId, 'event cursor chain identifier')
   assertQuantity(finalityDepth, 'event cursor finality depth')
   assertQuantity(startBlock, 'event cursor start block')
-  const normalizedFilter = normalizeFilter(filter)
+  const normalizedFilter = normalizeEventLogFilter(filter)
   const parsedRangeSize = parsePositiveInteger(
     rangeSize,
     DEFAULT_BLOCK_RANGE,
@@ -538,7 +556,7 @@ export function createEventCursor({
   }
 }
 export function getEventFilterId(filter: EventLogFilter) {
-  return normalizeFilter(filter).id
+  return normalizeEventLogFilter(filter).id
 }
 export async function syncEventLogs(
   provider: Eip1193Provider,
@@ -546,7 +564,7 @@ export async function syncEventLogs(
   inputCursor: EventCursor,
   options: EventSyncOptions = {},
 ): Promise<EventSyncResult> {
-  const normalizedFilter = normalizeFilter(filter)
+  const normalizedFilter = normalizeEventLogFilter(filter)
   let cursor = normalizeCursor(inputCursor, normalizedFilter)
   const maxLogs = parsePositiveInteger(
     options.maxLogsPerRange,

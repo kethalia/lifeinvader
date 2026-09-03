@@ -20,13 +20,13 @@ The filter identifier commits to the normalized contract address and topics. Cha
 
 The cache stores three record families:
 
-- one independently persisted generation token and monotonic revision per scope;
+- one independently persisted normalized event filter, generation token, and monotonic revision per scope;
 - one validated synchronization cursor per scope;
 - normalized event logs keyed by scope and fixed-width canonical position.
 
-The generation is a random 256-bit value created with browser Web Crypto. It stays stable while its independent scope record is valid. Separating it from the cursor means cursor-record loss cannot recreate an old compare-and-swap token; if the scope record itself is corrupt, recovery rotates to a fresh generation.
+Each cache instance is bound to a normalized address/topic filter. The persisted copy is revalidated against that filter before cached logs are returned. The generation is a random 256-bit value created with browser Web Crypto. It stays stable while its independent scope record is valid. Separating it from the cursor means cursor-record loss cannot recreate an old compare-and-swap token; if the scope record itself is corrupt, recovery rotates to a fresh generation.
 
-The position key is `(blockNumber, transactionIndex, logIndex)`. Fixed-width hexadecimal components preserve numeric order in IndexedDB without using unsupported `bigint` keys. A separate scope index reaches every record for validation and cleanup even if corruption changes `position` to another valid IndexedDB key type. The log itself retains bigint quantities and is validated again after structured cloning.
+The position key is `(blockNumber, transactionIndex, logIndex)`. Fixed-width hexadecimal components preserve numeric order in IndexedDB without using unsupported `bigint` keys. A unique `(scope, blockNumber, logIndex)` identity index prevents the same EVM log from being stored under conflicting transaction positions. A separate scope index reaches every record for validation and cleanup even if corruption changes `position` to another valid IndexedDB key type. The log itself retains bigint quantities and is validated again after structured cloning.
 
 Reads use a descending key cursor and stop after 50 records by default. Callers may request at most 200 records in one page. There is no `getAll` or unbounded local history load.
 
@@ -44,7 +44,7 @@ The transaction either commits all five effects or none. Reorg rollback traverse
 
 ## Corruption and recovery
 
-Persisted browser data is untrusted input. Cursor structure, scope identity, schema markers, generation, revision, log fields, key positions, ordering, cursor bounds, and block-hash consistency are checked when records are read. Revision zero is valid only for a scope with no cursor and no logs. Logs from the same block must share a hash and must agree with any checkpoint for that block. Validation and any required reset happen in the same read-write transaction, so a stale corruption response cannot erase a concurrent repair. Cursor or log corruption clears every indexed record in the scope, stores the fresh seed cursor, and increments the independent revision. Corrupt independent scope metadata instead rotates the generation, ensuring recovery never recreates a previously issued token.
+Persisted browser data is untrusted input. Filter membership, cursor structure, scope identity, schema markers, generation, revision, log fields, key positions, ordering, cursor bounds, event identity, and block-hash consistency are checked when records are read. Revision zero is valid only for a scope with no cursor and no logs. Each `(blockNumber, logIndex)` pair is unique. Logs from the same block must share a hash, agree with any checkpoint for that block, and still match the bound address/topic filter. Validation and any required reset happen in the same read-write transaction, so a stale corruption response cannot erase a concurrent repair. Cursor or log corruption clears every indexed record in the scope, stores the fresh seed cursor, and increments the independent revision. Corrupt independent scope metadata instead rotates the generation, ensuring recovery never recreates a previously issued token.
 
 If corruption is discovered while applying a batch, that same transaction resets the scope and the caller must synchronize again. Transport and quota errors are surfaced without pretending the cache committed.
 

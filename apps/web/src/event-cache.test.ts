@@ -18,6 +18,8 @@ const FILTER = {
   address: PROTOCOL_ADDRESS,
   topics: [POST_PUBLISHED_TOPIC],
 } as const
+const OTHER_ADDRESS = '0x000000000000000000000000000000000000b0b0'
+const OTHER_TOPIC = keccak256(stringToHex('OtherEvent()'))
 let cache: BrowserEventCache | undefined
 
 afterEach(() => cache?.close())
@@ -64,6 +66,11 @@ function eventLog(
     transactionIndex: 0,
   }
 }
+function logIdentity(log: IndexedEventLog) {
+  return `${log.blockNumber.toString(16).padStart(64, '0')}:${log.logIndex
+    .toString(16)
+    .padStart(16, '0')}`
+}
 function syncResult(
   cursor: EventCursor,
   logs: readonly IndexedEventLog[],
@@ -83,6 +90,7 @@ async function createCache(factory = new IDBFactory()) {
   cache = await openEventCache({
     databaseName: 'lifeinvader-event-cache-test',
     factory,
+    filter: FILTER,
     keyRange: IDBKeyRange,
   })
   return { cache, factory }
@@ -93,17 +101,20 @@ async function putRawRecord(
   value: Record<string, unknown>,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 3)
+    const request = factory.open('lifeinvader-event-cache-test', 5)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
-  await new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(storeName, 'readwrite')
-    transaction.objectStore(storeName).put(value)
-    transaction.oncomplete = () => resolve()
-    transaction.onabort = () => reject(transaction.error)
-  })
-  database.close()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(storeName, 'readwrite')
+      transaction.objectStore(storeName).put(value)
+      transaction.oncomplete = () => resolve()
+      transaction.onabort = () => reject(transaction.error)
+    })
+  } finally {
+    database.close()
+  }
 }
 async function deleteRawRecord(
   factory: IDBFactory,
@@ -111,7 +122,7 @@ async function deleteRawRecord(
   key: IDBValidKey,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 3)
+    const request = factory.open('lifeinvader-event-cache-test', 5)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -125,7 +136,7 @@ async function deleteRawRecord(
 }
 async function countRawScopeLogs(factory: IDBFactory, scope: string) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 3)
+    const request = factory.open('lifeinvader-event-cache-test', 5)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -165,6 +176,7 @@ describe('browser event cache', () => {
     cache = await openEventCache({
       databaseName: 'lifeinvader-event-cache-test',
       factory,
+      filter: FILTER,
       keyRange: IDBKeyRange,
     })
     expect((await cache.readLatest(seed)).cursor).toEqual(next)
@@ -275,9 +287,10 @@ describe('browser event cache', () => {
     await opened.apply(initial, syncResult(next, [log]))
     const position = `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(16)}`
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(log),
       log: { ...log, data: '0x1' },
       position,
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
     expect(await opened.readLatest(seed)).toEqual({
@@ -300,15 +313,17 @@ describe('browser event cache', () => {
     const repairBase = await opened.readLatest(seed)
     const corruptLog = eventLog(2n)
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(corruptLog),
       log: { ...corruptLog, data: '0x1' },
       position: `${'0'.repeat(63)}2:${'0'.repeat(16)}:${'0'.repeat(16)}`,
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
 
     const otherTab = await openEventCache({
       databaseName: 'lifeinvader-event-cache-test',
       factory,
+      filter: FILTER,
       keyRange: IDBKeyRange,
     })
     try {
@@ -395,14 +410,15 @@ describe('browser event cache', () => {
     ).rejects.toThrow(/changed during synchronization/i)
   })
 
-  it('rotates the generation when its independent record is corrupt', async () => {
+  it('rotates the generation when its filter metadata is corrupt', async () => {
     const { cache: opened, factory } = await createCache()
     const seed = seedCursor()
     const stale = await opened.readLatest(seed)
     await putRawRecord(factory, 'scopes', {
-      generation: 'corrupt',
-      revision: 9n,
-      schemaVersion: 3,
+      filter: { address: OTHER_ADDRESS, topics: [POST_PUBLISHED_TOPIC] },
+      generation: stale.generation,
+      revision: stale.revision,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
 
@@ -425,7 +441,7 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     await putRawRecord(factory, 'cursors', {
       cursor: cursorAt(seed, 2n),
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
 
@@ -444,7 +460,7 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     await putRawRecord(factory, 'cursors', {
       cursor: cursorAt(seed, 2n),
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
 
@@ -466,9 +482,10 @@ describe('browser event cache', () => {
     await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
     const conflict = eventLog(1n, { branch: 'b', logIndex: 1 })
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(conflict),
       log: conflict,
       position: `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(15)}1`,
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
 
@@ -488,9 +505,59 @@ describe('browser event cache', () => {
     await opened.apply(initial, syncResult(cursorAt(seed, 2n), []))
     const conflict = eventLog(1n, { branch: 'b' })
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(conflict),
       log: conflict,
       position: `${'0'.repeat(63)}1:${'0'.repeat(16)}:${'0'.repeat(16)}`,
-      schemaVersion: 3,
+      schemaVersion: 5,
+      scope: getEventCacheScope(seed),
+    })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: seed,
+      generation: initial.generation,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('prevents duplicate block/log-index identities in persisted pages', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    const next = cursorAt(seed, 4n)
+    await opened.apply(initial, syncResult(next, [eventLog(1n)]))
+    const duplicate = { ...eventLog(1n), transactionIndex: 1 }
+    await expect(
+      putRawRecord(factory, 'logs', {
+        identity: logIdentity(duplicate),
+        log: duplicate,
+        position: `${'0'.repeat(63)}1:${'0'.repeat(15)}1:${'0'.repeat(16)}`,
+        schemaVersion: 5,
+        scope: getEventCacheScope(seed),
+      }),
+    ).rejects.toMatchObject({ name: 'ConstraintError' })
+
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: next,
+      generation: initial.generation,
+      logs: [eventLog(1n)],
+      reset: false,
+      revision: 1n,
+    })
+  })
+
+  it('resets a syntactically valid cached log from another filter', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const unrelated = { ...eventLog(2n), address: OTHER_ADDRESS }
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(eventLog(2n)),
+      log: unrelated,
+      position: `${'0'.repeat(63)}2:${'0'.repeat(16)}:${'0'.repeat(16)}`,
+      schemaVersion: 5,
       scope: getEventCacheScope(seed),
     })
 
@@ -509,9 +576,10 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     const scope = getEventCacheScope(seed)
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(eventLog(0n)),
       log: eventLog(0n),
       position: 7,
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope,
     })
 
@@ -531,9 +599,10 @@ describe('browser event cache', () => {
     const scope = getEventCacheScope(seed)
     await opened.clear(seed)
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(eventLog(0n)),
       log: eventLog(0n),
       position: 7,
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope,
     })
     expect(await countRawScopeLogs(factory, scope)).toBe(1)
@@ -550,9 +619,10 @@ describe('browser event cache', () => {
     const active = await opened.readLatest(seed)
     const scope = getEventCacheScope(seed)
     await putRawRecord(factory, 'logs', {
+      identity: logIdentity(eventLog(2n)),
       log: eventLog(2n),
       position: 7,
-      schemaVersion: 3,
+      schemaVersion: 5,
       scope,
     })
 
@@ -601,6 +671,27 @@ describe('browser event cache', () => {
     await expect(
       opened.apply(initial, syncResult(next, [eventLog(2n), eventLog(1n)])),
     ).rejects.toThrow(/canonically ordered/i)
+    await expect(
+      opened.apply(
+        initial,
+        syncResult(next, [
+          eventLog(1n),
+          { ...eventLog(1n), transactionIndex: 1 },
+        ]),
+      ),
+    ).rejects.toThrow(/duplicate block\/log-index/i)
+    await expect(
+      opened.apply(
+        initial,
+        syncResult(next, [{ ...eventLog(1n), address: OTHER_ADDRESS }]),
+      ),
+    ).rejects.toThrow(/out-of-filter/i)
+    await expect(
+      opened.apply(
+        initial,
+        syncResult(next, [{ ...eventLog(1n), topics: [OTHER_TOPIC] }]),
+      ),
+    ).rejects.toThrow(/out-of-filter/i)
     await expect(
       opened.apply(
         initial,
