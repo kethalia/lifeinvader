@@ -48,7 +48,7 @@ function rawMessage(
   groupId: bigint,
   sender: Address,
   body: string,
-  options: { data?: Hex; mediaCid?: Hex } = {},
+  options: { data?: Hex; logIndex?: number; mediaCid?: Hex } = {},
 ) {
   return {
     address: PROTOCOL_ADDRESS,
@@ -60,7 +60,7 @@ function rawMessage(
         body,
         options.mediaCid ?? '0x',
       ]),
-    logIndex: '0x0',
+    logIndex: toHex(options.logIndex ?? 0),
     removed: false,
     topics: [
       GROUP_MESSAGE_SENT_TOPIC,
@@ -248,6 +248,43 @@ describe('group-message stream synchronization', () => {
         },
       ],
     })
+  })
+
+  it('decodes a whole dense boundary block but returns only 100 messages', async () => {
+    const logs = Array.from({ length: 101 }, (_, index) =>
+      rawMessage(
+        2n,
+        BigInt(index + 1),
+        GROUP_A,
+        ACCOUNT_A,
+        `Public message ${index + 1}.`,
+        { logIndex: index },
+      ),
+    )
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') return logs
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    const snapshot = await synchronizeGroupMessageStream(
+      provider,
+      1n,
+      GROUP_A,
+      { storage: storage() },
+    )
+
+    expect(snapshot.recentMessages).toHaveLength(100)
+    expect(snapshot.recentMessages[0]?.messageId).toBe(101n)
+    expect(snapshot.recentMessages.at(-1)?.messageId).toBe(2n)
   })
 
   it('does not advance when fresh message data cannot be decoded', async () => {

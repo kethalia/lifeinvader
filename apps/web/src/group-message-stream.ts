@@ -290,15 +290,16 @@ export const synchronizeGroupMessageStream: GroupMessageStreamSynchronizer =
             'The group-message cache changed after synchronization. Retry the bounded range.',
           )
         }
-        let recentMessages: readonly PublishedGroupMessage[]
+        let decodedPage: readonly PublishedGroupMessage[]
         try {
-          recentMessages = decodeMessageLogs(after.logs, groupId)
+          decodedPage = decodeMessageLogs(after.logs, groupId)
         } catch (error) {
           assertContextActive()
           await cache.clear(seed)
           assertContextActive()
           throw error
         }
+        const recentMessages = decodedPage.slice(0, GROUP_MESSAGE_PAGE_SIZE)
         const indexedThrough =
           after.cursor.nextBlock > after.cursor.startBlock
             ? after.cursor.nextBlock - 1n
