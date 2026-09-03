@@ -24,6 +24,9 @@ export const MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE = 200
 export const GROUP_MEMBERSHIP_PROJECTION_SNAPSHOT_VERSION = 1
 
 const MAX_UINT256 = (1n << 256n) - 1n
+const ADDRESS_HEX_LENGTH = 40
+const HEX_DIGITS = '0123456789abcdef'
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
 export type GroupMembershipProjectionPosition = {
   blockHash: Hash
@@ -39,14 +42,14 @@ export type GroupMembershipProjectionProgress = {
 }
 
 export type GroupMembershipProjectionReadOptions = {
+  after?: Address
   limit?: number
-  offset?: number
 }
 
 export type GroupMembershipProjectionReadPage = {
   complete: boolean
   members: readonly GroupMembershipSet[]
-  nextOffset?: number
+  nextAfter?: Address
   totalMembers: bigint
 }
 
@@ -67,6 +70,11 @@ type DecodedMembershipPage = {
 type RetainedIdentity = {
   blockNumber: bigint
   references: number
+}
+
+type AddressIndexNode = {
+  children: Map<string, AddressIndexNode>
+  memberKey?: string
 }
 
 function projectionError(message: string) {
@@ -95,7 +103,11 @@ function normalizeAccount(value: unknown) {
   if (typeof value !== 'string' || !isAddress(value)) {
     throw projectionError('account')
   }
-  return getAddress(value)
+  const account = getAddress(value)
+  if (account.toLowerCase() === ZERO_ADDRESS) {
+    throw projectionError('account')
+  }
+  return account
 }
 
 function normalizeHash(value: unknown, label: string) {
@@ -179,6 +191,53 @@ function compareAccounts(first: Address, second: Address) {
 
 function compareMembers(first: GroupMembershipSet, second: GroupMembershipSet) {
   return compareAccounts(first.account, second.account)
+}
+
+function createAddressIndexNode(): AddressIndexNode {
+  return { children: new Map() }
+}
+
+function getAddressHex(account: Address) {
+  return account.toLowerCase().slice(2)
+}
+
+function findFirstIndexedMember(node: AddressIndexNode) {
+  let current = node
+  for (let depth = 0; !current.memberKey; depth += 1) {
+    if (depth >= ADDRESS_HEX_LENGTH) {
+      throw projectionError('internal member index')
+    }
+    let child: AddressIndexNode | undefined
+    for (const digit of HEX_DIGITS) {
+      child = current.children.get(digit)
+      if (child) break
+    }
+    if (!child) throw projectionError('internal member index')
+    current = child
+  }
+  return current.memberKey
+}
+
+function findNextIndexedMember(root: AddressIndexNode, account: Address) {
+  const addressHex = getAddressHex(account)
+  const path = [root]
+  let current = root
+  for (const digit of addressHex) {
+    const child = current.children.get(digit)
+    if (!child) throw projectionError('read cursor')
+    path.push(child)
+    current = child
+  }
+  if (!current.memberKey) throw projectionError('read cursor')
+  for (let depth = ADDRESS_HEX_LENGTH - 1; depth >= 0; depth -= 1) {
+    const parent = path[depth]!
+    const digitIndex = HEX_DIGITS.indexOf(addressHex[depth]!)
+    for (let nextIndex = digitIndex + 1; nextIndex < 16; nextIndex += 1) {
+      const sibling = parent.children.get(HEX_DIGITS[nextIndex]!)
+      if (sibling) return findFirstIndexedMember(sibling)
+    }
+  }
+  return undefined
 }
 
 function comparePositions(
@@ -503,7 +562,6 @@ function normalizeReadOptions(value: unknown) {
   if (!isRecord(value)) throw projectionError('read options')
   const options = value as GroupMembershipProjectionReadOptions
   const limit = options.limit ?? GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE
-  const offset = options.offset ?? 0
   if (
     !Number.isSafeInteger(limit) ||
     limit < 1 ||
@@ -511,13 +569,13 @@ function normalizeReadOptions(value: unknown) {
   ) {
     throw projectionError('read limit')
   }
-  if (!Number.isSafeInteger(offset) || offset < 0) {
-    throw projectionError('read offset')
-  }
-  return { limit, offset }
+  const after =
+    options.after === undefined ? undefined : normalizeAccount(options.after)
+  return { after, limit }
 }
 
 export class GroupMembershipProjection {
+  readonly #addressIndex = createAddressIndexNode()
   readonly #memberBlocksByHash = new Map<Hash, RetainedIdentity>()
   readonly #groupId: bigint
   readonly #members = new Map<string, GroupMembershipSet>()
@@ -612,14 +670,10 @@ export class GroupMembershipProjection {
     ) {
       throw projectionError('confirmation progress')
     }
-    assertBlockIdentities(
-      [
-        ...this.#members.values(),
-        ...(this.#last ? [this.#last] : []),
-        checkpoint,
-      ],
-      'confirmation',
-    )
+    const retainedBlock = this.#memberBlocksByHash.get(checkpoint.blockHash)
+    if (retainedBlock && retainedBlock.blockNumber !== checkpoint.blockNumber) {
+      throw projectionError('confirmation block identity')
+    }
     this.#confirmedThrough = checkpoint
   }
 
@@ -637,20 +691,36 @@ export class GroupMembershipProjection {
   readMembers(
     optionsValue: GroupMembershipProjectionReadOptions = {},
   ): GroupMembershipProjectionReadPage {
-    const { limit, offset } = normalizeReadOptions(optionsValue)
-    const members = [...this.#members.values()].toSorted(compareMembers)
-    if (offset > members.length) throw projectionError('read offset')
-    const end = Math.min(offset + limit, members.length)
-    const complete = end >= members.length
+    const { after, limit } = normalizeReadOptions(optionsValue)
+    if (after && !this.#members.has(after.toLowerCase())) {
+      throw projectionError('read cursor')
+    }
+    let memberKey = after
+      ? findNextIndexedMember(this.#addressIndex, after)
+      : this.#members.size > 0
+        ? findFirstIndexedMember(this.#addressIndex)
+        : undefined
+    const members: GroupMembershipSet[] = []
+    let last: GroupMembershipSet | undefined
+    while (memberKey && members.length < limit) {
+      const member = this.#members.get(memberKey)
+      if (!member) throw projectionError('internal member index')
+      last = member
+      members.push(copyMember(member))
+      memberKey = findNextIndexedMember(this.#addressIndex, member.account)
+    }
+    const complete = memberKey === undefined
     return {
       complete,
-      members: members.slice(offset, end).map(copyMember),
-      nextOffset: complete ? undefined : end,
-      totalMembers: BigInt(members.length),
+      members,
+      nextAfter: complete ? undefined : last?.account,
+      totalMembers: BigInt(this.#members.size),
     }
   }
 
   reset() {
+    this.#addressIndex.children.clear()
+    this.#addressIndex.memberKey = undefined
     this.#memberBlocksByHash.clear()
     this.#members.clear()
     this.#memberTransactionsByHash.clear()
@@ -691,13 +761,41 @@ export class GroupMembershipProjection {
     const member = this.#members.get(key)
     if (!member) return
     this.#members.delete(key)
+    const addressHex = getAddressHex(member.account)
+    const path = [this.#addressIndex]
+    let node = this.#addressIndex
+    for (const digit of addressHex) {
+      const child = node.children.get(digit)
+      if (!child) throw projectionError('internal member index')
+      path.push(child)
+      node = child
+    }
+    if (node.memberKey !== key) throw projectionError('internal member index')
+    node.memberKey = undefined
+    for (let depth = ADDRESS_HEX_LENGTH - 1; depth >= 0; depth -= 1) {
+      const child = path[depth + 1]!
+      if (child.memberKey || child.children.size > 0) break
+      path[depth]!.children.delete(addressHex[depth]!)
+    }
     releaseIdentity(this.#memberBlocksByHash, member.blockHash)
     releaseIdentity(this.#memberTransactionsByHash, member.transactionHash)
   }
 
   #retainMember(value: GroupMembershipSet) {
     const member = copyMember(value)
-    this.#members.set(member.account.toLowerCase(), member)
+    const key = member.account.toLowerCase()
+    this.#members.set(key, member)
+    let node = this.#addressIndex
+    for (const digit of getAddressHex(member.account)) {
+      let child = node.children.get(digit)
+      if (!child) {
+        child = createAddressIndexNode()
+        node.children.set(digit, child)
+      }
+      node = child
+    }
+    if (node.memberKey) throw projectionError('internal member index')
+    node.memberKey = key
     retainIdentity(
       this.#memberBlocksByHash,
       member.blockHash,

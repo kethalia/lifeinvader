@@ -103,10 +103,12 @@ order to each account's latest join or leave signal. It retains only current
 members, while its resumable snapshot binds the selected group, total signal
 count, exact log tail, confirmation checkpoint, and canonical active-member
 records. Snapshot digests are deterministic, member reads are address-ordered and
-capped at 200 records per page, and malformed or cross-group input is rejected
-atomically. Reference-counted active identity indexes keep each history-apply
-step proportional to its bounded input page instead of the total group size.
-This remains public social metadata, never access control. A later runner will
+capped at 200 records per page, and an address-cursor radix index keeps each read
+proportional to that page instead of repeatedly sorting the entire group.
+Malformed, zero-address, or cross-group input is rejected atomically.
+Reference-counted active identity indexes likewise keep each history-apply step
+proportional to its bounded input page instead of the total group size. This
+remains public social metadata, never access control. A later runner will
 authenticate the snapshot against the exact cache generation before publishing
 it to React.
 

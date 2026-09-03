@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   encodeAbiParameters,
   keccak256,
@@ -157,7 +157,7 @@ describe('group membership projection', () => {
     const first = projection.readMembers({ limit: 2 })
     expect(first).toMatchObject({
       complete: false,
-      nextOffset: 2,
+      nextAfter: account(2),
       totalMembers: 205n,
     })
     expect(first.members.map(({ account: member }) => member)).toEqual([
@@ -166,14 +166,14 @@ describe('group membership projection', () => {
     ])
 
     const middle = projection.readMembers({
+      after: first.nextAfter,
       limit: MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE,
-      offset: first.nextOffset,
     })
     expect(middle.members).toHaveLength(200)
-    expect(middle.nextOffset).toBe(202)
+    expect(middle.nextAfter).toBe(account(202))
     expect(middle.complete).toBe(false)
 
-    const last = projection.readMembers({ offset: middle.nextOffset })
+    const last = projection.readMembers({ after: middle.nextAfter })
     expect(
       last.members.map(({ account: member }) => member.toLowerCase()),
     ).toEqual([
@@ -182,7 +182,7 @@ describe('group membership projection', () => {
       account(205).toLowerCase(),
     ])
     expect(last).toMatchObject({ complete: true, totalMembers: 205n })
-    expect(last.nextOffset).toBeUndefined()
+    expect(last.nextAfter).toBeUndefined()
   })
 
   it('returns defensive copies of members, progress, and snapshots', () => {
@@ -316,6 +316,27 @@ describe('group membership projection', () => {
 
     projection.applyLogs([membershipLog(account(5_001), true, 5_001n)])
 
+    const sorting = vi.spyOn(Array.prototype, 'toSorted')
+    try {
+      const firstPage = projection.readMembers({
+        limit: MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE,
+      })
+      const secondPage = projection.readMembers({
+        after: firstPage.nextAfter,
+        limit: MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE,
+      })
+      expect(sorting).not.toHaveBeenCalled()
+      expect(firstPage.members).toHaveLength(200)
+      expect(firstPage.nextAfter?.toLowerCase()).toBe(
+        account(200).toLowerCase(),
+      )
+      expect(secondPage.members[0]?.account.toLowerCase()).toBe(
+        account(201).toLowerCase(),
+      )
+    } finally {
+      sorting.mockRestore()
+    }
+
     expect(projection.progress).toMatchObject({
       memberCount: 5_001n,
       signalCount: 5_001n,
@@ -429,7 +450,7 @@ describe('group membership projection', () => {
     expect(restored.readMembers()).toEqual({
       complete: true,
       members: [],
-      nextOffset: undefined,
+      nextAfter: undefined,
       totalMembers: 0n,
     })
     expect(restored.progress).toMatchObject({
@@ -491,6 +512,18 @@ describe('group membership projection', () => {
     expect(() =>
       GroupMembershipProjection.fromSnapshot({
         ...snapshot,
+        members: [
+          {
+            ...snapshot.members[0],
+            account: '0x0000000000000000000000000000000000000000',
+          },
+          snapshot.members[1],
+        ],
+      }),
+    ).toThrow(/account/i)
+    expect(() =>
+      GroupMembershipProjection.fromSnapshot({
+        ...snapshot,
         last: {
           ...snapshot.last!,
           blockNumber: 1n,
@@ -532,6 +565,9 @@ describe('group membership projection', () => {
       ),
     ).toThrow(/page size/i)
     expect(() => projection.isMember('not-an-address')).toThrow(/account/i)
+    expect(() =>
+      projection.isMember('0x0000000000000000000000000000000000000000'),
+    ).toThrow(/account/i)
     expect(() => projection.readMembers(null as never)).toThrow(/read options/i)
     expect(() => projection.readMembers({ limit: 0 })).toThrow(/read limit/i)
     expect(() =>
@@ -539,8 +575,9 @@ describe('group membership projection', () => {
         limit: MAX_GROUP_MEMBERSHIP_PROJECTION_READ_PAGE_SIZE + 1,
       }),
     ).toThrow(/read limit/i)
-    expect(() => projection.readMembers({ offset: -1 })).toThrow(/read offset/i)
-    expect(() => projection.readMembers({ offset: 1 })).toThrow(/read offset/i)
+    expect(() => projection.readMembers({ after: ACCOUNT_A })).toThrow(
+      /read cursor/i,
+    )
   })
 
   it('clears derived state without changing the selected group', () => {
