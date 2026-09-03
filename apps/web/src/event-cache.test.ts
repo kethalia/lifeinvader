@@ -855,6 +855,9 @@ describe('browser event cache', () => {
       logCount: 5,
       revision: 1n,
     })
+    await expect(
+      opened.scan(seed, { continuation: first.next }),
+    ).rejects.toThrow(/not issued for this session/i)
   })
 
   it('does not count the full scope while scanning pages', async () => {
@@ -1081,7 +1084,7 @@ describe('browser event cache', () => {
     })
   })
 
-  it('rejects a continuation forged to skip to a later block', async () => {
+  it('rejects later continuation fields substituted from another scan', async () => {
     const { cache: opened } = await createCache()
     const seed = seedCursor()
     const next = cursorAt(seed, 4n)
@@ -1091,15 +1094,23 @@ describe('browser event cache', () => {
     )
     const first = await opened.scan(seed, { limit: 1 })
     expect(first.next).toBeDefined()
+    const otherFirst = await opened.scan(seed, { limit: 1 })
+    const later = await opened.scan(seed, {
+      continuation: otherFirst.next,
+      limit: 1,
+    })
+    expect(later.next).toBeDefined()
 
     await expect(
       opened.scan(seed, {
         continuation: {
           ...first.next!,
-          after: { blockNumber: 3n, logIndex: 0 },
+          after: later.next!.after,
+          digest: later.next!.digest,
+          logCount: later.next!.logCount,
         },
       }),
-    ).rejects.toThrow(/invalid event cache scan continuation/i)
+    ).rejects.toThrow(/not issued for this session/i)
     expect(await opened.readLatest(seed)).toMatchObject({
       cursor: next,
       logs: [eventLog(3n), eventLog(2n), eventLog(1n)],

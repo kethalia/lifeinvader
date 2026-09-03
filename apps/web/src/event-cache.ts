@@ -23,6 +23,7 @@ const DEFAULT_PAGE_SIZE = 50
 const MAX_PAGE_SIZE = 200
 const MAX_BATCH_LOGS = 5_000
 const MAX_SCAN_LOGS = MAX_BATCH_LOGS + MAX_PAGE_SIZE
+const MAX_SCAN_SESSIONS = 16
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 
 type CursorRecord = {
@@ -85,6 +86,7 @@ export type EventCacheScanCursor = EventCachePosition & {
   digest: Hash
   fromBlock: bigint
   logCount: number
+  session: string
 }
 export type EventCacheScanBaseline = EventCachePosition & {
   digest: Hash
@@ -360,6 +362,9 @@ function normalizeScanCursor(
   }
   assertScanBlock(source.fromBlock, 'scan start block')
   const after = normalizeLogPosition(source.after)
+  if (!isGeneration(source.session)) {
+    throw cacheError('Invalid event cache scan session.')
+  }
   const integrity = normalizeLogIntegrity(
     {
       digest: source.digest,
@@ -383,7 +388,23 @@ function normalizeScanCursor(
     digest: integrity.digest,
     fromBlock: source.fromBlock,
     logCount: integrity.logCount,
+    session: source.session,
   }
+}
+function sameScanCursor(
+  first: EventCacheScanCursor,
+  second: EventCacheScanCursor,
+) {
+  return (
+    first.session === second.session &&
+    first.generation === second.generation &&
+    first.revision === second.revision &&
+    first.digest === second.digest &&
+    first.fromBlock === second.fromBlock &&
+    first.logCount === second.logCount &&
+    sameLogPosition(first.after, second.after) &&
+    sameCursor(first.cursor, second.cursor)
+  )
 }
 function normalizeScanBaseline(
   value: unknown,
@@ -561,6 +582,7 @@ export class BrowserEventCache {
   readonly #database: IDBDatabase
   readonly #filter: NormalizedEventLogFilter
   readonly #keyRange: typeof IDBKeyRange
+  readonly #scanContinuations = new Map<string, EventCacheScanCursor>()
 
   constructor(
     database: IDBDatabase,
@@ -573,7 +595,30 @@ export class BrowserEventCache {
   }
 
   close() {
+    this.#scanContinuations.clear()
     this.#database.close()
+  }
+
+  #createScanSession() {
+    for (;;) {
+      const session = defaultCreateGeneration()
+      if (!this.#scanContinuations.has(session)) return session
+    }
+  }
+
+  #rememberScanContinuation(
+    seedCursor: EventCursor,
+    continuation: EventCacheScanCursor,
+  ) {
+    const snapshot = normalizeScanCursor(continuation, seedCursor)
+    if (
+      !this.#scanContinuations.has(snapshot.session) &&
+      this.#scanContinuations.size >= MAX_SCAN_SESSIONS
+    ) {
+      const oldest = this.#scanContinuations.keys().next().value
+      if (oldest !== undefined) this.#scanContinuations.delete(oldest)
+    }
+    this.#scanContinuations.set(snapshot.session, snapshot)
   }
 
   async clear(seedValue: unknown) {
@@ -682,27 +727,42 @@ export class BrowserEventCache {
     assertPageSize(limit)
     let continuation: EventCacheScanCursor | undefined
     let baseline: EventCacheScanBaseline | undefined
+    let scanSession: string
     if (options.continuation !== undefined) {
       if (options.baseline !== undefined) {
         throw cacheError('The event cache scan has conflicting boundaries.')
       }
       continuation = normalizeScanCursor(options.continuation, seedCursor)
+      const expected = this.#scanContinuations.get(continuation.session)
+      if (!expected || !sameScanCursor(expected, continuation)) {
+        throw cacheError(
+          'The event cache scan continuation was not issued for this session.',
+        )
+      }
+      this.#scanContinuations.delete(continuation.session)
+      scanSession = continuation.session
     } else if (options.baseline !== undefined) {
       baseline = normalizeScanBaseline(options.baseline, seedCursor)
+      scanSession = this.#createScanSession()
+    } else {
+      scanSession = this.#createScanSession()
     }
     const fromBlock =
       continuation?.fromBlock ??
       baseline?.cursor.nextBlock ??
       seedCursor.startBlock
     const scope = getEventCacheScope(seedCursor)
-    return this.#scanTransaction(
+    const page = await this.#scanTransaction(
       seedCursor,
       scope,
       fromBlock,
       limit,
       continuation,
       baseline,
+      scanSession,
     )
+    if (page.next) this.#rememberScanContinuation(seedCursor, page.next)
+    return page
   }
 
   async apply(
@@ -1071,6 +1131,7 @@ export class BrowserEventCache {
     limit: number,
     continuation: EventCacheScanCursor | undefined,
     baseline: EventCacheScanBaseline | undefined,
+    scanSession: string,
   ) {
     return new Promise<EventCacheScanPage>((resolve, reject) => {
       const transaction = this.#database.transaction(
@@ -1365,6 +1426,7 @@ export class BrowserEventCache {
                     generation: state.generation,
                     logCount: returnedIntegrity.logCount,
                     revision: state.revision,
+                    session: scanSession,
                   }
                 : undefined,
             reset: false,
