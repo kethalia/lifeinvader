@@ -506,6 +506,27 @@ h1 span {
   border: 1px solid currentColor;
 }
 
+.reaction-read-model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.reaction-read-model strong,
+.reaction-read-model p {
+  margin: 0;
+}
+
+.reaction-read-model p {
+  margin-top: 0.35rem;
+  line-height: 1.45;
+}
+
+.reaction-read-model button {
+  flex: 0 0 auto;
+}
+
 .post-list {
   display: grid;
   margin: 0;
@@ -618,6 +639,11 @@ h1 span {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.68rem;
   line-height: 1.45;
+}
+
+.post-actions .post-reaction-summary {
+  color: var(--red);
+  font-weight: 800;
 }
 
 .post-action-complete {
@@ -760,6 +786,11 @@ footer p {
   }
 
   .compose-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .reaction-read-model {
     align-items: stretch;
     flex-direction: column;
   }
