@@ -1,5 +1,5 @@
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
-import { afterEach, describe, expect, it } from 'vitest'
+import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { keccak256, stringToHex } from 'viem'
 import {
   BrowserEventCache,
@@ -23,7 +23,10 @@ const OTHER_ADDRESS = '0x000000000000000000000000000000000000b0b0'
 const OTHER_TOPIC = keccak256(stringToHex('OtherEvent()'))
 let cache: BrowserEventCache | undefined
 
-afterEach(() => cache?.close())
+afterEach(() => {
+  cache?.close()
+  vi.restoreAllMocks()
+})
 
 function blockHash(blockNumber: bigint, branch = 'a') {
   return keccak256(stringToHex(`${branch}:block:${blockNumber}`))
@@ -112,7 +115,7 @@ async function putRawRecord(
   value: Record<string, unknown>,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 6)
+    const request = factory.open('lifeinvader-event-cache-test', 7)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -133,7 +136,7 @@ async function deleteRawRecord(
   key: IDBValidKey,
 ) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 6)
+    const request = factory.open('lifeinvader-event-cache-test', 7)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -147,7 +150,7 @@ async function deleteRawRecord(
 }
 async function countRawScopeLogs(factory: IDBFactory, scope: string) {
   const database = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = factory.open('lifeinvader-event-cache-test', 6)
+    const request = factory.open('lifeinvader-event-cache-test', 7)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -210,6 +213,11 @@ describe('browser event cache', () => {
     expect(page.cursor).toEqual(replacement)
     expect(page.logs).toEqual([eventLog(2n, { branch: 'b' }), eventLog(1n)])
     expect(page.revision).toBe(2n)
+    await expect(opened.scan(seed)).resolves.toMatchObject({
+      complete: true,
+      logs: [eventLog(1n), eventLog(2n, { branch: 'b' })],
+      reset: false,
+    })
   })
 
   it('rejects a stale concurrent batch without changing the cache', async () => {
@@ -301,7 +309,7 @@ describe('browser event cache', () => {
       identity: logIdentity(log),
       log: { ...log, data: '0x1' },
       position,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
     expect(await opened.readLatest(seed)).toEqual({
@@ -327,7 +335,7 @@ describe('browser event cache', () => {
       identity: logIdentity(corruptLog),
       log: { ...corruptLog, data: '0x1' },
       position: `${'0'.repeat(63)}2:${'0'.repeat(16)}`,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -429,7 +437,7 @@ describe('browser event cache', () => {
       filter: { address: OTHER_ADDRESS, topics: [POST_PUBLISHED_TOPIC] },
       generation: stale.generation,
       revision: stale.revision,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -452,7 +460,7 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     await putRawRecord(factory, 'cursors', {
       cursor: cursorAt(seed, 2n),
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -471,7 +479,7 @@ describe('browser event cache', () => {
     const initial = await opened.readLatest(seed)
     await putRawRecord(factory, 'cursors', {
       cursor: cursorAt(seed, 2n),
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -496,7 +504,7 @@ describe('browser event cache', () => {
       identity: logIdentity(conflict),
       log: conflict,
       position: `${'0'.repeat(63)}1:${'0'.repeat(15)}1`,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -527,7 +535,7 @@ describe('browser event cache', () => {
       identity: logIdentity(corrupt),
       log: corrupt,
       position: logIdentity(corrupt),
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -550,7 +558,7 @@ describe('browser event cache', () => {
       identity: logIdentity(conflict),
       log: conflict,
       position: `${'0'.repeat(63)}1:${'0'.repeat(16)}`,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -575,7 +583,7 @@ describe('browser event cache', () => {
         identity: logIdentity(duplicate),
         log: duplicate,
         position: `${'0'.repeat(63)}1:${'0'.repeat(15)}1:${'0'.repeat(16)}`,
-        schemaVersion: 6,
+        schemaVersion: 7,
         scope: getEventCacheScope(seed),
       }),
     ).rejects.toMatchObject({ name: 'ConstraintError' })
@@ -599,7 +607,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(2n)),
       log: unrelated,
       position: `${'0'.repeat(63)}2:${'0'.repeat(16)}`,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -630,7 +638,7 @@ describe('browser event cache', () => {
       identity: logIdentity(valid),
       log: { ...valid, topics: [POST_PUBLISHED_TOPIC] },
       position: logIdentity(valid),
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope: getEventCacheScope(seed),
     })
 
@@ -652,7 +660,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(0n)),
       log: eventLog(0n),
       position: 7,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope,
     })
 
@@ -675,7 +683,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(0n)),
       log: eventLog(0n),
       position: 7,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope,
     })
     expect(await countRawScopeLogs(factory, scope)).toBe(1)
@@ -695,7 +703,7 @@ describe('browser event cache', () => {
       identity: logIdentity(eventLog(2n)),
       log: eventLog(2n),
       position: 7,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope,
     })
 
@@ -730,7 +738,7 @@ describe('browser event cache', () => {
       identity: '0',
       log: corrupt,
       position: logIdentity(corrupt),
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope,
     })
 
@@ -765,7 +773,7 @@ describe('browser event cache', () => {
       identity: hiddenKey,
       log: eventLog(3n),
       position: hiddenKey,
-      schemaVersion: 6,
+      schemaVersion: 7,
       scope,
     })
 
@@ -795,6 +803,384 @@ describe('browser event cache', () => {
       eventLog(2n),
     ])
     await expect(opened.readLatest(seed, 201)).rejects.toThrow(/page size/i)
+  })
+
+  it('scans oldest-first in bounded pages without splitting a block', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 6n)
+    const logs = [
+      eventLog(1n),
+      eventLog(2n),
+      eventLog(2n, { logIndex: 1, transactionIndex: 1 }),
+      eventLog(2n, { logIndex: 2, transactionIndex: 2 }),
+      eventLog(3n),
+    ]
+    await opened.apply(await opened.readLatest(seed), syncResult(next, logs))
+
+    const first = await opened.scan(seed, { limit: 2 })
+    expect(first).toMatchObject({
+      complete: false,
+      cursor: next,
+      logs: logs.slice(0, 4),
+      reset: false,
+      revision: 1n,
+    })
+    expect(first.next).toMatchObject({
+      after: { blockNumber: 2n, logIndex: 2 },
+      cursor: next,
+      fromBlock: 0n,
+      generation: first.generation,
+      logCount: 4,
+      revision: 1n,
+    })
+
+    const second = await opened.scan(seed, {
+      continuation: first.next,
+      limit: 2,
+    })
+    expect(second).toMatchObject({
+      complete: true,
+      cursor: next,
+      generation: first.generation,
+      logs: [logs[4]],
+      reset: false,
+      revision: 1n,
+    })
+    expect(second.next).toBeUndefined()
+    expect(second.baseline).toMatchObject({
+      cursor: next,
+      generation: first.generation,
+      last: { blockNumber: 3n, logIndex: 0 },
+      logCount: 5,
+      revision: 1n,
+    })
+    await expect(
+      opened.scan(seed, { continuation: first.next }),
+    ).rejects.toThrow(/not issued for this session/i)
+  })
+
+  it('does not count the full scope while scanning pages', async () => {
+    const count = vi.spyOn(IDBObjectStore.prototype, 'count')
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 5n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+
+    const first = await opened.scan(seed, { limit: 1 })
+    await opened.scan(seed, { continuation: first.next })
+
+    expect(count).not.toHaveBeenCalled()
+  })
+
+  it('uses a completed canonical scan as an append-only delta baseline', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 6n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(next, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+    const complete = await opened.scan(seed)
+    expect(complete.baseline).toBeDefined()
+    opened.close()
+    cache = await openEventCache({
+      databaseName: 'lifeinvader-event-cache-test',
+      factory,
+      filter: FILTER,
+      keyRange: IDBKeyRange,
+    })
+
+    const advanced = {
+      ...next,
+      checkpoints: [
+        ...next.checkpoints,
+        { blockHash: blockHash(7n), blockNumber: 7n },
+      ],
+      nextBlock: 8n,
+    } satisfies EventCursor
+    await cache.apply(
+      await cache.readLatest(seed),
+      syncResult(advanced, [eventLog(6n)]),
+    )
+
+    await expect(
+      cache.scan(seed, { baseline: complete.baseline }),
+    ).resolves.toMatchObject({
+      complete: true,
+      cursor: advanced,
+      logs: [eventLog(6n)],
+      reset: false,
+      revision: 2n,
+    })
+  })
+
+  it('rejects a continuation prefix masquerading as a completed baseline', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const current = {
+      ...seed,
+      checkpoints: [
+        { blockHash: blockHash(1n), blockNumber: 1n },
+        { blockHash: blockHash(3n), blockNumber: 3n },
+      ],
+      nextBlock: 4n,
+    } satisfies EventCursor
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(current, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+    const partial = await opened.scan(seed, { limit: 1 })
+    const complete = await opened.scan(seed)
+    expect(partial.next).toBeDefined()
+    expect(complete.baseline).toBeDefined()
+
+    await expect(
+      opened.scan(seed, {
+        baseline: {
+          cursor: {
+            ...current,
+            checkpoints: [current.checkpoints[0]!],
+            nextBlock: 2n,
+          },
+          digest: partial.next!.digest,
+          generation: complete.generation,
+          last: partial.next!.after,
+          logCount: partial.next!.logCount,
+          proof: complete.baseline!.proof,
+          revision: 0n,
+        },
+      }),
+    ).rejects.toThrow(/baseline was not issued by this cache/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: current,
+      reset: false,
+      revision: 1n,
+    })
+  })
+
+  it('rejects a delta baseline whose final checkpoint was reorganized', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 6n), [eventLog(1n), eventLog(3n)]),
+    )
+    const complete = await opened.scan(seed)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 6n, 'b'), [eventLog(4n, { branch: 'b' })], 4n),
+    )
+
+    await expect(
+      opened.scan(seed, { baseline: complete.baseline }),
+    ).rejects.toThrow(/baseline is no longer canonical/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: cursorAt(seed, 6n, 'b'),
+      reset: false,
+      revision: 2n,
+    })
+  })
+
+  it('returns a whole large boundary block under a fixed hard cap', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const blockLogs = Array.from({ length: 201 }, (_value, index) =>
+      eventLog(1n, { logIndex: index, transactionIndex: index }),
+    )
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 3n), blockLogs),
+    )
+
+    const page = await opened.scan(seed, { limit: 1 })
+    expect(page.complete).toBe(true)
+    expect(page.logs).toEqual(blockLogs)
+  })
+
+  it('rejects a continuation after any cache revision change', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 4n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const first = await opened.scan(seed, { limit: 1 })
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(cursorAt(seed, 6n), [eventLog(4n)]),
+    )
+
+    await expect(
+      opened.scan(seed, { continuation: first.next }),
+    ).rejects.toThrow(/changed during chronological scanning/i)
+    expect((await opened.readLatest(seed)).revision).toBe(2n)
+  })
+
+  it('resets when a scan continuation anchor disappears', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(
+      initial,
+      syncResult(cursorAt(seed, 4n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const first = await opened.scan(seed, { limit: 1 })
+    await deleteRawRecord(factory, 'logs', [
+      getEventCacheScope(seed),
+      logIdentity(eventLog(1n)),
+    ])
+
+    await expect(
+      opened.scan(seed, { continuation: first.next }),
+    ).resolves.toMatchObject({
+      complete: false,
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('resets instead of treating local EOF as proof after a log disappears', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(
+      initial,
+      syncResult(cursorAt(seed, 5n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    await deleteRawRecord(factory, 'logs', [
+      getEventCacheScope(seed),
+      logIdentity(eventLog(2n)),
+    ])
+
+    await expect(opened.scan(seed)).resolves.toMatchObject({
+      complete: false,
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('resets a noncanonical position key outside the scan range', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(initial, syncResult(cursorAt(seed, 4n), [eventLog(1n)]))
+    const hidden = eventLog(2n)
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(hidden),
+      log: hidden,
+      position: 7,
+      schemaVersion: 7,
+      scope: getEventCacheScope(seed),
+    })
+
+    await expect(opened.scan(seed)).resolves.toMatchObject({
+      complete: false,
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+    expect(await countRawScopeLogs(factory, getEventCacheScope(seed))).toBe(0)
+  })
+
+  it('validates unread sentinels before issuing a continuation', async () => {
+    const { cache: opened, factory } = await createCache()
+    const seed = seedCursor()
+    const initial = await opened.readLatest(seed)
+    await opened.apply(
+      initial,
+      syncResult(cursorAt(seed, 5n), [
+        eventLog(1n),
+        eventLog(2n),
+        eventLog(3n),
+      ]),
+    )
+    const corrupt = eventLog(2n)
+    await putRawRecord(factory, 'logs', {
+      identity: logIdentity(corrupt),
+      log: { ...corrupt, data: '0x1' },
+      position: logIdentity(corrupt),
+      schemaVersion: 7,
+      scope: getEventCacheScope(seed),
+    })
+
+    await expect(opened.scan(seed, { limit: 1 })).resolves.toMatchObject({
+      cursor: seed,
+      logs: [],
+      reset: true,
+      revision: 2n,
+    })
+  })
+
+  it('rejects later continuation fields substituted from another scan', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    const next = cursorAt(seed, 4n)
+    await opened.apply(
+      await opened.readLatest(seed),
+      syncResult(next, [eventLog(1n), eventLog(2n), eventLog(3n)]),
+    )
+    const first = await opened.scan(seed, { limit: 1 })
+    expect(first.next).toBeDefined()
+    const otherFirst = await opened.scan(seed, { limit: 1 })
+    const later = await opened.scan(seed, {
+      continuation: otherFirst.next,
+      limit: 1,
+    })
+    expect(later.next).toBeDefined()
+
+    await expect(
+      opened.scan(seed, {
+        continuation: {
+          ...first.next!,
+          after: later.next!.after,
+          digest: later.next!.digest,
+          logCount: later.next!.logCount,
+        },
+      }),
+    ).rejects.toThrow(/not issued for this session/i)
+    expect(await opened.readLatest(seed)).toMatchObject({
+      cursor: next,
+      logs: [eventLog(3n), eventLog(2n), eventLog(1n)],
+      revision: 1n,
+    })
+  })
+
+  it('rejects invalid chronological scan inputs before returning data', async () => {
+    const { cache: opened } = await createCache()
+    const seed = seedCursor()
+    await expect(opened.scan(seed, { limit: 201 })).rejects.toThrow(
+      /page size/i,
+    )
+    await expect(
+      opened.scan(seed, { fromBlock: -1n } as never),
+    ).rejects.toThrow(/requires a completed scan baseline/i)
+    await expect(opened.scan(seed, null as unknown as never)).rejects.toThrow(
+      /scan options/i,
+    )
   })
 
   it('rejects out-of-range and noncanonical batches before opening a write', async () => {
