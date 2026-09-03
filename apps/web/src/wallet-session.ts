@@ -126,10 +126,13 @@ export function useWalletSession() {
       } catch (error) {
         setSession((current) => ({
           ...current,
+          account: undefined,
+          chainId: undefined,
           error: describeRpcError(
             error,
             'The wallet emitted an invalid chain identifier.',
           ),
+          status: 'disconnected',
         }))
       }
     }

@@ -16,7 +16,7 @@ Run the static Vite client in another:
 pnpm --filter @lifeinvader/web dev
 ```
 
-Open the loopback URL printed by Vite, connect MetaMask, and choose **Switch to local Anvil**. The client asks the wallet to select chain ID `31337` at `http://127.0.0.1:8545`; if that network is unknown, it asks to add it first.
+Open the loopback URL printed by Vite, connect MetaMask, and choose **Switch to local Anvil**. The client asks the wallet to select chain ID `31337` at `http://127.0.0.1:8545`; if that network is unknown, it asks to add it first. Because development chain IDs are commonly reused, the client also compares a fixed block fingerprint through the wallet and the loopback RPC before it labels the network as local or enables local deployment. If an existing `31337` entry points elsewhere, update or remove it in the wallet first.
 
 Import one of the development-only accounts printed by Anvil into a dedicated browser profile. Anvil keys are public test credentials: never fund them or reuse them on another network.
 

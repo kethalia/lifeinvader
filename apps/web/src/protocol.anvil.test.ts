@@ -136,17 +136,21 @@ describe('wallet transaction helpers on Anvil', () => {
     })
     await expect(inspectProtocol(provider)).resolves.toEqual({ kind: 'ready' })
 
-    await expect(
-      publishPost(provider, account, 'Local chain, globally embarrassing.'),
-    ).resolves.toMatchObject({ blockNumber: 2n })
+    const postReceipt = await publishPost(
+      provider,
+      account,
+      'Local chain, globally embarrassing.',
+    )
+    expect(postReceipt).toMatchObject({ blockNumber: 2n })
+    const postBlock = `0x${postReceipt.blockNumber.toString(16)}`
 
     const logs = await provider.request({
       method: 'eth_getLogs',
       params: [
         {
           address: PROTOCOL_ADDRESS,
-          fromBlock: '0x0',
-          toBlock: 'latest',
+          fromBlock: postBlock,
+          toBlock: postBlock,
         },
       ],
     })

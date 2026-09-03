@@ -8,12 +8,13 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
-import { PROTOCOL_ADDRESS } from './protocol'
+import { FACTORY_ADDRESS, PROTOCOL_ADDRESS } from './protocol'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
 
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
+  vi.unstubAllGlobals()
 })
 
 describe('App', () => {
@@ -46,10 +47,10 @@ describe('App', () => {
           if (method === 'eth_requestAccounts') {
             return ['0x000000000000000000000000000000000000a11c']
           }
-          if (method === 'eth_chainId') return '0x7a69'
+          if (method === 'eth_chainId') return '0x1'
           if (method === 'eth_getCode') {
             const [address] = params as [string]
-            expect(address).toBe(PROTOCOL_ADDRESS)
+            expect([PROTOCOL_ADDRESS, FACTORY_ADDRESS]).toContain(address)
             return '0x'
           }
           throw new Error(`Unexpected method: ${method}`)
@@ -75,13 +76,74 @@ describe('App', () => {
     })
     fireEvent.click(walletButton)
 
-    expect(await screen.findByText('31337')).toBeTruthy()
+    expect(await screen.findByText('1')).toBeTruthy()
     await waitFor(() => {
       expect(provider.request).toHaveBeenCalledWith({
         method: 'eth_getCode',
         params: [PROTOCOL_ADDRESS, 'latest'],
       })
+      expect(provider.request).toHaveBeenCalledWith({
+        method: 'eth_getCode',
+        params: [FACTORY_ADDRESS, 'latest'],
+      })
     })
+
+    window.removeEventListener('eip6963:requestProvider', announce)
+  })
+
+  it('does not trust a reused local chain ID with a different fingerprint', async () => {
+    const walletBlockHash = `0x${'aa'.repeat(32)}`
+    const localBlockHash = `0x${'bb'.repeat(32)}`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as { method: string }
+        const result =
+          request.method === 'eth_chainId'
+            ? '0x7a69'
+            : request.method === 'eth_blockNumber'
+              ? '0x2a'
+              : { hash: localBlockHash, number: '0x2a' }
+        return new Response(JSON.stringify({ id: 1, jsonrpc: '2.0', result }))
+      }),
+    )
+
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_requestAccounts') {
+          return ['0x000000000000000000000000000000000000a11c']
+        }
+        if (method === 'eth_chainId') return '0x7a69'
+        if (method === 'eth_getBlockByNumber') {
+          return { hash: walletBlockHash, number: '0x2a' }
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    }
+    const announce = () => {
+      window.dispatchEvent(
+        new CustomEvent('eip6963:announceProvider', {
+          detail: {
+            info: { name: 'Other Local Wallet', uuid: 'other-local-wallet' },
+            provider,
+          },
+        }),
+      )
+    }
+    window.addEventListener('eip6963:requestProvider', announce)
+
+    render(<App />)
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /connect other local wallet/i,
+      }),
+    )
+
+    expect(await screen.findByText(/does not match Anvil/i)).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: /deploy protocol here/i }),
+    ).toBeNull()
+    expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull()
 
     window.removeEventListener('eip6963:requestProvider', announce)
   })

@@ -11,6 +11,7 @@ import {
   PROTOCOL_ADDRESS,
   publishPost,
   switchToLocalChain,
+  verifyLocalChain,
   waitForTransactionReceipt,
 } from './protocol'
 
@@ -18,12 +19,31 @@ const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const TRANSACTION_HASH =
   '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const BLOCK_HASH =
+  '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+const OTHER_BLOCK_HASH =
+  '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 
 function providerFrom(
   request: (args: ProviderRequest) => Promise<unknown>,
 ): Eip1193Provider {
   return { request }
+}
+
+function fingerprintProvider(
+  blockHash = BLOCK_HASH,
+  chainId = '0x7a69',
+): Eip1193Provider {
+  return providerFrom(async ({ method, params }) => {
+    if (method === 'eth_chainId') return chainId
+    if (method === 'eth_blockNumber') return '0x2a'
+    if (method === 'eth_getBlockByNumber') {
+      expect(params).toEqual(['0x2a', false])
+      return { hash: blockHash, number: '0x2a' }
+    }
+    throw new Error(`Unexpected method: ${method}`)
+  })
 }
 
 describe('protocol configuration', () => {
@@ -114,24 +134,46 @@ describe('post transactions', () => {
 })
 
 describe('local wallet network', () => {
+  it('verifies the wallet against a block fingerprint from loopback Anvil', async () => {
+    await expect(
+      verifyLocalChain(fingerprintProvider(), fingerprintProvider()),
+    ).resolves.toBeUndefined()
+  })
+
+  it('rejects a reused chain ID that points at a different RPC', async () => {
+    await expect(
+      verifyLocalChain(
+        fingerprintProvider(OTHER_BLOCK_HASH),
+        fingerprintProvider(),
+      ),
+    ).rejects.toThrow(/does not match Anvil/i)
+  })
+
   it('adds an unknown Anvil chain and selects it when still required', async () => {
     let firstSwitch = true
+    let selected = false
     const request = vi.fn(async ({ method }: ProviderRequest) => {
       if (method === 'wallet_switchEthereumChain' && firstSwitch) {
         firstSwitch = false
         throw Object.assign(new Error('Unknown chain'), { code: 4902 })
       }
-      if (method === 'eth_chainId') return '0x1'
+      if (method === 'wallet_switchEthereumChain') selected = true
+      if (method === 'eth_chainId') return selected ? '0x7a69' : '0x1'
+      if (method === 'eth_getBlockByNumber') {
+        return { hash: BLOCK_HASH, number: '0x2a' }
+      }
       return null
     })
 
-    await switchToLocalChain(providerFrom(request))
+    await switchToLocalChain(providerFrom(request), fingerprintProvider())
 
     expect(request.mock.calls.map(([request]) => request.method)).toEqual([
       'wallet_switchEthereumChain',
       'wallet_addEthereumChain',
       'eth_chainId',
       'wallet_switchEthereumChain',
+      'eth_chainId',
+      'eth_getBlockByNumber',
     ])
     expect(request.mock.calls[1]?.[0].params).toEqual([
       expect.objectContaining({
@@ -149,15 +191,20 @@ describe('local wallet network', () => {
         throw Object.assign(new Error('Unknown chain'), { code: 4902 })
       }
       if (method === 'eth_chainId') return '0x7A69'
+      if (method === 'eth_getBlockByNumber') {
+        return { hash: BLOCK_HASH, number: '0x2a' }
+      }
       return null
     })
 
-    await switchToLocalChain(providerFrom(request))
+    await switchToLocalChain(providerFrom(request), fingerprintProvider())
 
     expect(request.mock.calls.map(([request]) => request.method)).toEqual([
       'wallet_switchEthereumChain',
       'wallet_addEthereumChain',
       'eth_chainId',
+      'eth_chainId',
+      'eth_getBlockByNumber',
     ])
   })
 })

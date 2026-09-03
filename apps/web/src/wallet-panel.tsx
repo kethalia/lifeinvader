@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 
-import { describeRpcError } from './ethereum'
+import { describeRpcError, parseChainId } from './ethereum'
 import {
   deployProtocol,
   getPostBodyByteLength,
@@ -10,6 +10,7 @@ import {
   PROTOCOL_ADDRESS,
   publishPost,
   switchToLocalChain,
+  verifyLocalChain,
   type ProtocolInspection,
   type TransactionReceipt,
 } from './protocol'
@@ -44,6 +45,9 @@ export function WalletPanel() {
   const { connect, refresh, session } = useWalletSession()
   const [inspection, setInspection] = useState<ProtocolInspection>()
   const [inspectionError, setInspectionError] = useState<string>()
+  const [localChainState, setLocalChainState] = useState<
+    'not-selected' | 'checking' | 'verified' | 'mismatch'
+  >('not-selected')
   const [busyAction, setBusyAction] = useState<'chain' | 'deploy' | 'post'>()
   const [actionError, setActionError] = useState<string>()
   const [receipt, setReceipt] = useState<TransactionReceipt>()
@@ -52,16 +56,43 @@ export function WalletPanel() {
 
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
+    let selectedLocalChain = session.chainId === LOCAL_CHAIN_ID
+    let verifiedLocalChain = false
     setInspection(undefined)
     setInspectionError(undefined)
-    if (!session.provider || session.status !== 'connected') return
+    if (!session.provider || session.status !== 'connected') {
+      setLocalChainState('not-selected')
+      return
+    }
 
     try {
+      const selectedChainId = parseChainId(
+        await session.provider.request({ method: 'eth_chainId' }),
+      )
+      selectedLocalChain = selectedChainId === LOCAL_CHAIN_ID
+      if (selectedChainId === LOCAL_CHAIN_ID) {
+        if (requestId === inspectionSequence.current)
+          setLocalChainState('checking')
+        await verifyLocalChain(session.provider)
+        verifiedLocalChain = true
+        if (requestId === inspectionSequence.current)
+          setLocalChainState('verified')
+      } else if (requestId === inspectionSequence.current) {
+        setLocalChainState('not-selected')
+      }
+
       const nextInspection = await inspectProtocol(session.provider)
       if (requestId === inspectionSequence.current)
         setInspection(nextInspection)
     } catch (error) {
       if (requestId === inspectionSequence.current) {
+        setLocalChainState(
+          verifiedLocalChain
+            ? 'verified'
+            : selectedLocalChain
+              ? 'mismatch'
+              : 'not-selected',
+        )
         setInspectionError(
           describeRpcError(
             error,
@@ -70,7 +101,7 @@ export function WalletPanel() {
         )
       }
     }
-  }, [session.provider, session.status])
+  }, [session.chainId, session.provider, session.status])
 
   useEffect(() => {
     void refreshInspection()
@@ -105,6 +136,7 @@ export function WalletPanel() {
     void runAction('chain', async () => {
       await switchToLocalChain(provider)
       await refresh()
+      await refreshInspection()
     })
   }
 
@@ -218,15 +250,20 @@ export function WalletPanel() {
                   type="button"
                   disabled={
                     busyAction !== undefined ||
-                    session.chainId === LOCAL_CHAIN_ID
+                    localChainState === 'checking' ||
+                    localChainState === 'verified'
                   }
                   onClick={handleLocalChain}
                 >
                   {busyAction === 'chain'
                     ? 'Opening wallet…'
-                    : session.chainId === LOCAL_CHAIN_ID
-                      ? 'Local Anvil selected'
-                      : 'Switch to local Anvil'}
+                    : localChainState === 'checking'
+                      ? 'Verifying local Anvil…'
+                      : localChainState === 'verified'
+                        ? 'Local Anvil verified'
+                        : session.chainId === LOCAL_CHAIN_ID
+                          ? 'Verify local Anvil'
+                          : 'Switch to local Anvil'}
                 </button>
                 {inspection?.kind === 'deployable' ? (
                   <button
