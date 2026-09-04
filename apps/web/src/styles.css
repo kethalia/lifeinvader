@@ -994,11 +994,13 @@ h1 span {
   text-align: center;
 }
 
-.group-transaction-console {
+.group-transaction-console,
+.group-message-console {
   grid-column: 1 / -1;
 }
 
-.group-transaction-intro {
+.group-transaction-intro,
+.group-message-intro {
   display: grid;
   margin-bottom: 1.5rem;
   align-items: end;
@@ -1006,18 +1008,32 @@ h1 span {
   grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.7fr);
 }
 
-.group-transaction-intro h3 {
+.group-transaction-intro h3,
+.group-message-intro h3 {
   margin: 0.25rem 0 0;
   font-size: clamp(1.65rem, 3vw, 2.8rem);
   letter-spacing: -0.04em;
   line-height: 1;
 }
 
-.group-transaction-intro > p {
+.group-transaction-intro > p,
+.group-message-intro > p {
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
   line-height: 1.5;
+}
+
+.group-message-selection {
+  margin: 0 0 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--ink);
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.group-message-console .message-console h4 {
+  margin: 0 0 1.5rem;
+  font-size: 1rem;
 }
 
 .group-transaction-forms {
@@ -1649,6 +1665,7 @@ footer p {
   .public-groups-heading,
   .group-browser,
   .group-transaction-intro,
+  .group-message-intro,
   .group-transaction-forms,
   .post-feed-heading,
   .post-list,

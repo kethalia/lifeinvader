@@ -153,10 +153,28 @@ exact payload is authenticated in a canonical receipt. Unknown hashes can be
 retried only from the original provider, account, and chain with the expected
 creation or membership event bound into receipt validation.
 
+The selected-group message console remains inert until the user chooses a group
+and explicitly advances a read or submits a write. Sending does not require
+membership: the interface treats membership as public social metadata, requires
+an explicit disclosure acknowledgment, and receipt-verifies the exact sender,
+group, body, and canonical CID bytes. A submitted or ambiguously broadcast
+message locks further writes for that account and chain until its outcome is
+resolved. A receipt clears only an unchanged draft for the same wallet and still
+selected group. Unknown hashes are reauthenticated against the original wallet
+context and exact `GroupMessageSent` payload before completion is reported.
+
+Confirmed message reads request only the selected group's indexed topic, one
+bounded range per action. Partial catch-up is described but never rendered as a
+complete channel. Changing the provider, chain, or selected group aborts the old
+request, while a mismatched synchronizer result fails closed. The completed view
+shows at most the newest 100 retained events in chronological display order and
+labels IPFS values as availability-unproven commitments; it never fetches a
+gateway merely because a CID appears in a log.
+
 The Anvil integration covers create, join, leave, send, confirmed exact-group
 message and membership readback, and discovery of the immutable group
-definition. A later slice will add confirmed group messages to the interface
-without a hosted indexer, application server, or database.
+definition. The interface uses those same browser-native helpers without a
+hosted indexer, application server, or database.
 
 Committing a CID does not upload or pay to retain its content. Optional paid IPFS
 or storage-market adapters remain separate from the ownerless core protocol; see
