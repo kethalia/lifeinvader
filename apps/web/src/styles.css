@@ -766,6 +766,11 @@ h1 span {
   border-top: 1px solid var(--line);
 }
 
+.public-groups-loading {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
 .public-groups-heading {
   display: grid;
   margin-bottom: 3rem;
@@ -987,6 +992,147 @@ h1 span {
 
 .group-member-pagination span {
   text-align: center;
+}
+
+.group-transaction-console {
+  grid-column: 1 / -1;
+}
+
+.group-transaction-intro {
+  display: grid;
+  margin-bottom: 1.5rem;
+  align-items: end;
+  gap: 2rem;
+  grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.7fr);
+}
+
+.group-transaction-intro h3 {
+  margin: 0.25rem 0 0;
+  font-size: clamp(1.65rem, 3vw, 2.8rem);
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.group-transaction-intro > p {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.group-transaction-forms {
+  display: grid;
+  border-top: 1px solid var(--ink);
+  border-left: 1px solid var(--ink);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.group-transaction-forms > form,
+.group-membership-actions {
+  display: grid;
+  min-width: 0;
+  padding: 1.25rem;
+  align-content: start;
+  gap: 0.6rem;
+  border-right: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+
+.group-transaction-forms h4 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.group-transaction-forms label {
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.group-transaction-forms input {
+  min-width: 0;
+  width: 100%;
+  padding: 0.85rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.34);
+  font: inherit;
+}
+
+.group-transaction-forms input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.group-action-help,
+.group-membership-disclosure,
+.group-action-connection-note,
+.group-action-attempt,
+.group-action-completion,
+.group-action-problem {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.group-action-help {
+  min-height: 2.2rem;
+  margin: 0 0 0.4rem;
+}
+
+.group-membership-disclosure,
+.group-action-connection-note {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  border: 1px solid var(--ink);
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.group-membership-buttons,
+.group-action-recovery {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.group-action-attempt,
+.group-action-completion,
+.group-action-problem {
+  margin: 1rem 0 0;
+  padding: 1rem;
+  border: 1px solid currentColor;
+  overflow-wrap: anywhere;
+}
+
+.group-action-attempt {
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.group-action-attempt p,
+.group-action-completion {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.group-action-attempt-error,
+.group-action-problem {
+  color: var(--red);
+  font-weight: 800;
+}
+
+.group-action-attempt-error {
+  margin-top: 0.6rem !important;
+}
+
+.group-action-recovery {
+  margin-top: 0.75rem;
+}
+
+.group-action-completion {
+  background: var(--acid);
+  font-weight: 800;
 }
 
 .post-feed {
@@ -1502,6 +1648,8 @@ footer p {
   .message-console,
   .public-groups-heading,
   .group-browser,
+  .group-transaction-intro,
+  .group-transaction-forms,
   .post-feed-heading,
   .post-list,
   .section-heading,
@@ -1548,7 +1696,9 @@ footer p {
   .group-selector > div,
   .group-list-heading,
   .group-member-list li,
-  .group-member-pagination {
+  .group-member-pagination,
+  .group-membership-buttons,
+  .group-action-recovery {
     align-items: stretch;
     flex-direction: column;
   }

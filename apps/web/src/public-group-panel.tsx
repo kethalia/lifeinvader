@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { Address } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
+import { GroupTransactionConsole } from './group-transaction-console'
+import { parseGroupIdInput } from './group-id'
 import {
   synchronizeGroupDirectory,
   type GroupDirectorySnapshot,
@@ -15,7 +17,6 @@ import { decodeMediaCid } from './media-cid'
 import type { PublishedGroup } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
-const MAX_GROUP_ID = (1n << 256n) - 1n
 const MEMBER_PAGE_SIZE = 25
 
 type GroupDirectoryState =
@@ -41,18 +42,6 @@ const IDLE_DIRECTORY = { phase: 'idle' } as const
 
 function shortValue(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`
-}
-
-function parseGroupId(value: string) {
-  const candidate = value.trim()
-  if (!/^[1-9][0-9]{0,77}$/.test(candidate)) {
-    throw new Error('Enter a positive decimal group ID.')
-  }
-  const groupId = BigInt(candidate)
-  if (groupId > MAX_GROUP_ID) {
-    throw new Error('The group ID exceeds the EVM uint256 limit.')
-  }
-  return groupId
 }
 
 function directoryStatus(state: GroupDirectoryState) {
@@ -333,7 +322,7 @@ export function PublicGroupPanel({
   const submitGroupId = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     try {
-      selectGroup(parseGroupId(groupIdInput))
+      selectGroup(parseGroupIdInput(groupIdInput))
     } catch (error) {
       setSelectionError(
         error instanceof Error ? error.message : 'The group ID is invalid.',
@@ -552,6 +541,12 @@ export function PublicGroupPanel({
             </div>
           ) : null}
         </div>
+
+        <GroupTransactionConsole
+          onSelectGroup={selectGroup}
+          selectedGroupId={selectedGroupId}
+          session={session}
+        />
       </div>
     </section>
   )

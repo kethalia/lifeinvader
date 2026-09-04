@@ -223,6 +223,9 @@ describe('PublicGroupPanel', () => {
     expect(selectedName.parentElement?.textContent).toContain('ID 18')
     expect(screen.getByLabelText<HTMLInputElement>('Group ID').value).toBe('18')
     expect(
+      screen.getByLabelText<HTMLInputElement>('Membership group ID').value,
+    ).toBe('18')
+    expect(
       screen.getByRole<HTMLButtonElement>('button', {
         name: 'Load confirmed members',
       }).disabled,
@@ -354,14 +357,16 @@ describe('PublicGroupPanel', () => {
     expect(readMembers).toHaveBeenLastCalledWith({ limit: 25 })
 
     fireEvent.click(screen.getByRole('button', { name: 'Next members' }))
-    expect(screen.getByTitle(ACCOUNT_B).textContent).toContain('0x0000…bbbb')
+    expect((await screen.findByTitle(ACCOUNT_B)).textContent).toContain(
+      '0x0000…bbbb',
+    )
     expect(screen.getByText('Page 2 · 2 total')).toBeTruthy()
     expect(readMembers).toHaveBeenLastCalledWith({
       after: ACCOUNT_A,
       limit: 25,
     })
     fireEvent.click(screen.getByRole('button', { name: 'Previous members' }))
-    expect(screen.getByTitle(ACCOUNT_A)).toBeTruthy()
+    expect(await screen.findByTitle(ACCOUNT_A)).toBeTruthy()
   })
 
   it('aborts and ignores a directory result from an old wallet chain', async () => {
