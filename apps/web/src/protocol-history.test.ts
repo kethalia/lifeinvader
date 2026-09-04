@@ -282,6 +282,44 @@ describe('protocol history discovery', () => {
       discoverProtocolHistoryBoundary(transient.provider, 1n),
     ).rejects.toBe(transientError)
     expect(isProtocolHistoryUnavailableError(transientError)).toBe(false)
+
+    const wrappedUnavailable = {
+      code: -32_603,
+      data: { code: -32_000, message: 'missing trie node' },
+      message: 'Internal JSON-RPC error.',
+    }
+    const wrapped = providerWithDeployment({
+      onCode: (blockNumber) => {
+        if (blockNumber === 100n) return PROTOCOL_RUNTIME_CODE
+        throw wrappedUnavailable
+      },
+    })
+    const wrappedError = await discoverProtocolHistoryBoundary(
+      wrapped.provider,
+      1n,
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(isProtocolHistoryUnavailableError(wrappedError)).toBe(true)
+    expect((wrappedError as Error & { cause?: unknown }).cause).toBe(
+      wrappedUnavailable,
+    )
+
+    const wrappedTransient = {
+      code: -32_603,
+      data: { code: -32_005, message: 'rate limit exceeded' },
+      message: 'Internal JSON-RPC error.',
+    }
+    const limited = providerWithDeployment({
+      onCode: (blockNumber) => {
+        if (blockNumber === 100n) return PROTOCOL_RUNTIME_CODE
+        throw wrappedTransient
+      },
+    })
+    await expect(
+      discoverProtocolHistoryBoundary(limited.provider, 1n),
+    ).rejects.toBe(wrappedTransient)
   })
 
   it('brackets discovery with the selected chain and anchored head', async () => {
