@@ -465,24 +465,26 @@ describe('App', () => {
     expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
   })
   it('prepares local media, locks publishing, and commits its CID', async () => {
+    let selectedChain = '0x1'
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
-        if (method === 'eth_chainId') return '0x1'
-        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return selectedChain
+        if (method === 'eth_getCode')
+          return selectedChain === '0x1' ? PROTOCOL_RUNTIME_CODE : '0x'
         throw new Error(`Unexpected method: ${method}`)
       }),
     } as Eip1193Provider
-    const walletSession: WalletSessionController = {
+    const walletSession = (chainId: bigint): WalletSessionController => ({
       connect: vi.fn(async () => undefined),
       refresh: vi.fn(async () => undefined),
       session: {
         account: ACCOUNT,
-        chainId: 1n,
+        chainId,
         name: 'Media Wallet',
         provider,
         status: 'connected',
       },
-    }
+    })
     const preparation = deferred<PreparedMediaCar>()
     let rejectPreparation = false
     const prepareMediaAction = vi.fn(() =>
@@ -496,12 +498,12 @@ describe('App', () => {
       hash: TRANSACTION_HASH,
     }))
     const onPostConfirmed = vi.fn()
-    render(
+    const { rerender } = render(
       <WalletPanel
         onPostConfirmed={onPostConfirmed}
         prepareMediaAction={prepareMediaAction}
         publishPostAction={publishPostAction}
-        walletSession={walletSession}
+        walletSession={walletSession(1n)}
       />,
     )
 
@@ -531,6 +533,42 @@ describe('App', () => {
     const mediaInput = screen.getByLabelText(/IPFS media CID/i)
     expect((mediaInput as HTMLInputElement).value).toBe(MEDIA_CID.text)
     expect((mediaInput as HTMLInputElement).readOnly).toBe(true)
+
+    selectedChain = '0x4cb2f'
+    rerender(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        prepareMediaAction={prepareMediaAction}
+        publishPostAction={publishPostAction}
+        walletSession={walletSession(314_159n)}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/permanent public statement/i)).toBeNull(),
+    )
+    expect(
+      screen.getByRole('heading', { name: /Filecoin storage rail/i }),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: /^check Filecoin contracts$/i }),
+    ).toBeTruthy()
+    expect(screen.getByText(/return.*publication chain 1/i)).toBeTruthy()
+
+    selectedChain = '0x1'
+    rerender(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        prepareMediaAction={prepareMediaAction}
+        publishPostAction={publishPostAction}
+        walletSession={walletSession(1n)}
+      />,
+    )
+    const restoredMediaInput = await screen.findByLabelText(/IPFS media CID/i)
+    const restoredTextarea = screen.getByLabelText(
+      /permanent public statement/i,
+    )
+    expect((restoredMediaInput as HTMLInputElement).value).toBe(MEDIA_CID.text)
+    expect(screen.getAllByText('proof.gif')).toHaveLength(2)
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
 
     await waitFor(() => expect(publishPostAction).toHaveBeenCalledTimes(1))
@@ -539,11 +577,13 @@ describe('App', () => {
       mediaCid: MEDIA_CID.bytes,
     })
     expect(onPostConfirmed).toHaveBeenCalledTimes(1)
-    expect((textarea as HTMLTextAreaElement).value).toBe('')
-    expect((mediaInput as HTMLInputElement).value).toBe('')
+    expect((restoredTextarea as HTMLTextAreaElement).value).toBe('')
+    expect((restoredMediaInput as HTMLInputElement).value).toBe('')
     expect(screen.queryByText(/is prepared locally/i)).toBeNull()
 
-    fireEvent.change(textarea, { target: { value: 'Do not publish me yet.' } })
+    fireEvent.change(restoredTextarea, {
+      target: { value: 'Do not publish me yet.' },
+    })
     rejectPreparation = true
     fireEvent.change(screen.getByLabelText(/prepare a local image/i), {
       target: { files: [new File(['bad'], 'bad.gif')] },
@@ -552,11 +592,11 @@ describe('App', () => {
       /unreadable file/i,
     )
     expect(buttonDisabled(/publish on-chain/i)).toBe(true)
-    expect((mediaInput as HTMLInputElement).disabled).toBe(true)
+    expect((restoredMediaInput as HTMLInputElement).disabled).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: /clear media error/i }))
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
-    expect((mediaInput as HTMLInputElement).disabled).toBe(false)
+    expect((restoredMediaInput as HTMLInputElement).disabled).toBe(false)
   })
   it('preserves an unknown post while another chain starts a write', async () => {
     let chainId = '0x1'
