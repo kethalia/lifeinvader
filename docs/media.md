@@ -31,9 +31,9 @@ The upload itself is off-chain, so it cannot be made atomic with an EVM transact
 
 ### Browser preparation boundary
 
-The client now has a deterministic preparation primitive for the paid path. It reads a selected file entirely in the browser, hashes the original bytes into a CIDv1 `raw` commitment, and packages that same block in a [single-root CARv1 archive](https://ipld.io/specs/transport/car/carv1/). The raw root is the CID eventually published to Lifeinvader; the CAR is the artifact handed to the storage adapter. File name and browser-reported media type are deliberately excluded from the hash, so renaming identical bytes cannot change their address.
+The client now has a deterministic preparation primitive for the paid path. It transforms a selected file entirely in the browser with the IPFS UnixFS importer's `unixfs-v1-2025` profile and packages the resulting DAG in a [single-root CARv1 archive](https://ipld.io/specs/transport/car/carv1/). Files up to 1 MiB retain a CIDv1 `raw` root; larger files are divided into interoperable 1 MiB raw leaves under a `dag-pb` UnixFS root. The root is the CID eventually published to Lifeinvader, while the CAR contains every block handed to the storage adapter. File name and browser-reported media type are deliberately excluded from the DAG, so renaming identical bytes cannot change their address.
 
-Preparation does not upload, pay, pin, or publish anything. It accepts at most 32 MiB per file because this first implementation holds both the source bytes and CAR in memory. Very small inputs whose complete CAR is below the storage protocol's 127-byte minimum are rejected. A later streaming implementation can raise the browser limit without silently risking tab-wide memory exhaustion.
+Preparation does not upload, pay, pin, or publish anything. It accepts at most 32 MiB per file because this first implementation holds the generated CAR and intermediate blocks in memory. Very small inputs whose complete CAR is below the storage protocol's 127-byte minimum are rejected. A later streaming implementation can raise the browser limit without silently risking tab-wide memory exhaustion.
 
 ## Optional smart-contract payment
 

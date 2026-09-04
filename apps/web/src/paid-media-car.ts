@@ -1,7 +1,6 @@
 import { CarBufferWriter } from '@ipld/car'
-import * as raw from 'multiformats/codecs/raw'
+import { importByteStream, type WritableStorage } from 'ipfs-unixfs-importer'
 import { CID } from 'multiformats/cid'
-import { sha256 } from 'multiformats/hashes/sha2'
 import { parseMediaCid, type MediaCid } from './media-cid'
 
 export const MAX_PAID_MEDIA_BYTES = 32 * 1024 * 1024
@@ -18,20 +17,35 @@ export type PreparedMediaCar = {
   rootCid: CID
 }
 
-type MediaFile = Pick<File, 'arrayBuffer' | 'name' | 'size' | 'type'>
+type MediaFile = Pick<File, 'name' | 'size' | 'stream' | 'type'>
+
+export type PaidMediaPreparationOptions = {
+  onProgress?: (processedBytes: number, totalBytes: number) => void
+  signal?: AbortSignal
+}
+
+class PaidMediaPreparationError extends Error {}
+
+type CarBlock = {
+  bytes: Uint8Array
+  cid: CID
+}
 
 function invalidMediaFile(reason: string, options?: ErrorOptions) {
-  return new Error(`Cannot prepare media: ${reason}`, options)
+  return new PaidMediaPreparationError(
+    `Cannot prepare media: ${reason}`,
+    options,
+  )
 }
 
 function assertMediaFile(file: MediaFile) {
   if (
     !file ||
-    typeof file.arrayBuffer !== 'function' ||
     typeof file.name !== 'string' ||
     typeof file.size !== 'number' ||
     !Number.isSafeInteger(file.size) ||
     file.size < 0 ||
+    typeof file.stream !== 'function' ||
     typeof file.type !== 'string'
   ) {
     throw invalidMediaFile('select a valid local file.')
@@ -50,45 +64,140 @@ function assertNotAborted(signal?: AbortSignal) {
   throw new DOMException('Media preparation was cancelled.', 'AbortError')
 }
 
-function encodeCar(rootCid: CID, bytes: Uint8Array) {
-  const block = { bytes, cid: rootCid }
-  const byteLength =
-    CarBufferWriter.headerLength({ roots: [rootCid] }) +
-    CarBufferWriter.blockLength(block)
+function encodeCar(rootCid: CID, blocks: CarBlock[], signal?: AbortSignal) {
+  const byteLength = blocks.reduce(
+    (length, block) => {
+      return length + CarBufferWriter.blockLength(block)
+    },
+    CarBufferWriter.headerLength({ roots: [rootCid] }),
+  )
   const writer = CarBufferWriter.createWriter(new ArrayBuffer(byteLength), {
     roots: [rootCid],
   })
-  return writer.write(block).close()
+  for (const block of blocks) {
+    assertNotAborted(signal)
+    writer.write(block)
+  }
+  return writer.close()
 }
 
 /**
- * Hash a browser file as one raw IPLD block and wrap it in a single-root CARv1.
- * The raw root CID addresses the original bytes, while the CAR is the artifact
- * sent to an optional paid storage adapter.
+ * Encode a browser file as an interoperable UnixFS DAG inside a single-root
+ * CARv1. Small files retain a raw root; larger files are split into 1 MiB raw
+ * leaves under a dag-pb root by the unixfs-v1-2025 profile.
  */
 export async function preparePaidMediaCar(
   file: MediaFile,
-  options: { signal?: AbortSignal } = {},
+  options: PaidMediaPreparationOptions = {},
 ): Promise<PreparedMediaCar> {
   assertMediaFile(file)
   assertNotAborted(options.signal)
 
-  let bytes: Uint8Array
+  const blocksByCid = new Map<string, CarBlock>()
+  const blockstore: WritableStorage = {
+    async put(cid, bytes) {
+      const chunks: Uint8Array[] = []
+      if (bytes instanceof Uint8Array) {
+        chunks.push(bytes)
+      } else {
+        for await (const chunk of bytes) chunks.push(chunk)
+      }
+      const byteLength = chunks.reduce((total, chunk) => {
+        return total + chunk.byteLength
+      }, 0)
+      const blockBytes = new Uint8Array(byteLength)
+      let offset = 0
+      for (const chunk of chunks) {
+        blockBytes.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+
+      const normalizedCid = CID.decode(cid.bytes)
+      blocksByCid.set(normalizedCid.toString(), {
+        bytes: blockBytes,
+        cid: normalizedCid,
+      })
+      return cid
+    },
+  }
+
+  let bytesProcessed = 0
+  async function* content() {
+    const reader = file.stream().getReader()
+    let completed = false
+    try {
+      while (true) {
+        assertNotAborted(options.signal)
+        const chunk = await reader.read()
+        assertNotAborted(options.signal)
+        if (chunk.done) {
+          completed = true
+          break
+        }
+        if (!(chunk.value instanceof Uint8Array)) {
+          throw invalidMediaFile('the selected file returned invalid bytes.')
+        }
+
+        const nextBytesProcessed = bytesProcessed + chunk.value.byteLength
+        if (
+          !Number.isSafeInteger(nextBytesProcessed) ||
+          nextBytesProcessed > file.size
+        ) {
+          throw invalidMediaFile(
+            'the selected file changed while it was being read.',
+          )
+        }
+        bytesProcessed = nextBytesProcessed
+        options.onProgress?.(bytesProcessed, file.size)
+        yield chunk.value
+      }
+    } finally {
+      if (!completed) {
+        try {
+          await reader.cancel(options.signal?.reason)
+        } catch {
+          // Preserve the original read, validation, or cancellation failure.
+        }
+      }
+      reader.releaseLock()
+    }
+  }
+
+  let imported: Awaited<ReturnType<typeof importByteStream>>
   try {
-    bytes = new Uint8Array(await file.arrayBuffer())
+    imported = await importByteStream(content(), blockstore, {
+      profile: 'unixfs-v1-2025',
+    })
   } catch (cause) {
     assertNotAborted(options.signal)
-    throw invalidMediaFile('the selected file could not be read.', { cause })
+    if (cause instanceof PaidMediaPreparationError) throw cause
+    throw invalidMediaFile(
+      'the selected file could not be read and encoded as UnixFS.',
+      { cause },
+    )
   }
 
   assertNotAborted(options.signal)
-  if (bytes.byteLength !== file.size) {
+  if (bytesProcessed !== file.size) {
     throw invalidMediaFile('the selected file changed while it was being read.')
   }
 
-  const rootCid = CID.createV1(raw.code, await sha256.digest(bytes))
-  assertNotAborted(options.signal)
-  const carBytes = encodeCar(rootCid, bytes)
+  const rootCid = CID.decode(imported.cid.bytes)
+  if (!blocksByCid.has(rootCid.toString())) {
+    throw invalidMediaFile('the generated UnixFS root block is missing.')
+  }
+  const blocks = [...blocksByCid.values()].sort((left, right) => {
+    const leftText = left.cid.toString()
+    const rightText = right.cid.toString()
+    if (leftText < rightText) return -1
+    if (leftText > rightText) return 1
+    return 0
+  })
+  if (blocks.some(({ bytes }) => bytes.byteLength > 2 * 1024 * 1024)) {
+    throw invalidMediaFile('the generated UnixFS DAG has an oversized block.')
+  }
+
+  const carBytes = encodeCar(rootCid, blocks, options.signal)
   if (carBytes.byteLength < MIN_PAID_MEDIA_CAR_BYTES) {
     throw invalidMediaFile(
       `the resulting archive is below the ${String(MIN_PAID_MEDIA_CAR_BYTES)}-byte paid-storage minimum.`,
