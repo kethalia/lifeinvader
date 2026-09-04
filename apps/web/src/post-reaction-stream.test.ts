@@ -293,7 +293,7 @@ describe('post reaction stream synchronization', () => {
     })
   })
 
-  it('rediscovers a replaced history anchor before mutating either event cache', async () => {
+  it('stops at the per-filter range budget when the history anchor changes', async () => {
     let branch = 'a'
     let deploymentBlock = 37n
     let reorganized = false
@@ -302,7 +302,7 @@ describe('post reaction stream synchronization', () => {
     const provider: Eip1193Provider = {
       async request({ method, params }) {
         if (method === 'eth_chainId') {
-          if (scanned && !reorganized) {
+          if (logQueries.length === 2 && scanned && !reorganized) {
             branch = 'b'
             deploymentBlock = 41n
             reorganized = true
@@ -339,13 +339,12 @@ describe('post reaction stream synchronization', () => {
 
     await expect(
       synchronizePostReactionStream(provider, 1n, { storage: storage() }),
-    ).resolves.toMatchObject({ startBlock: 41n })
+    ).rejects.toThrow(/history anchor changed/i)
     expect(logQueries).toEqual([
       { fromBlock: '0x25', topic: LIKE_SET_TOPIC },
-      { fromBlock: '0x29', topic: LIKE_SET_TOPIC },
-      { fromBlock: '0x29', topic: REPOST_PUBLISHED_TOPIC },
+      { fromBlock: '0x25', topic: REPOST_PUBLISHED_TOPIC },
     ])
-    expect(apply).toHaveBeenCalledTimes(2)
+    expect(apply).toHaveBeenCalledTimes(1)
   })
 
   it('falls back both streams to genesis when historical code is unavailable', async () => {

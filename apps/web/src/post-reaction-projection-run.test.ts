@@ -1,5 +1,5 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   encodeAbiParameters,
   keccak256,
@@ -9,7 +9,11 @@ import {
   type Address,
   type Hex,
 } from 'viem'
-import { openEventCache, type EventCachePosition } from './event-cache'
+import {
+  BrowserEventCache,
+  openEventCache,
+  type EventCachePosition,
+} from './event-cache'
 import type { Eip1193Provider } from './ethereum'
 import {
   createEventCursor,
@@ -176,8 +180,8 @@ function anchorProvider() {
     head: HEAD,
     safeHeadHash: blockHash(SAFE_HEAD),
   }
-  const provider: Eip1193Provider = {
-    async request({ method, params }) {
+  const provider = {
+    request: vi.fn(async ({ method, params }) => {
       if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
       if (method === 'eth_chainId') return '0x1'
       if (method === 'eth_blockNumber') return toHex(control.head)
@@ -196,8 +200,8 @@ function anchorProvider() {
         throw new Error('A caught-up reaction stream must not request logs.')
       }
       throw new Error(`Unexpected RPC method: ${method}`)
-    },
-  }
+    }),
+  } satisfies Eip1193Provider
   return { control, provider }
 }
 
@@ -242,6 +246,7 @@ async function prepareProjection(
   return {
     anchor: synchronized.projectionAnchor,
     control,
+    provider,
     storage: storageOptions,
   }
 }
@@ -505,6 +510,45 @@ describe('post reaction projection run', () => {
     await expect(run.advance()).rejects.toThrow(/checkpoint changed/i)
     expect(run.snapshot.phase).toBe('failed')
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
+  })
+
+  it('does not start provider authentication after a projection is closed', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    expect(run.snapshot.phase).toBe('authenticate')
+
+    let enterAuthentication!: () => void
+    let releaseAuthentication!: () => void
+    const authenticationEntered = new Promise<void>((resolve) => {
+      enterAuthentication = resolve
+    })
+    const authenticationBlocked = new Promise<void>((resolve) => {
+      releaseAuthentication = resolve
+    })
+    const authenticate = vi
+      .spyOn(BrowserEventCache.prototype, 'authenticateBaselines')
+      .mockImplementationOnce(async () => {
+        enterAuthentication()
+        await authenticationBlocked
+      })
+    const providerRequestCount = prepared.provider.request.mock.calls.length
+
+    const advancing = run.advance()
+    await authenticationEntered
+    run.close()
+    releaseAuthentication()
+
+    await expect(advancing).rejects.toThrow(/cancelled/i)
+    expect(run.snapshot.phase).toBe('closed')
+    expect(authenticate).toHaveBeenCalledTimes(1)
+    expect(prepared.provider.request).toHaveBeenCalledTimes(
+      providerRequestCount,
+    )
   })
 
   it('discards a partial projection when its scan session is invalidated', async () => {

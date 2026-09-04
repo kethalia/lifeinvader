@@ -38,7 +38,6 @@ import {
 
 export const POST_REACTION_EVENT_PAGE_SIZE = 200
 export const POST_REACTION_EVENT_START_BLOCK = 0n
-const MAX_PROTOCOL_HISTORY_SYNC_RETRIES = 1
 
 type ReactionEventStreamSnapshot = {
   cacheReset: boolean
@@ -298,6 +297,7 @@ export async function authenticateIssuedPostReactionProjectionAnchor(
   if (typeof authenticateCache !== 'function') {
     throw new Error('The post reaction cache authenticator is invalid.')
   }
+  assertActive(signal)
   const issued = issuedProjectionAnchors.get(anchor)!
   const interruption = new AbortController()
   let contextChanged = false
@@ -645,112 +645,95 @@ export const synchronizePostReactionStream: PostReactionStreamSynchronizer =
           'Verified Lifeinvader v1 is required before this chain can provide post reactions.',
         )
       }
-      let historyRetries = 0
-      while (true) {
-        let historyAnchor: ProtocolBlockFingerprint | undefined
-        let startBlock = POST_REACTION_EVENT_START_BLOCK
-        try {
-          const boundary = await (
-            options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
-          )(provider, chainId, {
-            finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-            signal: interruption.signal,
-          })
-          assertContextActive()
-          historyAnchor = boundary.head
-          startBlock = boundary.startBlock
-        } catch (error) {
-          assertContextActive()
-          if (!isProtocolHistoryUnavailableError(error)) throw error
-        }
-
-        let likes: SynchronizedStream<PostLikeSet>
-        let reposts: SynchronizedStream<PublishedRepost>
-        try {
-          likes = await synchronizeStream(
-            provider,
-            chainId,
-            LIKE_STREAM,
-            startBlock,
-            historyAnchor,
-            interruption.signal,
-            options.storage,
-          )
-          assertContextActive()
-          reposts = await synchronizeStream(
-            provider,
-            chainId,
-            REPOST_STREAM,
-            startBlock,
-            historyAnchor,
-            interruption.signal,
-            options.storage,
-          )
-          assertContextActive()
-        } catch (error) {
-          assertContextActive()
-          if (!(error instanceof ProtocolHistoryAnchorChangedError)) throw error
-          if (historyRetries >= MAX_PROTOCOL_HISTORY_SYNC_RETRIES) {
-            throw new Error(
-              'The protocol history anchor kept changing during post reaction synchronization. Retry after the chain stabilizes.',
-            )
-          }
-          historyRetries += 1
-          continue
-        }
-
-        const shared = await verifyCombinedSnapshot(
-          provider,
-          chainId,
-          likes,
-          reposts,
-          interruption.signal,
-        )
+      let historyAnchor: ProtocolBlockFingerprint | undefined
+      let startBlock = POST_REACTION_EVENT_START_BLOCK
+      try {
+        const boundary = await (
+          options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+        )(provider, chainId, {
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+          signal: interruption.signal,
+        })
         assertContextActive()
-        const deploymentStillPending =
-          shared.safeHead !== undefined && startBlock > shared.safeHead
-        const likesCaughtUp =
-          shared.safeHead === undefined ||
-          (!deploymentStillPending && likes.nextBlock > shared.safeHead)
-        const repostsCaughtUp =
-          shared.safeHead === undefined ||
-          (!deploymentStillPending && reposts.nextBlock > shared.safeHead)
-        if (likesCaughtUp && repostsCaughtUp) {
-          assertSharedProjectionCheckpoint(likes, reposts, shared.safeHead)
-        }
-        return {
-          likes: {
-            cacheReset: likes.cacheReset,
-            caughtUp: likesCaughtUp,
-            head: shared.head,
-            indexedThrough: likes.indexedThrough,
-            recentSignals: likes.events,
-            safeHead: shared.safeHead,
-            scannedRanges: likes.scannedRanges,
-          },
-          projectionAnchor:
-            likesCaughtUp && repostsCaughtUp
-              ? issueProjectionAnchor(
-                  provider,
-                  chainId,
-                  likes.position,
-                  reposts.position,
-                  shared.head,
-                  shared.safeHead,
-                  startBlock,
-                )
-              : undefined,
-          reposts: {
-            cacheReset: reposts.cacheReset,
-            caughtUp: repostsCaughtUp,
-            head: shared.head,
-            indexedThrough: reposts.indexedThrough,
-            recentReposts: reposts.events,
-            safeHead: shared.safeHead,
-            scannedRanges: reposts.scannedRanges,
-          },
-          startBlock,
-        }
+        historyAnchor = boundary.head
+        startBlock = boundary.startBlock
+      } catch (error) {
+        assertContextActive()
+        if (!isProtocolHistoryUnavailableError(error)) throw error
+      }
+
+      const likes = await synchronizeStream(
+        provider,
+        chainId,
+        LIKE_STREAM,
+        startBlock,
+        historyAnchor,
+        interruption.signal,
+        options.storage,
+      )
+      assertContextActive()
+      const reposts = await synchronizeStream(
+        provider,
+        chainId,
+        REPOST_STREAM,
+        startBlock,
+        historyAnchor,
+        interruption.signal,
+        options.storage,
+      )
+      assertContextActive()
+
+      const shared = await verifyCombinedSnapshot(
+        provider,
+        chainId,
+        likes,
+        reposts,
+        interruption.signal,
+      )
+      assertContextActive()
+      const deploymentStillPending =
+        shared.safeHead !== undefined && startBlock > shared.safeHead
+      const likesCaughtUp =
+        shared.safeHead === undefined ||
+        (!deploymentStillPending && likes.nextBlock > shared.safeHead)
+      const repostsCaughtUp =
+        shared.safeHead === undefined ||
+        (!deploymentStillPending && reposts.nextBlock > shared.safeHead)
+      if (likesCaughtUp && repostsCaughtUp) {
+        assertSharedProjectionCheckpoint(likes, reposts, shared.safeHead)
+      }
+      return {
+        likes: {
+          cacheReset: likes.cacheReset,
+          caughtUp: likesCaughtUp,
+          head: shared.head,
+          indexedThrough: likes.indexedThrough,
+          recentSignals: likes.events,
+          safeHead: shared.safeHead,
+          scannedRanges: likes.scannedRanges,
+        },
+        projectionAnchor:
+          likesCaughtUp && repostsCaughtUp
+            ? issueProjectionAnchor(
+                provider,
+                chainId,
+                likes.position,
+                reposts.position,
+                shared.head,
+                shared.safeHead,
+                startBlock,
+              )
+            : undefined,
+        reposts: {
+          cacheReset: reposts.cacheReset,
+          caughtUp: repostsCaughtUp,
+          head: shared.head,
+          indexedThrough: reposts.indexedThrough,
+          recentReposts: reposts.events,
+          safeHead: shared.safeHead,
+          scannedRanges: reposts.scannedRanges,
+        },
+        startBlock,
       }
     } catch (error) {
       assertContextActive()
