@@ -8,9 +8,10 @@ import {
 } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getAddress, type Address, type Hex } from 'viem'
-import type {
-  DirectMessageStreamSnapshot,
-  DirectMessageStreamSynchronizer,
+import {
+  DIRECT_MESSAGE_START_BLOCK,
+  type DirectMessageStreamSnapshot,
+  type DirectMessageStreamSynchronizer,
 } from './direct-message-stream'
 import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
@@ -94,6 +95,7 @@ function snapshot(
     recentMessages: messages,
     safeHead: 18n,
     scannedRanges: 1,
+    startBlock: DIRECT_MESSAGE_START_BLOCK,
   }
 }
 
@@ -493,6 +495,42 @@ describe('PublicMessagePanel', () => {
     expect(renderedMessages[1]?.textContent).toContain('Newer public event.')
     expect(screen.getByText(MEDIA_CID.text)).toBeTruthy()
     expect(screen.getAllByText(/newest retained page/i)).toHaveLength(2)
+  })
+
+  it('shows a confirmation check without exposing pending deployment history', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi.fn<DirectMessageStreamSynchronizer>(async () => ({
+      ...snapshot([], false),
+      indexedThrough: undefined,
+      safeHead: 18n,
+      scannedRanges: 0,
+      startBlock: 20n,
+    }))
+    render(
+      <PublicMessagePanel
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText(/recipient address/i), {
+      target: { value: RECIPIENT },
+    })
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /load confirmed public conversation/i,
+      }),
+    )
+
+    expect(
+      await screen.findByRole('button', {
+        name: /check message confirmations/i,
+      }),
+    ).toBeTruthy()
+    expect(screen.getByText(/history can begin at block 20/i)).toBeTruthy()
+    expect(screen.getByText(/confirmed head is still 18/i)).toBeTruthy()
+    expect(screen.getByText(/no message log range was requested/i)).toBeTruthy()
+    expect(screen.queryByRole('list')).toBeNull()
   })
 
   it('aborts a selected conversation and ignores its stale result', async () => {

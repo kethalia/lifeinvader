@@ -15,6 +15,13 @@ import {
 } from './protocol-events'
 import { getDirectConversationId, inspectProtocol } from './protocol'
 import {
+  isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
+  resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
+import {
   beforeDeadline,
   parseChainId,
   WALLET_READ_TIMEOUT_MS,
@@ -34,6 +41,7 @@ export type DirectMessageStreamSnapshot = {
   recentMessages: readonly PublishedDirectMessage[]
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type DirectMessageStreamStorageOptions = Pick<
@@ -42,6 +50,7 @@ export type DirectMessageStreamStorageOptions = Pick<
 >
 
 export type SynchronizeDirectMessageStreamOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: DirectMessageStreamStorageOptions
 }
@@ -233,13 +242,14 @@ export async function resetDirectMessageStreamCache(
   firstAccount: Address,
   secondAccount: Address,
   storage: DirectMessageStreamStorageOptions = {},
+  startBlock = DIRECT_MESSAGE_START_BLOCK,
 ) {
   const { filter } = getConversation(firstAccount, secondAccount)
   const seed = createEventCursor({
     chainId,
     filter,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: DIRECT_MESSAGE_START_BLOCK,
+    startBlock,
   })
   const cache = await openEventCache({ ...storage, filter })
   try {
@@ -256,12 +266,6 @@ export const synchronizeDirectMessageStream: DirectMessageStreamSynchronizer =
       firstAccount,
       secondAccount,
     )
-    const seed = createEventCursor({
-      chainId,
-      filter,
-      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-      startBlock: DIRECT_MESSAGE_START_BLOCK,
-    })
     const interruption = new AbortController()
     let contextChanged = false
     const interruptContext = () => {
@@ -296,6 +300,28 @@ export const synchronizeDirectMessageStream: DirectMessageStreamSynchronizer =
           'Verified Lifeinvader v1 is required before this chain can provide public messages.',
         )
       }
+      let historyAnchor: ProtocolBlockFingerprint | undefined
+      let startBlock = DIRECT_MESSAGE_START_BLOCK
+      try {
+        const boundary = await (
+          options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+        )(provider, chainId, {
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+          signal: interruption.signal,
+        })
+        assertContextActive()
+        historyAnchor = boundary.head
+        startBlock = boundary.startBlock
+      } catch (error) {
+        assertContextActive()
+        if (!isProtocolHistoryUnavailableError(error)) throw error
+      }
+      const seed = createEventCursor({
+        chainId,
+        filter,
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        startBlock,
+      })
       const cache = await openEventCache({ ...options.storage, filter })
       try {
         assertContextActive()
@@ -318,6 +344,23 @@ export const synchronizeDirectMessageStream: DirectMessageStreamSynchronizer =
         })
         assertContextActive()
         decodeMessageLogs(result.logs, conversationId, first, second)
+        // The discovered head commits to the ancestry that established
+        // startBlock. Never persist a range if that ancestry was replaced.
+        if (
+          historyAnchor &&
+          !(await protocolHistoryAnchorIsCanonical(
+            provider,
+            chainId,
+            historyAnchor,
+            { signal: interruption.signal },
+          ))
+        ) {
+          assertContextActive()
+          throw new Error(
+            'The protocol history anchor changed during direct-message synchronization. Retry after the chain stabilizes.',
+          )
+        }
+        assertContextActive()
         await cache.apply(before, result)
         assertContextActive()
         const after = await cache.readLatest(seed, DIRECT_MESSAGE_PAGE_SIZE)
@@ -387,8 +430,11 @@ export const synchronizeDirectMessageStream: DirectMessageStreamSynchronizer =
           finalHead >= POST_FEED_CONFIRMATION_DEPTH
             ? finalHead - POST_FEED_CONFIRMATION_DEPTH
             : undefined
+        const deploymentStillPending =
+          safeHead !== undefined && after.cursor.startBlock > safeHead
         const caughtUp =
-          safeHead === undefined || after.cursor.nextBlock > safeHead
+          safeHead === undefined ||
+          (!deploymentStillPending && after.cursor.nextBlock > safeHead)
         if (
           caughtUp &&
           safeHead !== undefined &&
@@ -407,6 +453,7 @@ export const synchronizeDirectMessageStream: DirectMessageStreamSynchronizer =
           recentMessages,
           safeHead,
           scannedRanges: result.scannedRanges,
+          startBlock,
         }
       } finally {
         cache.close()
