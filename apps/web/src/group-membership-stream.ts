@@ -18,6 +18,13 @@ import {
 } from './protocol-events'
 import { inspectProtocol } from './protocol'
 import {
+  isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
+  resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
+import {
   beforeDeadline,
   parseChainId,
   WALLET_READ_TIMEOUT_MS,
@@ -27,6 +34,9 @@ import {
 
 export const GROUP_MEMBERSHIP_EVENT_PAGE_SIZE = 200
 export const GROUP_MEMBERSHIP_EVENT_START_BLOCK = 0n
+
+export type GroupMembershipHistoryBoundaryKind =
+  'confirmed' | 'genesis-fallback' | 'pending-confirmation'
 
 export type GroupMembershipProjectionAnchor = {
   readonly chainId: bigint
@@ -41,11 +51,13 @@ export type GroupMembershipStreamSnapshot = {
   caughtUp: boolean
   groupId: bigint
   head: bigint
+  historyBoundaryKind: GroupMembershipHistoryBoundaryKind
   indexedThrough?: bigint
   projectionAnchor?: GroupMembershipProjectionAnchor
   recentSignals: readonly GroupMembershipSet[]
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type GroupMembershipStreamStorageOptions = Pick<
@@ -54,6 +66,7 @@ export type GroupMembershipStreamStorageOptions = Pick<
 >
 
 export type SynchronizeGroupMembershipStreamOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: GroupMembershipStreamStorageOptions
 }
@@ -404,13 +417,14 @@ export async function resetGroupMembershipStreamCache(
   chainId: bigint,
   groupId: bigint,
   storage: GroupMembershipStreamStorageOptions = {},
+  startBlock = GROUP_MEMBERSHIP_EVENT_START_BLOCK,
 ) {
   const { filter } = getGroup(groupId)
   const seed = createEventCursor({
     chainId,
     filter,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: GROUP_MEMBERSHIP_EVENT_START_BLOCK,
+    startBlock,
   })
   const cache = await openEventCache({ ...storage, filter })
   try {
@@ -424,12 +438,6 @@ export const synchronizeGroupMembershipStream: GroupMembershipStreamSynchronizer
   async (provider, chainId, selectedGroupId, options = {}) => {
     assertActive(options.signal)
     const { filter, groupId } = getGroup(selectedGroupId)
-    const seed = createEventCursor({
-      chainId,
-      filter,
-      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-      startBlock: GROUP_MEMBERSHIP_EVENT_START_BLOCK,
-    })
     const interruption = new AbortController()
     let contextChanged = false
     const interruptContext = () => {
@@ -464,6 +472,77 @@ export const synchronizeGroupMembershipStream: GroupMembershipStreamSynchronizer
           'Verified Lifeinvader v1 is required before this chain can provide public group membership.',
         )
       }
+      let historyAnchor: ProtocolBlockFingerprint | undefined
+      let historyBoundaryKind: GroupMembershipHistoryBoundaryKind =
+        'genesis-fallback'
+      let startBlock = GROUP_MEMBERSHIP_EVENT_START_BLOCK
+      try {
+        const boundary = await (
+          options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+        )(provider, chainId, {
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+          signal: interruption.signal,
+        })
+        assertContextActive()
+        historyAnchor = boundary.head
+        historyBoundaryKind = boundary.kind
+        startBlock = boundary.startBlock
+      } catch (error) {
+        assertContextActive()
+        if (!isProtocolHistoryUnavailableError(error)) throw error
+      }
+      if (historyBoundaryKind === 'pending-confirmation') {
+        if (
+          !historyAnchor ||
+          !(await protocolHistoryAnchorIsCanonical(
+            provider,
+            chainId,
+            historyAnchor,
+            { signal: interruption.signal },
+          ))
+        ) {
+          assertContextActive()
+          throw new Error(
+            'The protocol history anchor changed during group-membership synchronization. Retry after the chain stabilizes.',
+          )
+        }
+        assertContextActive()
+        const finalHead = await readSelectedHead(
+          provider,
+          chainId,
+          interruption.signal,
+        )
+        assertContextActive()
+        if (finalHead < historyAnchor.blockNumber) {
+          throw new Error(
+            'The wallet head moved behind the group-membership history anchor.',
+          )
+        }
+        await assertSelectedChain(provider, chainId, interruption.signal)
+        assertContextActive()
+        return {
+          cacheReset: false,
+          caughtUp: false,
+          groupId,
+          head: finalHead,
+          historyBoundaryKind,
+          indexedThrough: undefined,
+          projectionAnchor: undefined,
+          recentSignals: [],
+          safeHead:
+            finalHead >= POST_FEED_CONFIRMATION_DEPTH
+              ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+              : undefined,
+          scannedRanges: 0,
+          startBlock,
+        }
+      }
+      const seed = createEventCursor({
+        chainId,
+        filter,
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        startBlock,
+      })
       const cache = await openEventCache({ ...options.storage, filter })
       try {
         assertContextActive()
@@ -492,6 +571,23 @@ export const synchronizeGroupMembershipStream: GroupMembershipStreamSynchronizer
         })
         assertContextActive()
         decodeMembershipLogs(result.logs, groupId)
+        // The discovered head commits to the ancestry that established
+        // startBlock. Never persist a range if that ancestry was replaced.
+        if (
+          historyAnchor &&
+          !(await protocolHistoryAnchorIsCanonical(
+            provider,
+            chainId,
+            historyAnchor,
+            { signal: interruption.signal },
+          ))
+        ) {
+          assertContextActive()
+          throw new Error(
+            'The protocol history anchor changed during group-membership synchronization. Retry after the chain stabilizes.',
+          )
+        }
+        assertContextActive()
         await cache.apply(before, result)
         assertContextActive()
         const after = await cache.readLatest(
@@ -564,7 +660,7 @@ export const synchronizeGroupMembershipStream: GroupMembershipStreamSynchronizer
             ? finalHead - POST_FEED_CONFIRMATION_DEPTH
             : undefined
         const caughtUp =
-          safeHead === undefined || after.cursor.nextBlock > safeHead
+          safeHead !== undefined && after.cursor.nextBlock > safeHead
         if (
           caughtUp &&
           safeHead !== undefined &&
@@ -584,6 +680,7 @@ export const synchronizeGroupMembershipStream: GroupMembershipStreamSynchronizer
           caughtUp,
           groupId,
           head: finalHead,
+          historyBoundaryKind,
           indexedThrough,
           projectionAnchor: caughtUp
             ? issueProjectionAnchor(
@@ -598,6 +695,7 @@ export const synchronizeGroupMembershipStream: GroupMembershipStreamSynchronizer
           recentSignals,
           safeHead,
           scannedRanges: result.scannedRanges,
+          startBlock,
         }
       } finally {
         cache.close()

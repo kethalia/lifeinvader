@@ -96,24 +96,35 @@ function membershipStatus(
     return 'Reading one bounded range of confirmed membership signals…'
   }
   if (state.phase === 'catchup') {
+    if (state.stream.safeHead === undefined) {
+      return `Lifeinvader membership history can begin at block ${state.stream.startBlock.toString()}, but this chain does not have a confirmed head yet. No membership log range was requested. Wait for deployment confirmations, then check again.`
+    }
+    if (state.stream.historyBoundaryKind === 'pending-confirmation') {
+      return `The earliest possible Lifeinvader deployment block is ${state.stream.startBlock.toString()}, but the deployment itself has not reached the confirmed head ${state.stream.safeHead.toString()} yet. No membership log range was requested. Wait for deployment confirmations, then check again.`
+    }
     const reset = state.stream.cacheReset
       ? 'The disposable membership cache was reset. '
       : ''
-    return `${reset}More confirmed membership history remains. Indexed through block ${state.stream.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.stream.safeHead?.toString() ?? 'unknown'}.`
+    return `${reset}More confirmed membership history remains from block ${state.stream.startBlock.toString()}. Indexed through block ${state.stream.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.stream.safeHead.toString()}.`
   }
   if (state.phase === 'projecting') {
     return `Local ${state.projection.phase} projection processed ${state.projection.logsProcessed.toString()} signals across ${state.projection.pagesScanned.toString()} complete-block pages; ${state.projection.membersRetained.toString()} current members are retained only as unpublished local work until authentication completes.`
   }
   if (state.phase === 'complete') {
     const boundary = state.projection.safeHead?.toString() ?? 'none yet'
-    return `Membership is authenticated through confirmed block ${boundary}. ${state.projection.membersRetained.toString()} current members.`
+    return `Membership is authenticated from block ${state.projection.startBlock.toString()} through confirmed block ${boundary}. ${state.projection.membersRetained.toString()} current members.`
   }
   return state.message
 }
 
 function membershipButtonLabel(state: GroupMembershipReadModelState) {
   if (state.phase === 'synchronizing') return 'Reading membership signals…'
-  if (state.phase === 'catchup') return 'Load next membership range'
+  if (state.phase === 'catchup') {
+    return state.stream.historyBoundaryKind === 'pending-confirmation' ||
+      state.stream.safeHead === undefined
+      ? 'Check membership confirmations'
+      : 'Load next membership range'
+  }
   if (state.phase === 'projecting') {
     if (state.busy) return 'Processing membership page…'
     return state.projection.phase === 'authenticate'

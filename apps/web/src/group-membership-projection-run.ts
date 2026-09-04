@@ -18,7 +18,6 @@ import {
 } from './group-membership-projection'
 import {
   GROUP_MEMBERSHIP_EVENT_PAGE_SIZE,
-  GROUP_MEMBERSHIP_EVENT_START_BLOCK,
   assertIssuedGroupMembershipProjectionAnchor,
   authenticateIssuedGroupMembershipProjectionAnchor,
   type GroupMembershipProjectionAnchor,
@@ -41,6 +40,7 @@ export type GroupMembershipProjectionRunSnapshot = {
   pagesScanned: bigint
   phase: GroupMembershipProjectionRunPhase
   safeHead?: bigint
+  startBlock: bigint
 }
 
 export type OpenGroupMembershipProjectionRunOptions =
@@ -183,13 +183,22 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
   if (value.safeHead !== safeHead) {
     throw projectionRunError('anchor safe head')
   }
-  const expectedNextBlock =
-    safeHead === undefined ? GROUP_MEMBERSHIP_EVENT_START_BLOCK : safeHead + 1n
+  if (!isRecord(value.memberships)) {
+    throw projectionRunError('anchor position')
+  }
+  let membershipCursor: EventCursor
+  try {
+    membershipCursor = validateEventCursor(value.memberships.cursor)
+  } catch {
+    throw projectionRunError('anchor cursor')
+  }
+  const startBlock = membershipCursor.startBlock
+  const expectedNextBlock = safeHead === undefined ? startBlock : safeHead + 1n
   const seed = createEventCursor({
     chainId: value.chainId,
     filter: getGroupMembershipFilter(value.groupId),
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: GROUP_MEMBERSHIP_EVENT_START_BLOCK,
+    startBlock,
   })
   const memberships = normalizeCachePosition(
     value.memberships,
@@ -294,6 +303,7 @@ export class GroupMembershipProjectionRun {
       pagesScanned: this.#pagesScanned,
       phase: this.#phase,
       safeHead: this.#anchor.safeHead,
+      startBlock: this.#anchor.memberships.cursor.startBlock,
     }
   }
 
@@ -306,6 +316,10 @@ export class GroupMembershipProjectionRun {
 
   get groupId() {
     return this.#projection.groupId
+  }
+
+  get startBlock() {
+    return this.#anchor.memberships.cursor.startBlock
   }
 
   get progress(): GroupMembershipProjectionProgress {
