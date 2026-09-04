@@ -579,32 +579,65 @@ describe('sync lifetime', () => {
 
   it('interrupts an in-flight provider request on cancellation', async () => {
     const controller = new AbortController()
+    let requestSignal: AbortSignal | undefined
     let markStarted: (() => void) | undefined
     const started = new Promise<void>((resolve) => {
       markStarted = resolve
     })
-    const request = vi.fn(() => {
-      markStarted?.()
-      return new Promise<unknown>(() => undefined)
-    })
-    const synchronization = syncEventLogs({ request }, FILTER, eventCursor(), {
-      signal: controller.signal,
-      timeoutMs: 60_000,
-    })
+    const request = vi.fn()
+    const requestWithSignal = vi.fn(
+      (_request: ProviderRequest, signal: AbortSignal) => {
+        requestSignal = signal
+        markStarted?.()
+        return new Promise<unknown>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          )
+        })
+      },
+    )
+    const synchronization = syncEventLogs(
+      { request, requestWithSignal },
+      FILTER,
+      eventCursor(),
+      {
+        signal: controller.signal,
+        timeoutMs: 60_000,
+      },
+    )
     const rejected = expect(synchronization).rejects.toThrow(/cancelled/i)
     await started
     controller.abort()
     await rejected
-    expect(request).toHaveBeenCalled()
+    expect(requestWithSignal).toHaveBeenCalled()
+    expect(request).not.toHaveBeenCalled()
+    expect(requestSignal?.aborted).toBe(true)
   })
 
   it('bounds a stalled provider request', async () => {
-    const request = vi.fn(() => new Promise<unknown>(() => undefined))
+    let requestSignal: AbortSignal | undefined
+    const request = vi.fn()
+    const requestWithSignal = vi.fn(
+      (_request: ProviderRequest, signal: AbortSignal) => {
+        requestSignal = signal
+        return new Promise<unknown>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          )
+        })
+      },
+    )
     await expect(
-      syncEventLogs({ request }, FILTER, eventCursor(), {
+      syncEventLogs({ request, requestWithSignal }, FILTER, eventCursor(), {
         timeoutMs: 5,
       }),
     ).rejects.toThrow(/timed out/i)
+    expect(requestSignal?.aborted).toBe(true)
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('interrupts an in-flight request when the provider disconnects', async () => {

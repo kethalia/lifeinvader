@@ -1,7 +1,7 @@
 import { keccak256, type Hash, type Hex } from 'viem'
 import {
-  beforeDeadline,
   parseChainId,
+  requestProviderBeforeDeadline,
   WALLET_READ_TIMEOUT_MS,
   type Eip1193Provider,
   type ProviderRequest,
@@ -232,8 +232,9 @@ async function requestInContext(
   request: ProviderRequest,
 ) {
   assertContextActive(context)
-  const value = await beforeDeadline(
-    () => context.provider.request(request),
+  const value = await requestProviderBeforeDeadline(
+    context.provider,
+    request,
     context.deadline,
     () => new ProtocolHistoryTimeoutError(),
     context.signal,
@@ -531,8 +532,9 @@ export async function protocolHistoryAnchorIsCanonical(
   const anchor = normalizeFingerprint(anchorValue, 'protocol history anchor')
   const deadline = Date.now() + timeoutMs
   const request = (requestValue: ProviderRequest) =>
-    beforeDeadline(
-      () => provider.request(requestValue),
+    requestProviderBeforeDeadline(
+      provider,
+      requestValue,
       deadline,
       () => new Error('Protocol history anchor authentication timed out.'),
       signal,

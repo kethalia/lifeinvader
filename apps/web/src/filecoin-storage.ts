@@ -1,5 +1,9 @@
 import { encodeFunctionData, getAddress, type Address, type Hex } from 'viem'
-import { beforeDeadline, parseChainId, type Eip1193Provider } from './ethereum'
+import {
+  parseChainId,
+  requestProviderBeforeDeadline,
+  type Eip1193Provider,
+} from './ethereum'
 
 export const FILECOIN_MAINNET_CHAIN_ID = 314n
 export const FILECOIN_CALIBRATION_CHAIN_ID = 314_159n
@@ -262,8 +266,9 @@ export async function inspectFilecoinStorage(
     const deadline = Date.now() + timeoutMs
     const request = async (method: string, params?: readonly unknown[]) => {
       assertNoChainChange()
-      const result = await beforeDeadline(
-        () => provider.request({ method, ...(params ? { params } : {}) }),
+      const result = await requestProviderBeforeDeadline(
+        provider,
+        { method, ...(params ? { params } : {}) },
         deadline,
         () => inspectionError('the wallet read timed out.'),
         options.signal,
