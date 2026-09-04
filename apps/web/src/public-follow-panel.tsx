@@ -19,6 +19,7 @@ import {
   type TransactionReceipt,
   type TransactionSubmitted,
 } from './protocol'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { FollowSet } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 import { useWalletWriteBoundary } from './wallet-write-boundary'
@@ -298,6 +299,12 @@ export function PublicFollowPanel({
   const [completions, setCompletions] = useState<FollowCompletion[]>([])
   const [problems, setProblems] = useState<FollowProblem[]>([])
   const operationSequence = useRef(0)
+  const openingOperations = useOpeningWalletOperations(
+    attempts,
+    setAttempts,
+    session,
+    contextMatchesSession,
+  )
   const historySession = useMemo<WalletSession>(
     () =>
       readProvider !== undefined && readProvider !== session.provider
@@ -403,6 +410,7 @@ export function PublicFollowPanel({
     ) => Promise<TransactionReceipt>,
   ) => {
     const id = ++operationSequence.current
+    const control = openingOperations.begin(id)
     let submittedHash: Hash | undefined
     setProblems((current) =>
       current.filter(
@@ -424,9 +432,10 @@ export function PublicFollowPanel({
         { ...context, id, status: 'opening' },
       ]),
     )
-    void Promise.resolve()
-      .then(() =>
-        operation((hash) => {
+    void (async () => {
+      try {
+        const receipt = await operation((hash) => {
+          if (!control.active) return
           submittedHash = hash
           setAttempts((current) =>
             current.map((attempt) =>
@@ -435,10 +444,11 @@ export function PublicFollowPanel({
                 : attempt,
             ),
           )
-        }),
-      )
-      .then((receipt) => finishAction(context, id, receipt))
-      .catch((error: unknown) => {
+        })
+        if (!control.active) return
+        finishAction(context, id, receipt)
+      } catch (error) {
+        if (!control.active) return
         const message = describeRpcError(
           error,
           'The public follow transaction failed.',
@@ -474,7 +484,10 @@ export function PublicFollowPanel({
           )
           setProblems((current) => [...current, { context, message }].slice(-8))
         }
-      })
+      } finally {
+        openingOperations.release(id, control)
+      }
+    })()
   }
 
   const publishFollow = (following: boolean) => {
@@ -798,11 +811,12 @@ export function PublicFollowPanel({
               attempt={attempt}
               currentContext={contextMatchesSession(attempt, session)}
               key={attempt.id}
-              onDismiss={() =>
+              onDismiss={() => {
+                openingOperations.deactivate(attempt.id)
                 setAttempts((current) =>
                   current.filter((candidate) => candidate.id !== attempt.id),
                 )
-              }
+              }}
               onRetry={() => retryReceipt(attempt)}
               receiptProviderAvailable={
                 contextMatchesSession(attempt, session) &&

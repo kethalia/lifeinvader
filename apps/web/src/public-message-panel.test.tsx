@@ -275,10 +275,15 @@ describe('PublicMessagePanel', () => {
         .hasAttribute('disabled'),
     ).toBe(true)
 
-    await act(async () => pending.resolve(RECEIPT))
+    expect(await screen.findByText(/may have broadcast it/i)).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /I checked my wallet activity/i }),
+    )
     await waitFor(() =>
       expect(screen.getByTestId('write-lock-wallet').textContent).toBe('false'),
     )
+    await act(async () => pending.resolve(RECEIPT))
+    expect(screen.getByTestId('write-lock-wallet').textContent).toBe('false')
   })
 
   it('submits a normalized public event, preserves its hash, and clears only the confirmed draft', async () => {
@@ -345,7 +350,7 @@ describe('PublicMessagePanel', () => {
     ).toHaveProperty('checked', false)
   })
 
-  it('locks a new chain until the old write resolves and preserves later drafts', async () => {
+  it('makes an old-chain wallet prompt dismissible and preserves later drafts', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pendingReceipt = deferred<TransactionReceipt>()
     const sendMessage = vi.fn<typeof sendDirectMessage>(
@@ -372,15 +377,19 @@ describe('PublicMessagePanel', () => {
     const body = screen.getByLabelText(/public message$/i)
     expect(body.hasAttribute('disabled')).toBe(true)
     expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
-    await act(async () => pendingReceipt.resolve(RECEIPT))
+    expect(await screen.findByText(/may have broadcast it/i)).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /I checked my wallet activity/i }),
+    )
     await waitFor(() => expect(body.hasAttribute('disabled')).toBe(false))
     fireEvent.change(body, { target: { value: 'New-chain draft.' } })
+    await act(async () => pendingReceipt.resolve(RECEIPT))
 
     expect(body).toHaveProperty('value', 'New-chain draft.')
     expect(screen.queryByText(/was included in block 42/i)).toBeNull()
   })
 
-  it('clears an untouched confirmed draft while another wallet context is active', async () => {
+  it('ignores a dismissed wallet prompt that resolves in another context', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pendingReceipt = deferred<TransactionReceipt>()
     const sendMessage = vi.fn<typeof sendDirectMessage>(
@@ -403,14 +412,18 @@ describe('PublicMessagePanel', () => {
       />,
     )
 
+    expect(await screen.findByText(/may have broadcast it/i)).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /I checked my wallet activity/i }),
+    )
     await act(async () => pendingReceipt.resolve(RECEIPT))
     expect(screen.getByLabelText(/public message$/i)).toHaveProperty(
       'value',
-      '',
+      'Confirmed while away.',
     )
     expect(
       screen.getByLabelText(/I understand this is not a private message/i),
-    ).toHaveProperty('checked', false)
+    ).toHaveProperty('checked', true)
     rerender(
       <PublicMessagePanel
         sendMessage={sendMessage}
@@ -419,7 +432,7 @@ describe('PublicMessagePanel', () => {
     )
     expect(screen.getByLabelText(/public message$/i)).toHaveProperty(
       'value',
-      '',
+      'Confirmed while away.',
     )
   })
 
@@ -507,7 +520,7 @@ describe('PublicMessagePanel', () => {
         session={connectedSession(provider)}
       />,
     )
-    expect(screen.getAllByText(/approve or reject/i)).toHaveLength(1)
+    expect(screen.getAllByText(/may have broadcast it/i)).toHaveLength(1)
     expect(
       screen
         .getByRole('button', { name: /public message action pending/i })

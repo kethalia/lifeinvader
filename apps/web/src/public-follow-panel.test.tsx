@@ -25,6 +25,7 @@ import {
   TransactionSubmissionUnknownError,
   waitForTransactionReceipt,
   type TransactionReceipt,
+  type TransactionSubmitted,
 } from './protocol'
 import type { FollowSet } from './protocol-events'
 import { PublicFollowPanel } from './public-follow-panel'
@@ -461,6 +462,49 @@ describe('PublicFollowPanel', () => {
       screen.getByRole<HTMLButtonElement>('button', { name: 'Follow on-chain' })
         .disabled,
     ).toBe(false)
+  })
+
+  it('makes an old-context wallet prompt dismissible and ignores late callbacks', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const pending = deferred<TransactionReceipt>()
+    let reportSubmitted: TransactionSubmitted | undefined
+    const setFollowAction = vi.fn<typeof setFollow>(
+      (_provider, _account, _chainId, _followed, _following, onSubmitted) => {
+        reportSubmitted = onSubmitted
+        return pending.promise
+      },
+    )
+    const { rerender } = render(
+      <PublicFollowPanel
+        session={connectedSession(provider)}
+        setFollowAction={setFollowAction}
+      />,
+    )
+    setTarget(ACCOUNT_B)
+    fireEvent.click(screen.getByRole('button', { name: 'Follow on-chain' }))
+    expect(await screen.findByText(/waiting for wallet approval/i)).toBeTruthy()
+
+    rerender(
+      <PublicFollowPanel
+        session={connectedSession(provider, ACCOUNT_C)}
+        setFollowAction={setFollowAction}
+      />,
+    )
+    expect(
+      await screen.findByText(/may have broadcast the action/i),
+    ).toBeTruthy()
+    act(() => reportSubmitted?.(TRANSACTION_HASH))
+    expect(screen.queryByTitle(TRANSACTION_HASH)).toBeNull()
+    fireEvent.click(
+      screen.getByRole('button', { name: /I checked my wallet/i }),
+    )
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: 'Follow on-chain' })
+        .disabled,
+    ).toBe(false)
+
+    await act(async () => pending.resolve(RECEIPT))
+    expect(screen.queryByText(/was confirmed in block 42/i)).toBeNull()
   })
 
   it('keeps an ambiguous action locked across wallet contexts', async () => {

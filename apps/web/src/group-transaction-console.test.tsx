@@ -227,7 +227,7 @@ describe('GroupTransactionConsole', () => {
     ).toBe('')
   })
 
-  it('locks a new wallet context until the old group action resolves', async () => {
+  it('makes an old-context wallet prompt dismissible and ignores its result', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pending = deferred<Awaited<ReturnType<typeof createGroup>>>()
     const createGroupAction = vi.fn<typeof createGroup>(
@@ -264,11 +264,17 @@ describe('GroupTransactionConsole', () => {
       }).disabled,
     ).toBe(true)
 
-    await act(async () => pending.resolve(CREATE_RECEIPT))
+    expect(
+      await screen.findByText(/may have broadcast the action/i),
+    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /I checked my wallet/i }),
+    )
     await waitFor(() => expect(groupName.hasAttribute('disabled')).toBe(false))
     fireEvent.change(screen.getByLabelText('Group name'), {
       target: { value: 'Account B draft' },
     })
+    await act(async () => pending.resolve(CREATE_RECEIPT))
 
     expect(screen.getByLabelText<HTMLInputElement>('Group name').value).toBe(
       'Account B draft',

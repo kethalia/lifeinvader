@@ -22,6 +22,7 @@ import {
   waitForTransactionReceipt,
   type TransactionReceipt,
 } from './protocol'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { PublishedDirectMessage } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 import { useWalletWriteBoundary } from './wallet-write-boundary'
@@ -297,6 +298,12 @@ export function PublicMessagePanel({
   const historySessionRef = useRef(historySession)
   recipientInputRef.current = recipientInput
   historySessionRef.current = historySession
+  const openingOperations = useOpeningWalletOperations(
+    attempts,
+    setAttempts,
+    session,
+    contextMatchesSession,
+  )
 
   useEffect(() => {
     readSequence.current += 1
@@ -419,6 +426,7 @@ export function PublicMessagePanel({
       return
     }
     const id = ++operationSequence.current
+    const control = openingOperations.begin(id)
     const context: MessageContext = {
       account,
       body,
@@ -455,6 +463,7 @@ export function PublicMessagePanel({
           recipient,
           { body: context.body, mediaCid: context.mediaCid },
           (hash) => {
+            if (!control.active) return
             submittedHash = hash
             setAttempts((current) =>
               current.map((attempt) =>
@@ -465,8 +474,10 @@ export function PublicMessagePanel({
             )
           },
         )
+        if (!control.active) return
         finishMessage(context, id, receipt)
       } catch (error) {
+        if (!control.active) return
         const message = describeRpcError(
           error,
           'The public message transaction failed.',
@@ -504,6 +515,8 @@ export function PublicMessagePanel({
             [...current, { ...context, id, message }].slice(-8),
           )
         }
+      } finally {
+        openingOperations.release(id, control)
       }
     })()
   }
@@ -579,6 +592,7 @@ export function PublicMessagePanel({
   }
 
   const dismissAttempt = (attempt: MessageAttempt) => {
+    openingOperations.deactivate(attempt.id)
     setAttempts((current) =>
       current.filter((candidate) => candidate.id !== attempt.id),
     )

@@ -21,6 +21,7 @@ import {
   waitForTransactionReceipt,
   type TransactionReceipt,
 } from './protocol'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { PublishedGroupMessage } from './protocol-events'
 import type { WalletSession } from './wallet-session'
 import { useWalletWriteBoundary } from './wallet-write-boundary'
@@ -303,6 +304,12 @@ export function PublicGroupMessagePanel({
   selectedGroupIdRef.current = selectedGroupId
   historySessionRef.current = historySession
   walletSessionRef.current = session
+  const openingOperations = useOpeningWalletOperations(
+    attempts,
+    setAttempts,
+    session,
+    contextMatchesSession,
+  )
 
   const connected =
     session.status === 'connected' &&
@@ -425,6 +432,7 @@ export function PublicGroupMessagePanel({
       return
     }
     const id = ++operationSequence.current
+    const control = openingOperations.begin(id)
     const context: GroupMessageContext = {
       account,
       body,
@@ -460,6 +468,7 @@ export function PublicGroupMessagePanel({
           context.groupId,
           { body: context.body, mediaCid: context.mediaCid },
           (hash) => {
+            if (!control.active) return
             submittedHash = hash
             setAttempts((current) =>
               current.map((attempt) =>
@@ -470,8 +479,10 @@ export function PublicGroupMessagePanel({
             )
           },
         )
+        if (!control.active) return
         finishMessage(context, id, receipt)
       } catch (error) {
+        if (!control.active) return
         const message = describeRpcError(
           error,
           'The public group message transaction failed.',
@@ -509,6 +520,8 @@ export function PublicGroupMessagePanel({
             [...current, { ...context, id, message }].slice(-8),
           )
         }
+      } finally {
+        openingOperations.release(id, control)
       }
     })()
   }
@@ -852,13 +865,14 @@ export function PublicGroupMessagePanel({
                       </button>
                     ) : null}
                     <button
-                      onClick={() =>
+                      onClick={() => {
+                        openingOperations.deactivate(attempt.id)
                         setAttempts((current) =>
                           current.filter(
                             (candidate) => candidate.id !== attempt.id,
                           ),
                         )
-                      }
+                      }}
                       type="button"
                     >
                       {attempt.hash

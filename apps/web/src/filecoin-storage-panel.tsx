@@ -204,8 +204,9 @@ function FilecoinFundingStatus({
           .
         </p>
         <p>
-          The account quote was refreshed. The CAR is still local and has not
-          been uploaded or bound to a provider.
+          The CAR is still local and has not been uploaded or bound to a
+          provider. Request or review a fresh account quote before another
+          funding action.
         </p>
       </div>
     )

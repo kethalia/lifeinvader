@@ -1041,7 +1041,7 @@ describe('PostFeedPanel', () => {
     )
   })
 
-  it('retains delayed old-chain recovery and locks the new chain', async () => {
+  it('makes an old-chain wallet prompt dismissible and ignores late callbacks', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const delayedAction = deferred<TransactionReceipt>()
     let reportSubmitted: TransactionSubmitted | undefined
@@ -1074,11 +1074,11 @@ describe('PostFeedPanel', () => {
       />,
     )
     await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
-    act(() => reportSubmitted?.(TRANSACTION_HASH))
 
-    expect(
-      await screen.findByText(/belongs to another wallet context/i),
-    ).toBeTruthy()
+    const strandedStatus = (
+      await screen.findByText(/belongs to another wallet context/i)
+    ).closest('[role="status"]')
+    expect(strandedStatus).toBeTruthy()
     expect(screen.getByText(/post #1 on chain 1 from/i)).toBeTruthy()
     expect(screen.getByText(/via Test Wallet/i)).toBeTruthy()
     expect(
@@ -1087,6 +1087,19 @@ describe('PostFeedPanel', () => {
         .hasAttribute('disabled'),
     ).toBe(true)
     expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
+    act(() => reportSubmitted?.(TRANSACTION_HASH))
+    expect(strandedStatus?.textContent).not.toContain('0x2222…2222')
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /I checked my wallet/i }),
+    )
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole('button', { name: /record like for post 1/i })
+          .hasAttribute('disabled'),
+      ).toBe(false),
+    )
 
     await act(async () =>
       delayedAction.resolve({
@@ -1095,11 +1108,7 @@ describe('PostFeedPanel', () => {
         hash: TRANSACTION_HASH,
       }),
     )
-    await waitFor(() =>
-      expect(
-        screen.queryByText(/belongs to another wallet context/i),
-      ).toBeNull(),
-    )
+    expect(screen.queryByText(/belongs to another wallet context/i)).toBeNull()
     expect(
       screen
         .getByRole('button', { name: /record like for post 1/i })

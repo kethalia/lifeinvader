@@ -16,6 +16,7 @@ import {
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 import type { MediaRetriever } from './media-retrieval'
 import { MediaViewer } from './media-viewer'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { PostCommentProjectionReadPage } from './post-comment-projection'
 import {
   usePostCommentReadModel,
@@ -457,6 +458,12 @@ export function PostFeedPanel({
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const commentRevision = useRef(0)
   const requestSequence = useRef(0)
+  const openingOperations = useOpeningWalletOperations(
+    postActionAttempts,
+    setPostActionAttempts,
+    session,
+    actionContextMatchesSession,
+  )
   const activeCommentDraft =
     connected && session.account
       ? commentDrafts.findLast((draft) =>
@@ -735,6 +742,7 @@ export function PostFeedPanel({
       walletName: session.name ?? 'Injected wallet',
     }
     const attemptId = ++actionSequence.current
+    const control = openingOperations.begin(attemptId)
     let submittedHash: TransactionReceipt['hash'] | undefined
     setPostActionAttempts((current) => [
       ...current.filter(
@@ -750,6 +758,7 @@ export function PostFeedPanel({
       current.filter((problem) => !sameActionContext(problem, context)),
     )
     const onSubmitted: TransactionSubmitted = (hash) => {
+      if (!control.active) return
       submittedHash = hash
       setPostActionAttempts((current) =>
         current.map((attempt) =>
@@ -779,9 +788,10 @@ export function PostFeedPanel({
               expected.liked,
               onSubmitted,
             )
-    void Promise.resolve()
-      .then(operation)
-      .then((receipt) => {
+    void (async () => {
+      try {
+        const receipt = await operation()
+        if (!control.active) return
         setCompletedPostActions((current) =>
           [
             ...current.filter(
@@ -794,8 +804,8 @@ export function PostFeedPanel({
           current.filter((attempt) => attempt.id !== attemptId),
         )
         clearPublishedCommentDraft(context)
-      })
-      .catch((actionError: unknown) => {
+      } catch (actionError) {
+        if (!control.active) return
         const recoverableStatus = submittedHash
           ? isTransactionRevertedError(actionError)
             ? 'failed'
@@ -830,7 +840,10 @@ export function PostFeedPanel({
             },
           ].slice(-12),
         )
-      })
+      } finally {
+        openingOperations.release(attemptId, control)
+      }
+    })()
   }
 
   const retryPostActionReceipt = (transaction: PostActionAttempt) => {
@@ -920,6 +933,7 @@ export function PostFeedPanel({
   }
 
   const dismissPostAction = (transaction: PostActionAttempt) => {
+    openingOperations.deactivate(transaction.id)
     setPostActionAttempts((current) =>
       current.filter((attempt) => attempt.id !== transaction.id),
     )

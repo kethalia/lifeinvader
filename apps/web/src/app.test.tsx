@@ -414,6 +414,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText(/permanent public statement/i), {
       target: { value: 'About to be reorged.' },
     })
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     expect(
       await screen.findByRole('button', { name: /deploy protocol here/i }),
@@ -577,7 +578,7 @@ describe('App', () => {
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     stop()
   })
-  it('keeps a busy write locked across wallet context changes', async () => {
+  it('makes a stranded wallet prompt dismissible and ignores its late result', async () => {
     let chainId = '0x1'
     let submissions = 0
     const firstSubmission = deferred<string>()
@@ -631,16 +632,24 @@ describe('App', () => {
     fireEvent.click(chainBPublish)
     expect(submissions).toBe(1)
 
-    await act(async () => {
-      firstSubmission.reject(rejection)
-      await Promise.resolve()
-      await Promise.resolve()
-    })
+    expect(
+      await screen.findByText(/wallet request may have broadcast/i),
+    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked my wallet/i }),
+    )
     await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
 
     fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     await waitFor(() => expect(submissions).toBe(2))
+    expect(buttonDisabled(/^publishing…$/i)).toBe(true)
+
+    await act(async () => {
+      firstSubmission.reject(rejection)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     expect(buttonDisabled(/^publishing…$/i)).toBe(true)
 
     await act(async () => {
@@ -653,7 +662,7 @@ describe('App', () => {
     ).toBeTruthy()
     stop()
   })
-  it('does not let a stale post completion clear the current draft', async () => {
+  it('does not let a dismissed stale post completion clear the current draft', async () => {
     let selectedChain = '0x1'
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
@@ -699,6 +708,12 @@ describe('App', () => {
       />,
     )
     await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    expect(
+      await screen.findByText(/wallet request may have broadcast/i),
+    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked my wallet/i }),
+    )
     fireEvent.change(textarea, { target: { value: 'Unsent chain B draft.' } })
     const mediaInput = screen.getByLabelText(/IPFS media CID/i)
     fireEvent.change(mediaInput, { target: { value: MEDIA_CID_V0 } })
@@ -726,7 +741,7 @@ describe('App', () => {
         walletSession={controller(1n)}
       />,
     )
-    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+    expect(screen.queryByText(/included in block 42/i)).toBeNull()
   })
   it('prepares local media, locks publishing, and commits its CID', async () => {
     let selectedChain = '0x1'

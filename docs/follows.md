@@ -143,7 +143,10 @@ read in address-ordered pages of at most 25 relationships.
 The same panel lets the connected account publish an explicit follow or
 unfollow for another address. It keeps pending, ambiguous, unknown, reverted,
 and confirmed outcomes attached to the wallet context that created them. A
-confirmed write does not bypass the twelve-block read depth; the user must wait
+wallet prompt stranded by an account, chain, or provider change becomes a
+dismissible hashless ambiguity, and callbacks from the invalidated operation
+are ignored. Every unresolved outcome participates in the app-wide write lock.
+A confirmed write does not bypass the twelve-block read depth; the user must wait
 for confirmation and explicitly refresh the relevant account view.
 
 When a separate read RPC is selected, follow synchronization and final
