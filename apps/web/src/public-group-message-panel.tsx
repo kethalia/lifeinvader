@@ -171,22 +171,31 @@ function readStatus(state: GroupMessageReadState) {
     return 'Reading one bounded range of confirmed public group messages…'
   }
   if (state.phase === 'partial') {
+    if (state.snapshot.safeHead === undefined) {
+      return `Lifeinvader group-message history can begin at block ${state.snapshot.startBlock.toString()}, but this chain does not have a confirmed head yet. No group-message log range was requested. Wait for deployment confirmations, then check again.`
+    }
+    if (state.snapshot.historyBoundaryKind === 'pending-confirmation') {
+      return `The earliest possible Lifeinvader deployment block is ${state.snapshot.startBlock.toString()}, but the deployment itself has not reached the confirmed head ${state.snapshot.safeHead.toString()} yet. No group-message log range was requested. Wait for deployment confirmations, then check again.`
+    }
     const reset = state.snapshot.cacheReset
       ? 'The disposable local message cache was reset. '
       : ''
-    return `${reset}More confirmed group history remains. Indexed through block ${state.snapshot.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'}.`
+    return `${reset}More confirmed group-message history remains from block ${state.snapshot.startBlock.toString()}. Indexed through block ${state.snapshot.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.snapshot.safeHead.toString()}.`
   }
   if (state.phase === 'complete') {
-    return state.snapshot.safeHead === undefined
-      ? 'Caught up. No block has reached the selected confirmation depth yet.'
-      : `Caught up through confirmed block ${state.snapshot.safeHead.toString()}. Showing the newest retained page, oldest first.`
+    return `Caught up from block ${state.snapshot.startBlock.toString()} through confirmed block ${state.snapshot.safeHead?.toString() ?? 'none yet'}. Showing the newest retained page, oldest first.`
   }
   return state.message
 }
 
 function readButtonLabel(state: GroupMessageReadState) {
   if (state.phase === 'loading') return 'Reading group messages…'
-  if (state.phase === 'partial') return 'Load next group message range'
+  if (state.phase === 'partial') {
+    return state.snapshot.historyBoundaryKind === 'pending-confirmation' ||
+      state.snapshot.safeHead === undefined
+      ? 'Check group-message confirmations'
+      : 'Load next group message range'
+  }
   if (state.phase === 'complete') return 'Check for newer group messages'
   if (state.phase === 'failed') return 'Retry public group messages'
   return 'Load confirmed group messages'
@@ -854,8 +863,9 @@ export function PublicGroupMessagePanel({
           <h4>Reconstruct this public group channel</h4>
           <p className="message-history-scope">
             The browser asks the wallet RPC only for the selected group, one
-            bounded confirmed range per click. No chat server, membership gate,
-            or global message scan is used.
+            bounded confirmed range per click from the verified protocol history
+            boundary. No chat server, membership gate, or global message scan is
+            used.
           </p>
           <p
             aria-live="polite"

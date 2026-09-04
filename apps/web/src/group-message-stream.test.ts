@@ -15,6 +15,7 @@ import {
   resetGroupMessageStreamCache,
   synchronizeGroupMessageStream,
   type GroupMessageStreamStorageOptions,
+  type SynchronizeGroupMessageStreamOptions,
 } from './group-message-stream'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import { BrowserEventCache, openEventCache } from './event-cache'
@@ -26,6 +27,10 @@ import {
   LIFEINVADER_INIT_CODE,
   PROTOCOL_ADDRESS,
 } from './protocol'
+import {
+  ProtocolHistoryUnavailableError,
+  type ProtocolHistoryBoundary,
+} from './protocol-history'
 
 const ACCOUNT_A = '0x000000000000000000000000000000000000aaaa' as Address
 const ACCOUNT_B = '0x000000000000000000000000000000000000bbbb' as Address
@@ -101,6 +106,50 @@ function storage(factory = new IDBFactory()): GroupMessageStreamStorageOptions {
   }
 }
 
+async function unsupportedHistory(): Promise<never> {
+  throw new ProtocolHistoryUnavailableError(
+    0n,
+    new Error('Historical state is unavailable.'),
+  )
+}
+
+function historyBoundary(
+  startBlock: bigint,
+  headBlock = 5_000n,
+): ProtocolHistoryBoundary {
+  const safeBlock = headBlock - POST_FEED_CONFIRMATION_DEPTH
+  return {
+    chainId: 1n,
+    codeProbes: 1,
+    confirmedThrough: {
+      blockHash: blockHash(safeBlock),
+      blockNumber: safeBlock,
+    },
+    deployment: {
+      blockHash: blockHash(startBlock),
+      blockNumber: startBlock,
+    },
+    head: {
+      blockHash: blockHash(headBlock),
+      blockNumber: headBlock,
+    },
+    kind: startBlock > safeBlock ? 'pending-confirmation' : 'confirmed',
+    startBlock,
+  }
+}
+
+function synchronizeWithFallback(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  groupId: bigint,
+  options: SynchronizeGroupMessageStreamOptions = {},
+) {
+  return synchronizeGroupMessageStream(provider, chainId, groupId, {
+    resolveHistoryBoundary: unsupportedHistory,
+    ...options,
+  })
+}
+
 afterEach(() => vi.restoreAllMocks())
 
 describe('group-message stream synchronization', () => {
@@ -151,17 +200,19 @@ describe('group-message stream synchronization', () => {
     const cacheStorage = storage()
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
       caughtUp: false,
       groupId: GROUP_A,
+      historyBoundaryKind: 'genesis-fallback',
       indexedThrough: 1_999n,
       scannedRanges: 1,
+      startBlock: GROUP_MESSAGE_START_BLOCK,
     })
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
@@ -171,7 +222,7 @@ describe('group-message stream synchronization', () => {
       safeHead: 4_988n,
       scannedRanges: 1,
     })
-    await synchronizeGroupMessageStream(provider, 1n, GROUP_B, {
+    await synchronizeWithFallback(provider, 1n, GROUP_B, {
       storage: cacheStorage,
     })
 
@@ -203,6 +254,226 @@ describe('group-message stream synchronization', () => {
     ])
   })
 
+  it('starts an exact-group message stream at the verified deployment boundary', async () => {
+    const requests: ProviderRequest[] = []
+    const resolveHistoryBoundary = vi.fn(async () => historyBoundary(3_000n))
+    const provider: Eip1193Provider = {
+      request: vi.fn(async (request: ProviderRequest) => {
+        requests.push(request)
+        const { method, params } = request
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          return [
+            rawMessage(
+              3_001n,
+              1n,
+              GROUP_A,
+              ACCOUNT_A,
+              'Started after deployment.',
+            ),
+          ]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+        resolveHistoryBoundary,
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      historyBoundaryKind: 'confirmed',
+      indexedThrough: 4_988n,
+      recentMessages: [{ body: 'Started after deployment.', messageId: 1n }],
+      scannedRanges: 1,
+      startBlock: 3_000n,
+    })
+    expect(resolveHistoryBoundary).toHaveBeenCalledWith(
+      provider,
+      1n,
+      expect.objectContaining({
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        signal: expect.any(AbortSignal),
+      }),
+    )
+    const logRequestIndex = requests.findIndex(
+      ({ method }) => method === 'eth_getLogs',
+    )
+    expect(requests[logRequestIndex]?.params).toEqual([
+      {
+        address: PROTOCOL_ADDRESS,
+        fromBlock: '0xbb8',
+        toBlock: '0x137c',
+        topics: [
+          GROUP_MESSAGE_SENT_TOPIC,
+          padHex(toHex(GROUP_A), { size: 32 }),
+        ],
+      },
+    ])
+    expect(
+      requests.findIndex(
+        ({ method, params }, index) =>
+          index > logRequestIndex &&
+          method === 'eth_getBlockByNumber' &&
+          (params as [string])[0] === '0x1388',
+      ),
+    ).toBeGreaterThan(logRequestIndex)
+  })
+
+  it('fails closed when message history discovery does not explicitly reject archival state', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+        resolveHistoryBoundary: async () => {
+          throw new Error('Protocol history discovery timed out.')
+        },
+        storage: storage(),
+      }),
+    ).rejects.toThrow(/history discovery timed out/i)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('discards one fetched message range when the history anchor was replaced', async () => {
+    const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
+    const resolveHistoryBoundary = vi.fn(async () => historyBoundary(3_000n))
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          return {
+            hash: blockHash(blockNumber, blockNumber === 5_000n ? 'b' : 'a'),
+            number,
+          }
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+        resolveHistoryBoundary,
+        storage: storage(),
+      }),
+    ).rejects.toThrow(/protocol history anchor changed/i)
+    expect(resolveHistoryBoundary).toHaveBeenCalledTimes(1)
+    expect(
+      vi
+        .mocked(provider.request)
+        .mock.calls.filter(([request]) => request.method === 'eth_getLogs'),
+    ).toHaveLength(1)
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('waits without requesting message logs or cache work while deployment confirmation is pending', async () => {
+    const readLatest = vi.spyOn(BrowserEventCache.prototype, 'readLatest')
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          throw new Error('A pending group-message stream must not read logs.')
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+        resolveHistoryBoundary: async () => historyBoundary(4_990n),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      recentMessages: [],
+      safeHead: 4_988n,
+      scannedRanges: 0,
+      startBlock: 4_990n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(readLatest).not.toHaveBeenCalled()
+  })
+
+  it('keeps message history pending when the safe head only reaches confirmed emptiness', async () => {
+    const readLatest = vi.spyOn(BrowserEventCache.prototype, 'readLatest')
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(21n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          throw new Error('Confirmed emptiness is not deployment proof.')
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+        resolveHistoryBoundary: async () => ({
+          chainId: 1n,
+          codeProbes: 4,
+          confirmedThrough: {
+            blockHash: blockHash(8n),
+            blockNumber: 8n,
+          },
+          head: { blockHash: blockHash(20n), blockNumber: 20n },
+          kind: 'pending-confirmation',
+          preceding: { blockHash: blockHash(8n), blockNumber: 8n },
+          startBlock: 9n,
+        }),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      head: 21n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      recentMessages: [],
+      safeHead: 9n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(readLatest).not.toHaveBeenCalled()
+  })
+
   it('returns messages from multiple senders newest first', async () => {
     const logs = [
       rawMessage(2n, 1n, GROUP_A, ACCOUNT_A, 'First public message.'),
@@ -225,7 +496,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).resolves.toMatchObject({
@@ -275,12 +546,9 @@ describe('group-message stream synchronization', () => {
       },
     }
 
-    const snapshot = await synchronizeGroupMessageStream(
-      provider,
-      1n,
-      GROUP_A,
-      { storage: storage() },
-    )
+    const snapshot = await synchronizeWithFallback(provider, 1n, GROUP_A, {
+      storage: storage(),
+    })
 
     expect(snapshot.recentMessages).toHaveLength(100)
     expect(snapshot.recentMessages[0]?.messageId).toBe(101n)
@@ -317,13 +585,13 @@ describe('group-message stream synchronization', () => {
     const cacheStorage = storage()
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: cacheStorage,
       }),
     ).rejects.toThrow(/invalid GroupMessageSent/i)
     valid = true
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
@@ -380,7 +648,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
@@ -390,7 +658,7 @@ describe('group-message stream synchronization', () => {
     expect(fromBlock).toBe('0x0')
   })
 
-  it('clears only the selected group cache scope', async () => {
+  it('clears only the selected group and history-boundary cache scope', async () => {
     const cacheStorage = storage()
     const filterAB = getGroupMessageFilter(GROUP_A)
     const filterAC = getGroupMessageFilter(GROUP_B)
@@ -406,9 +674,21 @@ describe('group-message stream synchronization', () => {
       finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
       startBlock: GROUP_MESSAGE_START_BLOCK,
     })
+    const boundaryStart = 10n
+    const seedAtBoundary = createEventCursor({
+      chainId: 1n,
+      filter: filterAB,
+      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+      startBlock: boundaryStart,
+    })
     for (const [filter, seed, log] of [
       [filterAB, seedAB, cachedMessage(1n, 1n, GROUP_A, ACCOUNT_A)],
       [filterAC, seedAC, cachedMessage(1n, 2n, GROUP_B, ACCOUNT_B)],
+      [
+        filterAB,
+        seedAtBoundary,
+        cachedMessage(boundaryStart, 3n, GROUP_A, ACCOUNT_B),
+      ],
     ] as const) {
       const cache = await openEventCache({ ...cacheStorage, filter })
       try {
@@ -416,12 +696,17 @@ describe('group-message stream synchronization', () => {
           caughtUp: true,
           cursor: {
             ...seed,
-            checkpoints: [{ blockHash: blockHash(1n), blockNumber: 1n }],
-            nextBlock: 2n,
+            checkpoints: [
+              {
+                blockHash: blockHash(log.blockNumber),
+                blockNumber: log.blockNumber,
+              },
+            ],
+            nextBlock: log.blockNumber + 1n,
           },
-          head: 13n,
+          head: log.blockNumber + POST_FEED_CONFIRMATION_DEPTH,
           logs: [log],
-          safeHead: 1n,
+          safeHead: log.blockNumber,
           scannedRanges: 1,
         })
       } finally {
@@ -429,15 +714,19 @@ describe('group-message stream synchronization', () => {
       }
     }
 
-    await resetGroupMessageStreamCache(1n, GROUP_A, cacheStorage)
+    await resetGroupMessageStreamCache(1n, GROUP_A, cacheStorage, boundaryStart)
 
     const cleared = await openEventCache({ ...cacheStorage, filter: filterAB })
     try {
-      await expect(cleared.readLatest(seedAB)).resolves.toMatchObject({
-        cursor: seedAB,
+      await expect(cleared.readLatest(seedAtBoundary)).resolves.toMatchObject({
+        cursor: seedAtBoundary,
         logs: [],
         reset: false,
         revision: 2n,
+      })
+      await expect(cleared.readLatest(seedAB)).resolves.toMatchObject({
+        logs: [{ data: cachedMessage(1n, 1n, GROUP_A, ACCOUNT_A).data }],
+        revision: 1n,
       })
     } finally {
       cleared.close()
@@ -466,7 +755,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).rejects.toThrow(/verified Lifeinvader v1/i)
@@ -490,7 +779,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).rejects.toThrow(/another wallet chain/i)
@@ -515,7 +804,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).rejects.toThrow(/chain changed during group-message verification/i)
@@ -542,7 +831,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).rejects.toThrow(/head moved behind the confirmed group messages/i)
@@ -570,7 +859,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).resolves.toMatchObject({
@@ -578,6 +867,42 @@ describe('group-message stream synchronization', () => {
       indexedThrough: 8n,
       safeHead: 9n,
     })
+  })
+
+  it('keeps a genesis fallback incomplete before a safe head exists', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          throw new Error('A pre-finality fallback has no confirmed history.')
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      head: 5n,
+      historyBoundaryKind: 'genesis-fallback',
+      indexedThrough: undefined,
+      recentMessages: [],
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: GROUP_MESSAGE_START_BLOCK,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
   })
 
   it('rejects a committed checkpoint replaced during cache work', async () => {
@@ -605,7 +930,7 @@ describe('group-message stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).rejects.toThrow(/confirmed group-message checkpoint changed/i)
@@ -637,7 +962,7 @@ describe('group-message stream synchronization', () => {
     )
 
     await expect(
-      synchronizeGroupMessageStream(provider, 1n, GROUP_A, {
+      synchronizeWithFallback(provider, 1n, GROUP_A, {
         storage: storage(),
       }),
     ).rejects.toThrow(/cache changed after synchronization/i)
