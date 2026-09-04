@@ -374,6 +374,7 @@ export function PostFeedPanel({
   openReactionProjection,
   publishCommentAction = publishComment,
   publishRepostAction = publishRepost,
+  readProvider,
   retrieveMedia,
   session,
   setPostLikeAction = setPostLike,
@@ -388,6 +389,7 @@ export function PostFeedPanel({
   openReactionProjection?: PostReactionProjectionOpener
   publishCommentAction?: typeof publishComment
   publishRepostAction?: typeof publishRepost
+  readProvider?: Eip1193Provider
   retrieveMedia?: MediaRetriever
   session: WalletSession
   setPostLikeAction?: typeof setPostLike
@@ -432,7 +434,21 @@ export function PostFeedPanel({
   const [gatewayDraft, setGatewayDraft] = useState('')
   const [gateway, setGateway] = useState<IpfsGatewayTemplate>()
   const [gatewayError, setGatewayError] = useState<string>()
-  const reactionModel = usePostReactionReadModel(session, {
+  const connected =
+    session.status === 'connected' &&
+    session.provider !== undefined &&
+    session.chainId !== undefined
+  const historyProvider = connected
+    ? (readProvider ?? session.provider)
+    : undefined
+  const historySession = useMemo<WalletSession>(
+    () =>
+      historyProvider && historyProvider !== session.provider
+        ? { ...session, provider: historyProvider }
+        : session,
+    [historyProvider, session],
+  )
+  const reactionModel = usePostReactionReadModel(historySession, {
     openProjection: openReactionProjection,
     synchronize: synchronizePostReactions,
   })
@@ -440,10 +456,6 @@ export function PostFeedPanel({
   const activeRequest = useRef<AbortController | undefined>(undefined)
   const commentRevision = useRef(0)
   const requestSequence = useRef(0)
-  const connected =
-    session.status === 'connected' &&
-    session.provider !== undefined &&
-    session.chainId !== undefined
   const activeCommentDraft =
     connected && session.account
       ? commentDrafts.findLast((draft) =>
@@ -471,12 +483,12 @@ export function PostFeedPanel({
   const snapshot =
     connected &&
     loaded !== undefined &&
-    loaded.provider === session.provider &&
+    loaded.provider === historyProvider &&
     loaded.chainId === session.chainId
       ? loaded.snapshot
       : undefined
   const visiblePosts = snapshot?.posts ?? []
-  const commentModel = usePostCommentReadModel(session, visiblePosts, {
+  const commentModel = usePostCommentReadModel(historySession, visiblePosts, {
     openProjection: openCommentProjection,
     synchronize: synchronizePostComments,
     synchronizePosts: synchronize,
@@ -511,14 +523,14 @@ export function PostFeedPanel({
   const error =
     connected &&
     syncError !== undefined &&
-    syncError.provider === session.provider &&
+    syncError.provider === historyProvider &&
     syncError.chainId === session.chainId
       ? syncError.message
       : undefined
   const loading =
     connected &&
     loadingContext !== undefined &&
-    loadingContext.provider === session.provider &&
+    loadingContext.provider === historyProvider &&
     loadingContext.chainId === session.chainId
   const activeConfirmation =
     connected &&
@@ -559,7 +571,7 @@ export function PostFeedPanel({
   }, [commentModel.state.phase])
 
   const runSynchronization = useCallback(() => {
-    const provider = session.provider
+    const provider = historyProvider
     const chainId = session.chainId
     if (
       session.status !== 'connected' ||
@@ -597,7 +609,7 @@ export function PostFeedPanel({
           setLoadingContext(undefined)
         }
       })
-  }, [session.chainId, session.provider, session.status, synchronize])
+  }, [historyProvider, session.chainId, session.status, synchronize])
 
   useEffect(() => {
     requestSequence.current += 1
@@ -615,6 +627,7 @@ export function PostFeedPanel({
   useEffect(() => {
     if (
       !connected ||
+      historyProvider === undefined ||
       includedPost === undefined ||
       includedPost.provider !== session.provider ||
       includedPost.chainId !== session.chainId
@@ -625,7 +638,7 @@ export function PostFeedPanel({
     const controller = new AbortController()
     setConfirmation({ hash: includedPost.hash, status: 'waiting' })
     void waitForConfirmation(
-      includedPost.provider,
+      historyProvider,
       includedPost.chainId,
       includedPost,
       { signal: controller.signal },
@@ -649,6 +662,7 @@ export function PostFeedPanel({
     return () => controller.abort()
   }, [
     connected,
+    historyProvider,
     includedPost,
     runSynchronization,
     session.chainId,
@@ -1017,7 +1031,9 @@ export function PostFeedPanel({
               : snapshot
                 ? syncStatus(snapshot)
                 : loading
-                  ? 'Reading one bounded range from the chain…'
+                  ? readProvider
+                    ? 'Reading one bounded range through the selected RPC…'
+                    : 'Reading one bounded range through the wallet RPC…'
                   : 'The feed is ready to retry.'}
           </p>
           {connected ? (
@@ -1485,7 +1501,9 @@ export function PostFeedPanel({
         <div className="feed-placeholder" aria-busy={loading}>
           <p>
             {connected
-              ? 'The first fifty cached posts will appear here.'
+              ? readProvider
+                ? 'The first fifty cached posts from the selected read RPC will appear here.'
+                : 'The first fifty cached posts from the wallet RPC will appear here.'
               : 'Your wallet supplies the chain and RPC. Lifeinvader supplies no hidden feed server.'}
           </p>
         </div>

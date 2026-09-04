@@ -66,6 +66,12 @@ describe('HTTP RPC endpoint parsing', () => {
   ])('rejects unsafe endpoint %s', (endpoint, message) => {
     expect(() => parseHttpRpcEndpoint(endpoint)).toThrow(message)
   })
+
+  it('bounds endpoint URL input', () => {
+    expect(() =>
+      parseHttpRpcEndpoint(`https://rpc.example/${'a'.repeat(4_097)}`),
+    ).toThrow(/URL is too long/i)
+  })
 })
 
 describe('bounded HTTP RPC provider', () => {
