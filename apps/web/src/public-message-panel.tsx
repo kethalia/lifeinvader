@@ -165,22 +165,33 @@ function readStatus(state: ConversationReadState) {
     return 'Reading one bounded range of confirmed public messages…'
   }
   if (state.phase === 'partial') {
+    if (
+      state.snapshot.safeHead !== undefined &&
+      state.snapshot.startBlock > state.snapshot.safeHead
+    ) {
+      return `Deployment block ${state.snapshot.startBlock.toString()} has not reached the selected confirmation depth. No message log range was requested.`
+    }
     const reset = state.snapshot.cacheReset
       ? 'The disposable local event cache was reset. '
       : ''
-    return `${reset}More confirmed history remains. Indexed through block ${state.snapshot.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'}.`
+    return `${reset}More confirmed history remains from block ${state.snapshot.startBlock.toString()}. Indexed through block ${state.snapshot.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'}.`
   }
   if (state.phase === 'complete') {
     return state.snapshot.safeHead === undefined
-      ? 'Caught up. No block has reached the selected confirmation depth yet.'
-      : `Caught up through confirmed block ${state.snapshot.safeHead.toString()}. Showing the newest retained page, oldest first.`
+      ? `Caught up from block ${state.snapshot.startBlock.toString()}. No block has reached the selected confirmation depth yet.`
+      : `Caught up from block ${state.snapshot.startBlock.toString()} through confirmed block ${state.snapshot.safeHead.toString()}. Showing the newest retained page, oldest first.`
   }
   return state.message
 }
 
 function readButtonLabel(state: ConversationReadState) {
   if (state.phase === 'loading') return 'Reading public messages…'
-  if (state.phase === 'partial') return 'Load next bounded message range'
+  if (state.phase === 'partial') {
+    return state.snapshot.safeHead !== undefined &&
+      state.snapshot.startBlock > state.snapshot.safeHead
+      ? 'Check message confirmations'
+      : 'Load next bounded message range'
+  }
   if (state.phase === 'complete') return 'Check for newer public messages'
   if (state.phase === 'failed') return 'Retry public conversation'
   return 'Load confirmed public conversation'
@@ -873,8 +884,9 @@ export function PublicMessagePanel({
           <h3>Reconstruct this public conversation</h3>
           <p className="message-history-scope">
             The browser asks the wallet RPC only for the selected conversation,
-            one bounded confirmed range per click. No inbox server or global
-            message scan is used.
+            starting at the verified protocol history boundary and reading one
+            bounded confirmed range per click. No inbox server or global message
+            scan is used.
           </p>
           <p
             aria-live="polite"
