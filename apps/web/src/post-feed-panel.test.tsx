@@ -237,6 +237,51 @@ describe('PostFeedPanel', () => {
     expect(synchronize).toHaveBeenCalledTimes(2)
   })
 
+  it('routes public history through the selected RPC while keeping actions on the wallet', async () => {
+    const walletProvider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi.fn().mockResolvedValue(snapshot([post('Split.')]))
+    const setPostLikeAction = vi.fn<typeof setPostLike>(
+      async (_provider, _account, _chainId, _postId, _liked, onSubmitted) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        return {
+          blockHash: BLOCK_HASH,
+          blockNumber: 42n,
+          hash: TRANSACTION_HASH,
+        }
+      },
+    )
+
+    render(
+      <PostFeedPanel
+        readProvider={readProvider}
+        session={connectedSession(walletProvider)}
+        setPostLikeAction={setPostLikeAction}
+        synchronize={synchronize}
+      />,
+    )
+
+    expect(await screen.findByText('Split.')).toBeTruthy()
+    expect(synchronize).toHaveBeenCalledWith(readProvider, 1n, {
+      signal: expect.any(AbortSignal),
+    })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /record like for post 1/i }),
+    )
+    expect(
+      await screen.findByText(/like for post #1 was included/i),
+    ).toBeTruthy()
+    expect(setPostLikeAction).toHaveBeenCalledWith(
+      walletProvider,
+      ACCOUNT,
+      1n,
+      1n,
+      true,
+      expect.any(Function),
+    )
+  })
+
   it('shows a pending deployment without implying that a range was scanned', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const synchronize = vi.fn().mockResolvedValue({

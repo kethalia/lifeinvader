@@ -24,6 +24,7 @@ import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
 import { resolveProtocolHistoryBoundary } from './protocol-history'
 import { parseMediaCid } from './media-cid'
+import { verifyReadRpcProvider } from './read-rpc'
 import {
   createGroup,
   deployProtocol,
@@ -178,6 +179,15 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
     expect(account).toBeDefined()
     expect(recipient).toBeDefined()
     if (!account || !recipient) return
+    await expect(
+      verifyReadRpcProvider(provider, LOCAL_CHAIN_ID, readProvider, {
+        confirmationDepth: 0n,
+      }),
+    ).resolves.toMatchObject({
+      blockNumber: 0n,
+      chainId: LOCAL_CHAIN_ID,
+      endpointOrigin: expect.stringMatching(/^http:\/\/127\.0\.0\.1:/),
+    })
     await expect(inspectProtocol(readProvider)).resolves.toEqual({
       kind: 'deployable',
     })

@@ -1,6 +1,7 @@
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 
 export const HTTP_RPC_REQUEST_TIMEOUT_MS = 15_000
+export const MAX_HTTP_RPC_ENDPOINT_LENGTH = 4_096
 export const MAX_HTTP_RPC_REQUEST_BYTES = 64 * 1024
 export const MAX_HTTP_RPC_RESPONSE_BYTES = 64 * 1024 * 1024
 export const MAX_HTTP_RPC_CONCURRENT_REQUESTS = 4
@@ -74,6 +75,9 @@ function isLoopbackHostname(hostname: string) {
 }
 
 export function parseHttpRpcEndpoint(input: string): HttpRpcEndpoint {
+  if (input.length > MAX_HTTP_RPC_ENDPOINT_LENGTH) {
+    throw invalidEndpoint('the URL is too long.')
+  }
   const candidate = input.trim()
   if (candidate === '') throw invalidEndpoint('enter an endpoint URL.')
   if (/[\u0000-\u001f\u007f]/.test(candidate)) {

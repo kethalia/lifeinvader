@@ -6,6 +6,7 @@ import type {
   PostFeedConfirmationWaiter,
 } from './post-feed-confirmation'
 import { PublicMessagePanel } from './public-message-panel'
+import { ReadRpcPanel, useReadRpcSelection } from './read-rpc-panel'
 import { WalletPanel } from './wallet-panel'
 import { useWalletSession } from './wallet-session'
 
@@ -53,6 +54,7 @@ export function App({
   waitForPostConfirmation?: PostFeedConfirmationWaiter
 } = {}) {
   const walletSession = useWalletSession()
+  const readRpc = useReadRpcSelection(walletSession.session)
   const [includedPost, setIncludedPost] = useState<IncludedPost>()
   return (
     <div className="site-shell">
@@ -113,6 +115,8 @@ export function App({
           walletSession={walletSession}
         />
 
+        <ReadRpcPanel controller={readRpc} session={walletSession.session} />
+
         <PublicMessagePanel session={walletSession.session} />
 
         <Suspense
@@ -143,6 +147,7 @@ export function App({
 
         <PostFeedPanel
           includedPost={includedPost}
+          readProvider={readRpc.selection?.provider}
           session={walletSession.session}
           synchronize={synchronizePostFeed}
           waitForConfirmation={waitForPostConfirmation}

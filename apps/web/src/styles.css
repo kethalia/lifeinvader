@@ -1526,6 +1526,107 @@ h1 span {
   font-weight: 800;
 }
 
+.read-rpc-panel {
+  display: grid;
+  padding: 3rem 0;
+  align-items: start;
+  border-top: 1px solid var(--line);
+  gap: 1.5rem 3rem;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 1fr);
+}
+
+.read-rpc-panel h2 {
+  margin: 0 0 1rem;
+  font-size: clamp(2rem, 4vw, 4rem);
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+}
+
+.read-rpc-panel p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.read-rpc-panel > div:first-child > p:last-child,
+.read-rpc-panel form,
+.read-rpc-status {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.read-rpc-panel form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.read-rpc-panel label {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.read-rpc-panel input {
+  min-width: 0;
+  width: 100%;
+  padding: 0.85rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.34);
+  font: inherit;
+}
+
+.read-rpc-panel input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.read-rpc-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.read-rpc-actions button {
+  min-height: 42px;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--ink);
+  color: var(--paper);
+  background: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.read-rpc-actions button + button {
+  color: var(--ink);
+  background: transparent;
+}
+
+.read-rpc-actions button:hover:not(:disabled),
+.read-rpc-actions button:focus-visible {
+  color: var(--ink);
+  background: var(--acid);
+}
+
+.read-rpc-actions button:disabled {
+  cursor: wait;
+  opacity: 0.54;
+}
+
+.read-rpc-status {
+  grid-column: 2;
+  padding: 0.85rem;
+  border: 1px solid var(--ink);
+  overflow-wrap: anywhere;
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.read-rpc-status [role='alert'] {
+  margin-top: 0.6rem;
+  color: var(--red);
+  font-weight: 800;
+}
+
 .post-feed {
   padding: 5rem 0 6rem;
   border-top: 1px solid var(--line);
@@ -2133,11 +2234,16 @@ footer p {
   .group-transaction-intro,
   .group-message-intro,
   .group-transaction-forms,
+  .read-rpc-panel,
   .post-feed-heading,
   .post-list,
   .section-heading,
   .principle-grid {
     grid-template-columns: 1fr;
+  }
+
+  .read-rpc-status {
+    grid-column: 1;
   }
 }
 

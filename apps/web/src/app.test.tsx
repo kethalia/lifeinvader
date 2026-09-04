@@ -13,6 +13,7 @@ import { App } from './app'
 import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
+import type { PostFeedSynchronizer } from './post-feed'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
@@ -37,7 +38,7 @@ const RECEIPT_BLOCK_HASH = `0x${'dd'.repeat(32)}`
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const MEDIA_CID_V0 = 'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C'
 const MEDIA_CID = parseMediaCid(MEDIA_CID_V0)!
-const synchronizeEmptyFeed = vi.fn(async () => ({
+const synchronizeEmptyFeed = vi.fn<PostFeedSynchronizer>(async () => ({
   cacheReset: false,
   caughtUp: true,
   head: 0n,
@@ -116,6 +117,85 @@ describe('App', () => {
     ).toBeTruthy()
     expect(screen.getByText(/no injected wallet found/i)).toBeTruthy()
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
+  })
+  it('verifies an in-memory endpoint for feed reads and keeps the wallet as fallback', async () => {
+    const commonBlockHash = `0x${'ef'.repeat(32)}`
+    const endpointUrl = 'https://rpc.example/account/private-key'
+    const fetcher = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as {
+          id: number
+          method: string
+          params?: [string, boolean]
+        }
+        const result =
+          request.method === 'eth_chainId'
+            ? '0x1'
+            : request.method === 'eth_blockNumber'
+              ? '0x64'
+              : {
+                  hash: commonBlockHash,
+                  number: request.params?.[0],
+                }
+        return new Response(
+          JSON.stringify({ id: request.id, jsonrpc: '2.0', result }),
+        )
+      },
+    )
+    vi.stubGlobal('fetch', fetcher)
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_requestAccounts') return [ACCOUNT]
+        if (method === 'eth_accounts') return [ACCOUNT]
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_blockNumber') return '0x64'
+        if (method === 'eth_getBlockByNumber') {
+          return { hash: commonBlockHash, number: (params as [string])[0] }
+        }
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    }
+    const stop = announceWallet('Test Wallet', 'read-rpc-wallet', provider)
+    renderApp()
+    fireEvent.click(
+      await screen.findByRole('button', { name: /connect test wallet/i }),
+    )
+    await waitFor(() => expect(synchronizeEmptyFeed).toHaveBeenCalled())
+    expect(synchronizeEmptyFeed.mock.calls[0]?.[0]).toBe(provider)
+
+    const input = screen.getByLabelText(/HTTPS JSON-RPC endpoint/i)
+    fireEvent.change(input, { target: { value: endpointUrl } })
+    fireEvent.click(screen.getByRole('button', { name: /verify and use RPC/i }))
+
+    expect(
+      await screen.findByText(
+        /matched to wallet history at confirmed block 88/i,
+      ),
+    ).toBeTruthy()
+    await waitFor(() => expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(2))
+    const selectedProvider = synchronizeEmptyFeed.mock.calls[1]?.[0]
+    expect(selectedProvider).toBeDefined()
+    if (!selectedProvider)
+      throw new Error('Expected the selected read provider.')
+    expect(selectedProvider).not.toBe(provider)
+    expect(selectedProvider).toMatchObject({
+      endpoint: {
+        origin: 'https://rpc.example',
+        url: endpointUrl,
+      },
+    })
+    expect((input as HTMLInputElement).value).toBe('')
+    expect(screen.queryByText(/private-key/i)).toBeNull()
+    expect(fetcher).toHaveBeenCalledTimes(4)
+
+    fireEvent.click(screen.getByRole('button', { name: /use wallet RPC/i }))
+    await waitFor(() => expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(3))
+    expect(synchronizeEmptyFeed.mock.calls[2]?.[0]).toBe(provider)
+    await expect(
+      selectedProvider.request({ method: 'eth_chainId' }),
+    ).rejects.toThrow(/transport was closed/i)
+    stop()
   })
   it('refreshes after concurrent deployment and rejected post preflights', async () => {
     let protocolChecks = 0
