@@ -623,6 +623,11 @@ describe('App', () => {
     fireEvent.change(textarea, { target: { value: 'Waiting on chain A.' } })
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     await waitFor(() => expect(submissions).toBe(1))
+    expect(
+      screen
+        .getByText(/confirm or reject the request/i)
+        .closest('.transaction-pending')?.textContent,
+    ).toMatch(/Post wallet request opened/i)
 
     await act(async () => emitChain('0x2'))
     const chainBPublish = await screen.findByRole('button', {

@@ -152,7 +152,16 @@ function TransactionStatus({
   return (
     <div className="transaction-pending action-feedback" role="status">
       <span>
-        {transaction.hash ? (
+        {transaction.status === 'opening' ? (
+          <>
+            {label} wallet request opened on chain{' '}
+            {transaction.chainId.toString()} from{' '}
+            <code title={transaction.account}>
+              {shortAddress(transaction.account)}
+            </code>{' '}
+            via {transaction.walletName}.{' '}
+          </>
+        ) : transaction.hash ? (
           <>
             {label} submitted on chain {transaction.chainId.toString()} from{' '}
             <code title={transaction.account}>
