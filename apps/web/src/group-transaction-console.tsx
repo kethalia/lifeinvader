@@ -37,6 +37,7 @@ type MembershipContext = WalletContext & {
   action: 'membership'
   groupId: bigint
   joined: boolean
+  selectedGroupIdAtSubmission: bigint | undefined
 }
 
 type GroupActionContext = CreateGroupContext | MembershipContext
@@ -209,7 +210,9 @@ export function GroupTransactionConsole({
   const [problems, setProblems] = useState<GroupActionProblem[]>([])
   const composeRevision = useRef(0)
   const operationSequence = useRef(0)
+  const selectedGroupIdRef = useRef(selectedGroupId)
   const sessionRef = useRef(session)
+  selectedGroupIdRef.current = selectedGroupId
   sessionRef.current = session
 
   useEffect(() => {
@@ -294,7 +297,9 @@ export function GroupTransactionConsole({
       if (context.action === 'create') {
         clearExactCreateDraft(context)
         onSelectGroup?.(createdGroupId!)
-      } else {
+      } else if (
+        selectedGroupIdRef.current === context.selectedGroupIdAtSubmission
+      ) {
         onSelectGroup?.(context.groupId)
       }
     }
@@ -437,6 +442,7 @@ export function GroupTransactionConsole({
       groupId: membershipGroupId,
       joined,
       provider,
+      selectedGroupIdAtSubmission: selectedGroupId,
       walletName: session.name ?? 'Injected wallet',
     }
     runAction(context, (onSubmitted) =>

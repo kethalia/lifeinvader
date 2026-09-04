@@ -324,6 +324,53 @@ describe('GroupTransactionConsole', () => {
     expect(onSelectGroup).toHaveBeenCalledTimes(2)
   })
 
+  it('preserves a newer group selection when a membership receipt arrives', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const pending = deferred<Awaited<ReturnType<typeof setGroupMembership>>>()
+    const setMembershipAction = vi.fn<typeof setGroupMembership>(
+      async () => pending.promise,
+    )
+    const onSelectGroup = vi.fn()
+    const { rerender } = render(
+      <GroupTransactionConsole
+        onSelectGroup={onSelectGroup}
+        selectedGroupId={GROUP_ID}
+        session={connectedSession(provider)}
+        setMembershipAction={setMembershipAction}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Join group on-chain' }))
+    expect(await screen.findByText(/waiting for wallet approval/i)).toBeTruthy()
+
+    rerender(
+      <GroupTransactionConsole
+        onSelectGroup={onSelectGroup}
+        selectedGroupId={99n}
+        session={connectedSession(provider)}
+        setMembershipAction={setMembershipAction}
+      />,
+    )
+    expect(
+      screen.getByLabelText<HTMLInputElement>('Membership group ID').value,
+    ).toBe('99')
+
+    await act(async () =>
+      pending.resolve({
+        blockHash: BLOCK_HASH,
+        blockNumber: 51n,
+        hash: TRANSACTION_HASH,
+      }),
+    )
+    expect(
+      await screen.findByText(/Public join event for group #17 was confirmed/i),
+    ).toBeTruthy()
+    expect(onSelectGroup).not.toHaveBeenCalled()
+    expect(
+      screen.getByLabelText<HTMLInputElement>('Membership group ID').value,
+    ).toBe('99')
+  })
+
   it('reauthenticates the exact creation event before recovering an unknown receipt', async () => {
     const provider = guardedProvider()
     const createGroupAction = vi.fn<typeof createGroup>(
