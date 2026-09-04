@@ -61,6 +61,10 @@ type TestStorage = Required<
 type AnchorProviderControl = {
   head: bigint
   headAfterRead?: bigint
+  replaceSafeHeadAfterHeadReads?: {
+    hash: Hex
+    remaining: number
+  }
   safeHeadHash: Hex
 }
 
@@ -190,6 +194,13 @@ function anchorProvider() {
         if (control.headAfterRead !== undefined) {
           control.head = control.headAfterRead
           control.headAfterRead = undefined
+        }
+        if (control.replaceSafeHeadAfterHeadReads) {
+          control.replaceSafeHeadAfterHeadReads.remaining -= 1
+          if (control.replaceSafeHeadAfterHeadReads.remaining === 0) {
+            control.safeHeadHash = control.replaceSafeHeadAfterHeadReads.hash
+            delete control.replaceSafeHeadAfterHeadReads
+          }
         }
         return toHex(head)
       }
@@ -533,6 +544,24 @@ describe('post reaction projection run', () => {
     await expect(run.advance()).rejects.toThrow(
       /head moved behind the post reaction projection anchor/i,
     )
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.getSummary(7n)).toThrow(/not complete/i)
+  })
+
+  it('rechecks the checkpoint after the final provider head read', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    prepared.control.replaceSafeHeadAfterHeadReads = {
+      hash: hash('replacement after the final head read'),
+      remaining: 2,
+    }
+
+    await expect(run.advance()).rejects.toThrow(/checkpoint changed/i)
     expect(run.snapshot.phase).toBe('failed')
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
   })

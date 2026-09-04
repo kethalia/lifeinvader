@@ -366,6 +366,15 @@ export async function authenticateIssuedPostReactionProjectionAnchor(
         'The wallet head moved behind the post reaction projection anchor.',
       )
     }
+    if (issued.checkpoint) {
+      await assertCanonicalCheckpoint(
+        issued.provider,
+        issued.checkpoint,
+        interruption.signal,
+        'post reaction projection',
+      )
+      assertContextActive()
+    }
   } catch (error) {
     assertContextActive()
     throw error
