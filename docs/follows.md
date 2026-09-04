@@ -83,6 +83,22 @@ explicitly provisional work counters. Cache changes, reorgs, chain changes,
 malformed pages, cancellation, or closure discard all partial derived state.
 
 Projection steps do not request more logs from the RPC endpoint; only the final
-wallet context and canonical-checkpoint proof cross the provider boundary. The
-follow write helper and UI remain separate milestones, so this is not yet a
-user-visible follower count.
+wallet context and canonical-checkpoint proof cross the provider boundary.
+
+## React read lifecycle
+
+The follow read model remains idle until it has a connected wallet provider, a
+valid nonzero account to browse, and an explicit direction. Each user action
+either synchronizes one bounded RPC range or advances one bounded local
+projection page. Catch-up previews remain visibly incomplete; relationship
+lookups and pages return no value until the authenticated projection reaches
+`complete`.
+
+Read-model state is bound to the provider object, chain, normalized account, and
+direction. Changing any of them aborts in-flight stream work, closes an active
+projection, and ignores late results. A deferred corruption error resets only
+that exact directional account cache before offering a retry; if IndexedDB
+cannot be reset, the current page reports that browser data must be cleared.
+
+The follow write helper and visible UI remain separate milestones, so these
+chain-derived relationships are not yet shown in the app.
