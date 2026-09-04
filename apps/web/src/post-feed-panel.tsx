@@ -9,10 +9,13 @@ import {
 import type { Hex } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
 import {
-  decodeMediaCid,
-  MAX_MEDIA_CID_TEXT_LENGTH,
-  parseMediaCid,
-} from './media-cid'
+  MAX_IPFS_GATEWAY_TEMPLATE_LENGTH,
+  parseIpfsGatewayTemplate,
+  type IpfsGatewayTemplate,
+} from './ipfs-gateway'
+import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
+import type { MediaRetriever } from './media-retrieval'
+import { MediaViewer } from './media-viewer'
 import type { PostCommentProjectionReadPage } from './post-comment-projection'
 import {
   usePostCommentReadModel,
@@ -58,26 +61,6 @@ const COMMENT_RENDER_PAGE_SIZE = 10
 
 function shortValue(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`
-}
-
-function MediaCommitment({ value }: { value: Hex }) {
-  try {
-    const cid = decodeMediaCid(value)
-    return (
-      <div className="post-media-commitment">
-        <span>IPFS media commitment · {cid.codec}</span>
-        <code>{cid.text}</code>
-        <span>Address only; availability is not guaranteed.</span>
-      </div>
-    )
-  } catch {
-    return (
-      <div className="post-media-commitment invalid-media-commitment">
-        <span>Invalid media CID bytes committed on-chain.</span>
-        <code>{value}</code>
-      </div>
-    )
-  }
 }
 
 function syncStatus(snapshot: PostFeedSnapshot) {
@@ -197,15 +180,19 @@ function commentButtonLabel(state: PostCommentReadModelState) {
 }
 
 function PostCommentList({
+  gatewayTemplate,
   offset,
   onOffset,
   page,
   postId,
+  retrieveMedia,
 }: {
+  gatewayTemplate?: string
   offset: number
   onOffset: (offset: number) => void
   page: PostCommentProjectionReadPage
   postId: bigint
+  retrieveMedia?: MediaRetriever
 }) {
   const headingId = `post-comments-${postId.toString()}`
   return (
@@ -241,7 +228,12 @@ function PostCommentList({
                   <p className="comment-body">{comment.body}</p>
                 ) : null}
                 {comment.mediaCid !== '0x' ? (
-                  <MediaCommitment value={comment.mediaCid} />
+                  <MediaViewer
+                    gatewayTemplate={gatewayTemplate}
+                    label={`media for comment #${comment.commentId.toString()}`}
+                    retrieve={retrieveMedia}
+                    value={comment.mediaCid}
+                  />
                 ) : null}
               </li>
             ))}
@@ -382,6 +374,7 @@ export function PostFeedPanel({
   openReactionProjection,
   publishCommentAction = publishComment,
   publishRepostAction = publishRepost,
+  retrieveMedia,
   session,
   setPostLikeAction = setPostLike,
   synchronize = synchronizePostFeed,
@@ -395,6 +388,7 @@ export function PostFeedPanel({
   openReactionProjection?: PostReactionProjectionOpener
   publishCommentAction?: typeof publishComment
   publishRepostAction?: typeof publishRepost
+  retrieveMedia?: MediaRetriever
   session: WalletSession
   setPostLikeAction?: typeof setPostLike
   synchronize?: PostFeedSynchronizer
@@ -435,6 +429,9 @@ export function PostFeedPanel({
   const [commentPageOffsets, setCommentPageOffsets] = useState<
     Record<string, number>
   >({})
+  const [gatewayDraft, setGatewayDraft] = useState('')
+  const [gateway, setGateway] = useState<IpfsGatewayTemplate>()
+  const [gatewayError, setGatewayError] = useState<string>()
   const reactionModel = usePostReactionReadModel(session, {
     openProjection: openReactionProjection,
     synchronize: synchronizePostReactions,
@@ -990,6 +987,22 @@ export function PostFeedPanel({
     })
   }
 
+  const configureGateway = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    try {
+      const nextGateway = parseIpfsGatewayTemplate(gatewayDraft)
+      setGatewayDraft(nextGateway.template)
+      setGateway(nextGateway)
+      setGatewayError(undefined)
+    } catch (gatewayProblem) {
+      setGatewayError(
+        gatewayProblem instanceof Error
+          ? gatewayProblem.message
+          : 'Cannot retrieve media: the gateway template is invalid.',
+      )
+    }
+  }
+
   return (
     <section className="post-feed" aria-labelledby="post-feed-title">
       <div className="post-feed-heading">
@@ -1025,6 +1038,60 @@ export function PostFeedPanel({
           ) : null}
         </div>
       </div>
+
+      <form className="media-transport" onSubmit={configureGateway}>
+        <div>
+          <strong>Opt-in IPFS media transport</strong>
+          <p id="media-gateway-help">
+            Enter an HTTP gateway template containing <code>{'{cid}'}</code>.
+            Saving it sends no request; every supported raw image, GIF, or video
+            loads only after a separate click. The contacted gateway learns your
+            IP address, CID, and page origin.
+          </p>
+        </div>
+        <label htmlFor="media-gateway-template">Gateway URL template</label>
+        <input
+          aria-describedby="media-gateway-help"
+          autoComplete="off"
+          id="media-gateway-template"
+          maxLength={MAX_IPFS_GATEWAY_TEMPLATE_LENGTH}
+          onChange={(event) => {
+            setGatewayDraft(event.target.value)
+            setGatewayError(undefined)
+          }}
+          placeholder="https://your-gateway.example/ipfs/{cid}"
+          spellCheck={false}
+          value={gatewayDraft}
+        />
+        <div className="media-transport-actions">
+          <button type="submit">Use for manual media loads</button>
+          {gateway ? (
+            <button
+              onClick={() => {
+                setGateway(undefined)
+                setGatewayError(undefined)
+              }}
+              type="button"
+            >
+              Disable gateway
+            </button>
+          ) : null}
+        </div>
+        {gatewayError ? (
+          <p className="error-message" role="alert">
+            {gatewayError}
+          </p>
+        ) : gateway ? (
+          <p role="status">
+            Manual attachment loads will contact <code>{gateway.origin}</code>.
+            Nothing is fetched automatically.
+          </p>
+        ) : (
+          <p role="status">
+            Disabled. On-chain CIDs are displayed without contacting IPFS.
+          </p>
+        )}
+      </form>
 
       {error ? (
         <p className="error-message feed-feedback" role="alert">
@@ -1238,7 +1305,12 @@ export function PostFeedPanel({
                   </header>
                   {post.body ? <p className="post-body">{post.body}</p> : null}
                   {post.mediaCid !== '0x' ? (
-                    <MediaCommitment value={post.mediaCid} />
+                    <MediaViewer
+                      gatewayTemplate={gateway?.template}
+                      label={`media for post #${post.postId.toString()}`}
+                      retrieve={retrieveMedia}
+                      value={post.mediaCid}
+                    />
                   ) : null}
                   <div
                     aria-label={`Public actions for post ${post.postId.toString()}`}
@@ -1382,6 +1454,7 @@ export function PostFeedPanel({
                   </div>
                   {commentPage ? (
                     <PostCommentList
+                      gatewayTemplate={gateway?.template}
                       offset={commentOffset}
                       onOffset={(offset) =>
                         setCommentPageOffsets((current) => ({
@@ -1391,6 +1464,7 @@ export function PostFeedPanel({
                       }
                       page={commentPage}
                       postId={post.postId}
+                      retrieveMedia={retrieveMedia}
                     />
                   ) : null}
                 </article>

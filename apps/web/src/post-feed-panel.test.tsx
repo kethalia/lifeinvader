@@ -270,20 +270,26 @@ describe('PostFeedPanel', () => {
 
   it('shows canonical media commitments without trusting malformed bytes', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const retrieveMedia = vi.fn(() => new Promise<never>(() => undefined))
     const mediaCid = parseMediaCid(
       'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
+    )!
+    const rawMediaCid = parseMediaCid(
+      'bafkreiexaqucef7aglg4zgvbw5mmu6tok2xyji3w37z7hqk665zfxzu6ze',
     )!
     const synchronize = vi
       .fn()
       .mockResolvedValue(
         snapshot([
-          post('', 1n, mediaCid.bytes),
-          post('Bad attachment bytes.', 2n, '0x0102'),
+          post('', 1n, rawMediaCid.bytes),
+          post('DAG media needs block traversal.', 2n, mediaCid.bytes),
+          post('Bad attachment bytes.', 3n, '0x0102'),
         ]),
       )
 
     render(
       <PostFeedPanel
+        retrieveMedia={retrieveMedia}
         session={connectedSession(provider)}
         synchronize={synchronize}
       />,
@@ -291,9 +297,43 @@ describe('PostFeedPanel', () => {
 
     expect(await screen.findByText(mediaCid.text)).toBeTruthy()
     expect(screen.getByText(/IPFS media commitment · dag-pb/i)).toBeTruthy()
-    expect(screen.getByText(/availability is not guaranteed/i)).toBeTruthy()
+    expect(screen.getAllByText(/availability is not guaranteed/i)).toHaveLength(
+      2,
+    )
+    expect(screen.getByText(/verifies raw blocks only/i)).toBeTruthy()
     expect(screen.getByText(/invalid media CID bytes/i)).toBeTruthy()
     expect(screen.getByText('0x0102')).toBeTruthy()
+    expect(retrieveMedia).not.toHaveBeenCalled()
+
+    const gatewayInput = screen.getByLabelText(/gateway URL template/i)
+    fireEvent.change(gatewayInput, {
+      target: { value: 'http://gateway.example/ipfs/{cid}' },
+    })
+    fireEvent.click(
+      screen.getByRole('button', { name: /use for manual media loads/i }),
+    )
+    expect(screen.getByRole('alert').textContent).toMatch(/use HTTPS/i)
+    expect(retrieveMedia).not.toHaveBeenCalled()
+
+    fireEvent.change(gatewayInput, {
+      target: { value: 'https://gateway.example/ipfs/{cid}' },
+    })
+    fireEvent.click(
+      screen.getByRole('button', { name: /use for manual media loads/i }),
+    )
+    expect(
+      screen.getByText(/manual attachment loads will contact/i).textContent,
+    ).toContain('https://gateway.example')
+    expect(retrieveMedia).not.toHaveBeenCalled()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load media for post #1' }),
+    )
+    expect(retrieveMedia).toHaveBeenCalledWith(
+      'https://gateway.example/ipfs/{cid}',
+      rawMediaCid,
+      { signal: expect.any(AbortSignal) },
+    )
   })
 
   it('loads exact reaction totals through explicit bounded user steps', async () => {
