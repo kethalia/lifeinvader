@@ -527,9 +527,8 @@ describe('PublicMessagePanel', () => {
         name: /check message confirmations/i,
       }),
     ).toBeTruthy()
-    expect(
-      screen.getByText(/deployment block 20 has not reached/i),
-    ).toBeTruthy()
+    expect(screen.getByText(/history can begin at block 20/i)).toBeTruthy()
+    expect(screen.getByText(/confirmed head is still 18/i)).toBeTruthy()
     expect(screen.getByText(/no message log range was requested/i)).toBeTruthy()
     expect(screen.queryByRole('list')).toBeNull()
   })

@@ -169,7 +169,7 @@ function readStatus(state: ConversationReadState) {
       state.snapshot.safeHead !== undefined &&
       state.snapshot.startBlock > state.snapshot.safeHead
     ) {
-      return `Deployment block ${state.snapshot.startBlock.toString()} has not reached the selected confirmation depth. No message log range was requested.`
+      return `Lifeinvader history can begin at block ${state.snapshot.startBlock.toString()}, but the confirmed head is still ${state.snapshot.safeHead.toString()}. No message log range was requested. Wait for deployment confirmations, then check again.`
     }
     const reset = state.snapshot.cacheReset
       ? 'The disposable local event cache was reset. '
