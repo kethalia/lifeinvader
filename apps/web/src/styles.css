@@ -1555,6 +1555,7 @@ h1 span {
 
 .feed-controls p,
 .feed-feedback,
+.media-transport,
 .post-card header,
 .post-media-commitment {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1586,6 +1587,72 @@ h1 span {
 .feed-controls button:disabled {
   cursor: wait;
   opacity: 0.54;
+}
+
+.media-transport {
+  display: grid;
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid var(--ink);
+  gap: 0.75rem;
+  line-height: 1.5;
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.media-transport p {
+  margin: 0;
+}
+
+.media-transport > div:first-child {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.media-transport label {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.media-transport input {
+  width: 100%;
+  padding: 0.7rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font: inherit;
+}
+
+.media-transport-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.media-transport button,
+.post-media-commitment button {
+  min-height: 38px;
+  width: fit-content;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.media-transport button:hover:not(:disabled),
+.media-transport button:focus-visible,
+.post-media-commitment button:hover:not(:disabled),
+.post-media-commitment button:focus-visible {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.post-media-commitment button:disabled {
+  cursor: wait;
+  opacity: 0.45;
 }
 
 .feed-feedback {
@@ -1720,6 +1787,28 @@ h1 span {
 
 .invalid-media-commitment code {
   color: var(--red);
+}
+
+.media-load-action,
+.retrieved-media {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.retrieved-media img,
+.retrieved-media video {
+  display: block;
+  max-height: 480px;
+  width: 100%;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  object-fit: contain;
+}
+
+.retrieved-media p {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 500;
 }
 
 .post-actions {

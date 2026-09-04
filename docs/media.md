@@ -15,11 +15,13 @@ Each CID must use a 32-byte SHA-256 multihash and fit the protocol's 128-byte bi
 
 The Solidity contract only enforces the binary size bound. Another client can therefore publish malformed or unsupported bytes. The feed treats every event as untrusted: it decodes supported CIDs for display, labels invalid bytes, and never lets one bad attachment prevent other posts from rendering.
 
-The current client does not fetch CID content. A future renderer must require an explicit user-selected IPFS transport, apply media type and byte limits before decoding, isolate active formats such as SVG or HTML, and avoid silently leaking every feed view to a hard-coded gateway.
+The feed never fetches CID content automatically and ships no mandatory gateway. A user may enter a fixed-origin HTTPS gateway URL template containing exactly one `{cid}` placeholder (loopback HTTP is allowed for development), then request one attachment at a time. Saving that template performs no network request. Each click bypasses the HTTP cache, omits credentials and referrer data, rejects redirects, streams at most 32 MiB into the tab, identifies supported image or video bytes from their signatures instead of a gateway-supplied media type, and creates only a temporary blob URL. The gateway still receives the browser's IP address, requested CID, and page origin, which the interface discloses before loading. SVG, HTML, and other active or document formats are not rendered.
+
+This first retrieval path displays only CIDv1 `raw` attachments. It recomputes SHA-256 over the complete bounded response and compares the digest with the on-chain CID before decoding the media. A path gateway's ordinary UnixFS response is not enough to verify a `dag-pb`, `dag-cbor`, or `dag-json` root, so those commitments remain visible but are deliberately not fetched. Supporting them requires a later trustless block/CAR traversal rather than trusting the selected gateway to substitute bytes.
 
 ## Addressing is not storage
 
-A CID proves that an event committed to a content address. It does not prove that any IPFS node has the bytes or will retain them. The publishing form therefore describes its CID field as an already-uploaded address and makes no availability claim.
+A CID proves that an event committed to a content address. A successfully rendered raw attachment additionally proves that the bytes returned for that click match the address. Neither fact proves that any IPFS node will retain the bytes. The publishing form therefore describes its CID field as an already-uploaded address and makes no availability claim.
 
 A useful media workflow has at least three distinct operations:
 
