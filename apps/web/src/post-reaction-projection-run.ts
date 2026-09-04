@@ -19,7 +19,8 @@ import {
 } from './post-reaction-projection'
 import {
   POST_REACTION_EVENT_PAGE_SIZE,
-  POST_REACTION_EVENT_START_BLOCK,
+  assertIssuedPostReactionProjectionAnchor,
+  authenticateIssuedPostReactionProjectionAnchor,
   type PostReactionProjectionAnchor,
   type PostReactionStreamStorageOptions,
 } from './post-reaction-stream'
@@ -49,6 +50,7 @@ export type PostReactionProjectionRunSnapshot = {
   phase: PostReactionProjectionRunPhase
   reposts: PostReactionProjectionRunStreamProgress
   safeHead?: bigint
+  startBlock: bigint
 }
 
 export type PostReactionProjectionBaselines = {
@@ -64,9 +66,11 @@ export type OpenPostReactionProjectionRunOptions =
 type NormalizedProjectionAnchor = {
   chainId: bigint
   head: bigint
+  issued: PostReactionProjectionAnchor
   likes: EventCachePosition
   reposts: EventCachePosition
   safeHead?: bigint
+  startBlock: bigint
 }
 
 type MutableStreamProgress = {
@@ -181,6 +185,7 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
   if (!isRecord(value)) throw projectionRunError('anchor')
   assertQuantity(value.chainId, 'anchor chain identifier')
   assertQuantity(value.head, 'anchor head')
+  assertQuantity(value.startBlock, 'anchor start block')
   const expectedSafeHead =
     value.head >= POST_FEED_CONFIRMATION_DEPTH
       ? value.head - POST_FEED_CONFIRMATION_DEPTH
@@ -189,20 +194,18 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
     throw projectionRunError('anchor safe head')
   }
   const expectedNextBlock =
-    expectedSafeHead === undefined
-      ? POST_REACTION_EVENT_START_BLOCK
-      : expectedSafeHead + 1n
+    expectedSafeHead === undefined ? value.startBlock : expectedSafeHead + 1n
   const likeSeed = createEventCursor({
     chainId: value.chainId,
     filter: POST_LIKE_SET_FILTER,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: POST_REACTION_EVENT_START_BLOCK,
+    startBlock: value.startBlock,
   })
   const repostSeed = createEventCursor({
     chainId: value.chainId,
     filter: PUBLISHED_REPOST_FILTER,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: POST_REACTION_EVENT_START_BLOCK,
+    startBlock: value.startBlock,
   })
   const likes = normalizeCachePosition(
     value.likes,
@@ -229,12 +232,15 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
       throw projectionRunError('anchor shared safe-head checkpoint')
     }
   }
+  assertIssuedPostReactionProjectionAnchor(value)
   return {
     chainId: value.chainId,
     head: value.head,
+    issued: value,
     likes,
     reposts,
     safeHead: expectedSafeHead,
+    startBlock: value.startBlock,
   }
 }
 
@@ -283,6 +289,7 @@ export class PostReactionProjectionRun {
   }
   #advancing = false
   #failure?: Error
+  readonly #interruption = new AbortController()
   #likeBaseline?: EventCacheScanBaseline
   #likeCache?: BrowserEventCache
   #likeContinuation?: EventCacheScanCursor
@@ -353,6 +360,7 @@ export class PostReactionProjectionRun {
       phase: this.#phase,
       reposts: copyProgress(this.#progress.reposts),
       safeHead: this.#anchor.safeHead,
+      startBlock: this.#anchor.startBlock,
     }
   }
 
@@ -443,6 +451,7 @@ export class PostReactionProjectionRun {
       return
     }
     this.#phase = 'closed'
+    this.#interruption.abort()
     this.#projection.reset()
     this.#likeBaseline = undefined
     this.#repostBaseline = undefined
@@ -505,18 +514,25 @@ export class PostReactionProjectionRun {
     if (!cache || !likeBaseline || !repostBaseline) {
       throw projectionRunError('baseline authentication state')
     }
-    await cache.authenticateBaselines([
-      {
-        baseline: likeBaseline,
-        filter: POST_LIKE_SET_FILTER,
-        seed: getSeed(this.#anchor.likes),
-      },
-      {
-        baseline: repostBaseline,
-        filter: PUBLISHED_REPOST_FILTER,
-        seed: getSeed(this.#anchor.reposts),
-      },
-    ])
+    const authenticateCache = () =>
+      cache.authenticateBaselines([
+        {
+          baseline: likeBaseline,
+          filter: POST_LIKE_SET_FILTER,
+          seed: getSeed(this.#anchor.likes),
+        },
+        {
+          baseline: repostBaseline,
+          filter: PUBLISHED_REPOST_FILTER,
+          seed: getSeed(this.#anchor.reposts),
+        },
+      ])
+    await authenticateCache()
+    await authenticateIssuedPostReactionProjectionAnchor(
+      this.#anchor.issued,
+      authenticateCache,
+      this.#interruption.signal,
+    )
     const currentPhase = this.#readPhase()
     if (currentPhase === 'closed') {
       throw new Error('The post reaction projection run is closed.')
@@ -539,6 +555,7 @@ export class PostReactionProjectionRun {
   #fail(error: Error) {
     this.#failure = error
     this.#phase = 'failed'
+    this.#interruption.abort()
     this.#projection.reset()
     this.#likeBaseline = undefined
     this.#repostBaseline = undefined

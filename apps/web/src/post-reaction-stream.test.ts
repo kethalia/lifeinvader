@@ -10,12 +10,18 @@ import {
   type Address,
   type Hex,
 } from 'viem'
-import type { Eip1193Provider } from './ethereum'
+import {
+  WALLET_READ_TIMEOUT_MS,
+  type Eip1193Provider,
+  type ProviderRequest,
+} from './ethereum'
+import { BrowserEventCache } from './event-cache'
 import {
   POST_CONTENT_KIND_TOPIC,
   POST_LIKE_SET_FILTER,
   PUBLISHED_REPOST_FILTER,
 } from './protocol-events'
+import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
 import {
   LIFEINVADER_INIT_CODE,
@@ -23,6 +29,7 @@ import {
   PROTOCOL_ADDRESS,
   REPOST_PUBLISHED_TOPIC,
 } from './protocol'
+import { ProtocolHistoryUnavailableError } from './protocol-history'
 
 const ACCOUNT = '0x000000000000000000000000000000000000c0c0' as Address
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
@@ -88,7 +95,17 @@ function storage(factory = new IDBFactory()) {
   }
 }
 
-afterEach(() => vi.restoreAllMocks())
+async function unsupportedHistory(): Promise<never> {
+  throw new ProtocolHistoryUnavailableError(
+    0n,
+    new Error('Historical state is unavailable.'),
+  )
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('post reaction stream synchronization', () => {
   it('resumes two isolated streams through one bounded range each', async () => {
@@ -195,6 +212,284 @@ describe('post reaction stream synchronization', () => {
     ])
   })
 
+  it('starts both streams at the verified deployment block and projects that scope', async () => {
+    const deploymentBlock = 3_456n
+    const logQueries: Array<{
+      fromBlock: string
+      toBlock: string
+      topic: unknown
+    }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [
+            { fromBlock: string; toBlock: string; topics: readonly unknown[] },
+          ]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+            topic: filter.topics[0],
+          })
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    const snapshot = await synchronizePostReactionStream(provider, 1n, {
+      storage: cacheStorage,
+    })
+
+    expect(snapshot).toMatchObject({
+      likes: { caughtUp: true, indexedThrough: 4_988n },
+      reposts: { caughtUp: true, indexedThrough: 4_988n },
+      startBlock: deploymentBlock,
+    })
+    expect(snapshot.projectionAnchor?.likes.cursor.startBlock).toBe(
+      deploymentBlock,
+    )
+    expect(snapshot.projectionAnchor?.reposts.cursor.startBlock).toBe(
+      deploymentBlock,
+    )
+    expect(logQueries).toEqual([
+      {
+        fromBlock: toHex(deploymentBlock),
+        toBlock: toHex(4_988n),
+        topic: LIKE_SET_TOPIC,
+      },
+      {
+        fromBlock: toHex(deploymentBlock),
+        toBlock: toHex(4_988n),
+        topic: REPOST_PUBLISHED_TOPIC,
+      },
+    ])
+
+    const projection = await openPostReactionProjectionRun(
+      snapshot.projectionAnchor!,
+      cacheStorage,
+    )
+    expect(projection.snapshot.startBlock).toBe(deploymentBlock)
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'reposts',
+    })
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'authenticate',
+    })
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'complete',
+    })
+  })
+
+  it('rediscovers a replaced history anchor before mutating either event cache', async () => {
+    let branch = 'a'
+    let deploymentBlock = 37n
+    let reorganized = false
+    let scanned = false
+    const logQueries: Array<{ fromBlock: string; topic: unknown }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') {
+          if (scanned && !reorganized) {
+            branch = 'b'
+            deploymentBlock = 41n
+            reorganized = true
+          }
+          return '0x1'
+        }
+        if (method === 'eth_blockNumber') return '0x64'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          return { hash: blockHash(blockNumber, branch), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [
+            { fromBlock: string; topics: readonly unknown[] },
+          ]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            topic: filter.topics[0],
+          })
+          scanned = true
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
+
+    await expect(
+      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({ startBlock: 41n })
+    expect(logQueries).toEqual([
+      { fromBlock: '0x25', topic: LIKE_SET_TOPIC },
+      { fromBlock: '0x29', topic: LIKE_SET_TOPIC },
+      { fromBlock: '0x29', topic: REPOST_PUBLISHED_TOPIC },
+    ])
+    expect(apply).toHaveBeenCalledTimes(2)
+  })
+
+  it('falls back both streams to genesis when historical code is unavailable', async () => {
+    const fromBlocks: string[] = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          throw new Error('missing trie node')
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string }]
+          fromBlocks.push(filter.fromBlock)
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({ startBlock: 0n })
+    expect(fromBlocks).toEqual(['0x0', '0x0'])
+  })
+
+  it('does not start genesis scans while a historical code request is timed out', async () => {
+    vi.useFakeTimers()
+    const requests: ProviderRequest[] = []
+    const provider: Eip1193Provider = {
+      async request(request) {
+        requests.push(request)
+        const { method, params } = request
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          return new Promise<unknown>(() => undefined)
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const outcome = synchronizePostReactionStream(provider, 1n, {
+      storage: storage(),
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(WALLET_READ_TIMEOUT_MS)
+    const error = await outcome
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/history discovery timed out/i)
+    expect(requests).not.toContainEqual(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('waits to project a deployment newer than the confirmed head', async () => {
+    let head = 20n
+    const logQueries: Array<{ fromBlock: string; topic: unknown }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(head)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= 14n
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [
+            { fromBlock: string; topics: readonly unknown[] },
+          ]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            topic: filter.topics[0],
+          })
+          return filter.topics[0] === LIKE_SET_TOPIC
+            ? [rawLike(14n, 7n, true)]
+            : [rawRepost(15n, 7n)]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    await expect(
+      synchronizePostReactionStream(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      likes: { caughtUp: false, indexedThrough: undefined, scannedRanges: 0 },
+      projectionAnchor: undefined,
+      reposts: {
+        caughtUp: false,
+        indexedThrough: undefined,
+        scannedRanges: 0,
+      },
+      startBlock: 9n,
+    })
+    expect(logQueries).toEqual([])
+
+    head = 32n
+    await expect(
+      synchronizePostReactionStream(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      likes: {
+        caughtUp: true,
+        recentSignals: [{ blockNumber: 14n, postId: 7n }],
+      },
+      projectionAnchor: {
+        likes: { cursor: { startBlock: 9n } },
+        reposts: { cursor: { startBlock: 9n } },
+      },
+      reposts: {
+        caughtUp: true,
+        recentReposts: [{ blockNumber: 15n, postId: 7n }],
+      },
+      startBlock: 9n,
+    })
+    expect(logQueries).toEqual([
+      { fromBlock: '0x9', topic: LIKE_SET_TOPIC },
+      { fromBlock: '0x9', topic: REPOST_PUBLISHED_TOPIC },
+    ])
+  })
+
   it('refuses to anchor reaction streams from different safe-head forks', async () => {
     const branches = [
       ...Array<string>(5).fill('a'),
@@ -223,7 +518,10 @@ describe('post reaction stream synchronization', () => {
     }
 
     await expect(
-      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
+      synchronizePostReactionStream(provider, 1n, {
+        resolveHistoryBoundary: unsupportedHistory,
+        storage: storage(),
+      }),
     ).rejects.toThrow(/do not share one confirmed safe-head block/i)
     expect(blockReads).toBe(branches.length)
   })
@@ -348,7 +646,10 @@ describe('post reaction stream synchronization', () => {
     }
 
     await expect(
-      synchronizePostReactionStream(provider, 1n, { storage: storage() }),
+      synchronizePostReactionStream(provider, 1n, {
+        resolveHistoryBoundary: unsupportedHistory,
+        storage: storage(),
+      }),
     ).rejects.toThrow(/confirmed post-like stream checkpoint changed/i)
   })
 

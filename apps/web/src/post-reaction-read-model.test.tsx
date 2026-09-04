@@ -51,6 +51,7 @@ function stream(
       safeHead: 8n,
       scannedRanges: 1,
     },
+    startBlock: 0n,
   }
 }
 
@@ -69,6 +70,7 @@ function projection(
       pagesScanned: complete ? 1n : 0n,
     },
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 
