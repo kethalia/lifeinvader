@@ -1003,13 +1003,22 @@ describe('Filecoin storage funding transport', () => {
     const wallet = walletProvider({ logs: fundingLogs(plan) })
     const deadline = BigInt(Math.floor(Date.now() / 1_000)) + 3_600n
     const typedData = permit(plan, deadline)
+    let permitDataReads = 0
+    const permitParams: unknown[] = [plan.account, typedData]
+    Object.defineProperty(permitParams, 1, {
+      configurable: true,
+      get: () => {
+        permitDataReads += 1
+        return permitDataReads === 1 ? typedData : '{"primaryType":"Transfer"}'
+      },
+    })
 
     await expect(
       fundFilecoinStorage(wallet.provider, quote, {
         ...fundingOptions(plan, async ({ request }) => {
           const candidate: ProviderRequest = {
             method: 'eth_signTypedData_v4',
-            params: [plan.account, typedData],
+            params: permitParams,
           }
           const signature = request(candidate)
           candidate.method = 'personal_sign'
@@ -1052,6 +1061,7 @@ describe('Filecoin storage funding transport', () => {
     expect(
       wallet.requests.some(({ method }) => method === 'personal_sign'),
     ).toBe(false)
+    expect(permitDataReads).toBe(1)
   })
 
   it('snapshots validated transaction fields and injects the exact chain', async () => {
@@ -1063,20 +1073,22 @@ describe('Filecoin storage funding transport', () => {
     )
     const wallet = walletProvider({ logs: fundingLogs(plan) })
     const data = fundingData(plan)
+    let simulationSenderReads = 0
+    const simulation = {
+      data,
+      get from() {
+        simulationSenderReads += 1
+        return simulationSenderReads <= 3 ? plan.account : undefined
+      },
+      to: plan.network.contracts.filecoinPay,
+    }
 
     await expect(
       fundFilecoinStorage(wallet.provider, quote, {
         ...fundingOptions(plan, async ({ request }) => {
           await request({
             method: 'eth_call',
-            params: [
-              {
-                data,
-                from: plan.account,
-                to: plan.network.contracts.filecoinPay,
-              },
-              'latest',
-            ],
+            params: [simulation, 'latest'],
           })
           const candidate: ProviderRequest = {
             method: 'eth_sendTransaction',
@@ -1101,6 +1113,20 @@ describe('Filecoin storage funding transport', () => {
         }),
       }),
     ).resolves.toMatchObject({ hash: TRANSACTION_HASH })
+    expect(simulationSenderReads).toBe(1)
+    expect(wallet.requests.find(({ method }) => method === 'eth_call')).toEqual(
+      {
+        method: 'eth_call',
+        params: [
+          {
+            data,
+            from: plan.account,
+            to: plan.network.contracts.filecoinPay,
+          },
+          'latest',
+        ],
+      },
+    )
     expect(
       wallet.requests.filter(({ method }) => method === 'eth_sendTransaction'),
     ).toEqual([

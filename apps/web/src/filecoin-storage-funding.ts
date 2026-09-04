@@ -270,12 +270,13 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
 }
 
 function requestParams(request: ProviderRequest, label: string) {
-  if (!Array.isArray(request.params)) {
+  const params = request.params
+  if (!Array.isArray(params)) {
     throw fundingError(
       `the wallet adapter produced invalid ${label} parameters.`,
     )
   }
-  return request.params
+  return params
 }
 
 function parseAddress(value: unknown, label: string): Address {
@@ -312,8 +313,13 @@ function validateTransactionEnvelope(
   plan: FilecoinStorageFundingPlan,
 ) {
   const transaction = asRecord(value, 'transaction')
-  const to = parseAddress(transaction.to, 'transaction target')
-  const from = parseAddress(transaction.from, 'transaction sender')
+  const toValue = transaction.to
+  const fromValue = transaction.from
+  const valueValue = transaction.value
+  const chainIdValue = transaction.chainId
+  const dataValue = transaction.data
+  const to = parseAddress(toValue, 'transaction target')
+  const from = parseAddress(fromValue, 'transaction sender')
   if (!sameAddress(to, plan.network.contracts.filecoinPay)) {
     throw fundingError('the wallet adapter targeted an unexpected contract.')
   }
@@ -321,18 +327,18 @@ function validateTransactionEnvelope(
     throw fundingError('the wallet adapter selected an unexpected sender.')
   }
   if (
-    transaction.value !== undefined &&
-    parseQuantity(transaction.value, 'transaction value') !== 0n
+    valueValue !== undefined &&
+    parseQuantity(valueValue, 'transaction value') !== 0n
   ) {
     throw fundingError('the Filecoin Pay transaction tried to send native FIL.')
   }
   if (
-    transaction.chainId !== undefined &&
-    parseQuantity(transaction.chainId, 'transaction chain') !== plan.chainId
+    chainIdValue !== undefined &&
+    parseQuantity(chainIdValue, 'transaction chain') !== plan.chainId
   ) {
     throw fundingError('the wallet adapter selected an unexpected chain.')
   }
-  const data = parseHex(transaction.data, 'transaction data', 4_096)
+  const data = parseHex(dataValue, 'transaction data', 4_096)
   return {
     data,
     request: {
@@ -473,11 +479,13 @@ function validatePermit(
   if (params.length !== 2) {
     throw fundingError('the wallet adapter produced invalid permit parameters.')
   }
-  const signer = parseAddress(params[0], 'permit signer')
+  const signerValue = params[0]
+  const permitData = params[1]
+  const signer = parseAddress(signerValue, 'permit signer')
   if (!sameAddress(signer, plan.account)) {
     throw fundingError('the permit selected an unexpected signer.')
   }
-  const typedData = parseTypedData(params[1])
+  const typedData = parseTypedData(permitData)
   const domain = asRecord(typedData.domain, 'permit domain')
   const message = asRecord(typedData.message, 'permit message')
   const types = asRecord(typedData.types, 'permit types')
@@ -530,7 +538,7 @@ function validatePermit(
     deadline,
     request: {
       method: 'eth_signTypedData_v4',
-      params: [signer, params[1] as string],
+      params: [signer, permitData as string],
     },
   }
 }
@@ -547,22 +555,28 @@ function validateReadCall(
       'the wallet adapter produced invalid contract-read parameters.',
     )
   }
-  const call = asRecord(params[0], 'contract read')
-  const to = parseAddress(call.to, 'contract-read target')
-  const data = parseHex(call.data, 'contract-read data', 4_096)
+  const callValue = params[0]
+  const block = params[1]
+  const call = asRecord(callValue, 'contract read')
+  const toValue = call.to
+  const dataValue = call.data
+  const fromValue = call.from
+  const valueValue = call.value
+  const to = parseAddress(toValue, 'contract-read target')
+  const data = parseHex(dataValue, 'contract-read data', 4_096)
   if (
-    call.from !== undefined &&
-    !sameAddress(parseAddress(call.from, 'contract-read sender'), plan.account)
+    fromValue !== undefined &&
+    !sameAddress(parseAddress(fromValue, 'contract-read sender'), plan.account)
   ) {
     throw fundingError('the wallet adapter selected an unexpected read sender.')
   }
   if (
-    call.value !== undefined &&
-    parseQuantity(call.value, 'contract-read value') !== 0n
+    valueValue !== undefined &&
+    parseQuantity(valueValue, 'contract-read value') !== 0n
   ) {
     throw fundingError('the wallet adapter simulated a native FIL transfer.')
   }
-  if (params[1] !== undefined && params[1] !== 'latest') {
+  if (block !== undefined && block !== 'latest') {
     throw fundingError('the wallet adapter selected a stale read block.')
   }
   const simulatedData = validatePinnedRead(
@@ -572,14 +586,14 @@ function validateReadCall(
     permitDeadline,
     permitSignature,
   )
-  if (simulatedData && call.from === undefined) {
+  if (simulatedData && fromValue === undefined) {
     throw fundingError(
       'the wallet adapter omitted the funding simulation sender.',
     )
   }
   const snapshot: Record<string, unknown> = { data, to }
-  if (call.from !== undefined) snapshot.from = plan.account
-  if (call.value !== undefined) snapshot.value = '0x0'
+  if (fromValue !== undefined) snapshot.from = plan.account
+  if (valueValue !== undefined) snapshot.value = '0x0'
   return {
     request: {
       method: 'eth_call',
