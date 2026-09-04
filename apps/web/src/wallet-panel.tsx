@@ -227,6 +227,7 @@ export function WalletPanel({
   const [mediaPickerRevision, setMediaPickerRevision] = useState(0)
   const [mediaPreparationBusy, setMediaPreparationBusy] = useState(false)
   const [mediaPreparationFailed, setMediaPreparationFailed] = useState(false)
+  const [storageWriteLocked, setStorageWriteLocked] = useState(false)
   const [preparedMedia, setPreparedMedia] = useState<PreparedMediaCar>()
   const [preparedMediaPublicationChainId, setPreparedMediaPublicationChainId] =
     useState<bigint>()
@@ -707,9 +708,11 @@ export function WalletPanel({
   const busyAction = busyOperations.findLast((operation) =>
     busyOperationMatchesSession(operation, session),
   )?.action
-  const transactionWriteLocked = activeSubmittedTransactions.some(
+  const protocolTransactionWriteLocked = activeSubmittedTransactions.some(
     (transaction) => transaction.status !== 'failed',
   )
+  const transactionWriteLocked =
+    protocolTransactionWriteLocked || storageWriteLocked
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
       <div className="wallet-panel-heading">
@@ -930,7 +933,10 @@ export function WalletPanel({
             </form>
           )}
           <FilecoinStoragePanel
-            disabled={busyAction !== undefined || transactionWriteLocked}
+            disabled={
+              busyAction !== undefined || protocolTransactionWriteLocked
+            }
+            onWriteLockChange={setStorageWriteLocked}
             prepared={preparedMedia}
             publicationChainId={preparedMediaPublicationChainId}
             session={session}

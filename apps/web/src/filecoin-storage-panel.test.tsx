@@ -8,9 +8,12 @@ import {
 } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CID } from 'multiformats/cid'
+import type { Hash } from 'viem'
 import type { Eip1193Provider } from './ethereum'
 import {
   FilecoinStoragePanel,
+  type FilecoinStorageFunder,
+  type FilecoinStorageFundingReceiptChecker,
   type FilecoinStorageInspector,
   type FilecoinStorageQuoter,
 } from './filecoin-storage-panel'
@@ -22,6 +25,10 @@ import {
 import type { FilecoinStorageQuote } from './filecoin-storage-quote'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
+import {
+  TransactionSubmissionUnknownError,
+  type TransactionReceipt,
+} from './protocol'
 import type { WalletSession } from './wallet-session'
 
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
@@ -29,6 +36,14 @@ const MEDIA_CID = parseMediaCid(
   'bafkreiciqd2dbfh6pw7j4t2hgvbafrboumt5lmqiqixkj4jlhmjrmszugm',
 )!
 const CALIBRATION = FILECOIN_STORAGE_NETWORKS[1]
+const STREAMING_LOCKUP = 120_000n * 86_400n
+const TRANSACTION_HASH = `0x${'12'.repeat(32)}` as Hash
+const BLOCK_HASH = `0x${'34'.repeat(32)}` as Hash
+const receipt: TransactionReceipt = {
+  blockHash: BLOCK_HASH,
+  blockNumber: 42n,
+  hash: TRANSACTION_HASH,
+}
 const provider: Eip1193Provider = {
   request: vi.fn(async () => undefined),
 }
@@ -54,10 +69,10 @@ const quote: FilecoinStorageQuote = {
   lockups: {
     cacheMissLockup: 0n,
     cdnLockup: 0n,
-    lifecycleLockup: 8_000_000_000_000_000n,
+    lifecycleLockup: 8_000_000_000_000_000n - STREAMING_LOCKUP,
     rateDeltaPerEpoch: 120_000n,
     reserveReplenishment: 0n,
-    streamingLockup: 0n,
+    streamingLockup: STREAMING_LOCKUP,
     total: 8_000_000_000_000_000n,
   },
   needsServiceApproval: true,
@@ -89,6 +104,44 @@ function deferred<T>() {
     resolve = next
   })
   return { promise, resolve }
+}
+
+async function renderFundingQuote({
+  checkFundingReceipt,
+  fundStorage,
+  onWriteLockChange,
+  quoteStorage,
+  session = connectedSession(),
+}: {
+  checkFundingReceipt?: FilecoinStorageFundingReceiptChecker
+  fundStorage?: FilecoinStorageFunder
+  onWriteLockChange?(locked: boolean): void
+  quoteStorage: FilecoinStorageQuoter
+  session?: WalletSession
+}) {
+  const inspectStorage = vi.fn<FilecoinStorageInspector>(async () => ({
+    kind: 'ready',
+    network: CALIBRATION,
+  }))
+  const view = render(
+    <FilecoinStoragePanel
+      checkFundingReceipt={checkFundingReceipt}
+      fundStorage={fundStorage}
+      inspectStorage={inspectStorage}
+      onWriteLockChange={onWriteLockChange}
+      prepared={prepared}
+      quoteStorage={quoteStorage}
+      session={session}
+    />,
+  )
+  fireEvent.click(
+    screen.getByRole('button', { name: /^check Filecoin contracts$/i }),
+  )
+  fireEvent.click(
+    await screen.findByRole('button', { name: /quote one Filecoin copy/i }),
+  )
+  await screen.findByRole('heading', { name: /fund the public wallet/i })
+  return view
 }
 
 afterEach(cleanup)
@@ -461,6 +514,240 @@ describe('FilecoinStoragePanel', () => {
       screen.getByRole('button', { name: /check Filecoin contracts again/i }),
     )
     expect(screen.queryByText('0.013 USDFC')).toBeNull()
+  })
+
+  it('discloses, requotes, submits once, and refreshes after confirmation', async () => {
+    const readyQuote = {
+      ...quote,
+      depositNeeded: 0n,
+      needsServiceApproval: false,
+      ready: true,
+    }
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>()
+    quoteStorage
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(readyQuote)
+    const pendingReceipt = deferred<TransactionReceipt>()
+    const fundStorage = vi.fn<FilecoinStorageFunder>(
+      async (_provider, _quote, options) => {
+        options.onSubmitted?.(TRANSACTION_HASH)
+        return await pendingReceipt.promise
+      },
+    )
+    const onWriteLockChange = vi.fn()
+    await renderFundingQuote({
+      fundStorage,
+      onWriteLockChange,
+      quoteStorage,
+    })
+
+    expect(screen.getByText(/account-level credit/i)).toBeTruthy()
+    expect(screen.getByText(/maximum uint256 rate and lockup/i)).toBeTruthy()
+    expect(screen.getByText(/86400 epochs/i)).toBeTruthy()
+    expect(screen.getByText(/does not upload bytes/i)).toBeTruthy()
+    const fundButton = screen.getByRole('button', {
+      name: /refresh quote and fund Filecoin Pay/i,
+    }) as HTMLButtonElement
+    expect(fundButton.disabled).toBe(true)
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(fundButton)
+    fireEvent.click(fundButton)
+
+    await screen.findByTitle(TRANSACTION_HASH)
+    expect(quoteStorage).toHaveBeenCalledTimes(2)
+    expect(fundStorage).toHaveBeenCalledTimes(1)
+    expect(fundStorage).toHaveBeenCalledWith(
+      provider,
+      quote,
+      expect.objectContaining({
+        expectedAccount: ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+        onSubmitted: expect.any(Function),
+        signal: expect.any(AbortSignal),
+      }),
+    )
+    expect(onWriteLockChange).toHaveBeenCalledWith(true)
+
+    await act(async () => pendingReceipt.resolve(receipt))
+    expect(
+      await screen.findByText(/account funding confirmed in block 42/i),
+    ).toBeTruthy()
+    await waitFor(() => expect(quoteStorage).toHaveBeenCalledTimes(3))
+    expect(
+      await screen.findByText(/existing Filecoin Pay funds.*satisfy/i),
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+  })
+
+  it('stops before the wallet when the refreshed quote changes', async () => {
+    const changedQuote = {
+      ...quote,
+      depositNeeded: quote.depositNeeded + 1n,
+    }
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>()
+    quoteStorage
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(changedQuote)
+    const fundStorage = vi.fn<FilecoinStorageFunder>()
+    await renderFundingQuote({ fundStorage, quoteStorage })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /refresh quote and fund Filecoin Pay/i,
+      }),
+    )
+
+    expect(await screen.findByText(/live quote changed/i)).toBeTruthy()
+    expect(fundStorage).not.toHaveBeenCalled()
+    expect(screen.getByText('0.013000000000000001 USDFC')).toBeTruthy()
+    expect(
+      (
+        screen.getByRole('button', {
+          name: /refresh quote and fund Filecoin Pay/i,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true)
+  })
+
+  it('distinguishes rejection from an ambiguous no-hash submission', async () => {
+    const rejectedQuote = vi.fn<FilecoinStorageQuoter>(async () => quote)
+    const rejectedFund = vi.fn<FilecoinStorageFunder>(async () => {
+      throw Object.assign(new Error('User rejected.'), { code: 4001 })
+    })
+    await renderFundingQuote({
+      fundStorage: rejectedFund,
+      quoteStorage: rejectedQuote,
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /wallet request was rejected/i,
+    )
+
+    cleanup()
+    const ambiguousQuote = vi.fn<FilecoinStorageQuoter>(async () => quote)
+    const ambiguousFund = vi.fn<FilecoinStorageFunder>(async () => {
+      throw new TransactionSubmissionUnknownError(new Error('No hash.'))
+    })
+    const onWriteLockChange = vi.fn()
+    await renderFundingQuote({
+      fundStorage: ambiguousFund,
+      onWriteLockChange,
+      quoteStorage: ambiguousQuote,
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /may have broadcast/i,
+    )
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(true),
+    )
+    fireEvent.click(screen.getByRole('button', { name: /clear funding lock/i }))
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+  })
+
+  it('retains a submitted hash across context changes and recovers its receipt', async () => {
+    const readyQuote = {
+      ...quote,
+      depositNeeded: 0n,
+      needsServiceApproval: false,
+      ready: true,
+    }
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>()
+    quoteStorage
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(readyQuote)
+    const fundStorage = vi.fn<FilecoinStorageFunder>(
+      async (_provider, _quote, options) => {
+        options.onSubmitted?.(TRANSACTION_HASH)
+        throw new Error('Receipt unavailable.')
+      },
+    )
+    const checkFundingReceipt = vi.fn<FilecoinStorageFundingReceiptChecker>(
+      async () => receipt,
+    )
+    const view = await renderFundingQuote({
+      checkFundingReceipt,
+      fundStorage,
+      quoteStorage,
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /unknown final status/i,
+    )
+
+    view.rerender(
+      <FilecoinStoragePanel
+        checkFundingReceipt={checkFundingReceipt}
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={{
+          ...connectedSession(),
+          account: '0x000000000000000000000000000000000000b0bb',
+        }}
+      />,
+    )
+    expect(screen.getByTitle(TRANSACTION_HASH)).toBeTruthy()
+    expect(
+      (
+        screen.getByRole('button', {
+          name: /reconnect original wallet/i,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true)
+
+    view.rerender(
+      <FilecoinStoragePanel
+        checkFundingReceipt={checkFundingReceipt}
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={connectedSession()}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /check funding receipt again/i }),
+    )
+    expect(
+      await screen.findByText(/account funding confirmed in block 42/i),
+    ).toBeTruthy()
+    expect(checkFundingReceipt).toHaveBeenCalledWith(
+      provider,
+      TRANSACTION_HASH,
+      quote,
+      {
+        expectedAccount: ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+      },
+    )
+    await waitFor(() => expect(quoteStorage).toHaveBeenCalledTimes(3))
   })
 
   it('turns wallet failures into bounded user-facing errors', async () => {
