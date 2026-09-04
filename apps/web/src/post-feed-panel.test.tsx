@@ -131,6 +131,7 @@ function reactionStream(): PostReactionStreamSnapshot {
       safeHead: 8n,
       scannedRanges: 1,
     },
+    startBlock: 0n,
   }
 }
 
@@ -165,6 +166,7 @@ function reactionProjection(
       pagesScanned: complete ? 1n : 0n,
     },
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 
@@ -353,11 +355,50 @@ describe('PostFeedPanel', () => {
         name: /check for newer reactions/i,
       }),
     ).toBeTruthy()
-    expect(screen.getByText(/exact through confirmed block 8/i)).toBeTruthy()
+    expect(
+      screen.getByText(/exact from block 0 through confirmed block 8/i),
+    ).toBeTruthy()
     expect(
       screen.getByText(/2 likes · 1 repost · You liked this/i),
     ).toBeTruthy()
     expect(run.getSummary).toHaveBeenCalledWith(1n, ACCOUNT)
+  })
+
+  it('explains when reaction history starts after the confirmed head', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const current = reactionStream()
+    const synchronizePostReactions = vi.fn().mockResolvedValue({
+      likes: {
+        ...current.likes,
+        caughtUp: false,
+        indexedThrough: undefined,
+      },
+      reposts: {
+        ...current.reposts,
+        caughtUp: false,
+        indexedThrough: undefined,
+      },
+      startBlock: 9n,
+    })
+    render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={vi.fn().mockResolvedValue(snapshot([post('First post.')]))}
+        synchronizePostReactions={synchronizePostReactions}
+      />,
+    )
+
+    expect(await screen.findByText('First post.')).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /load reaction counts/i }),
+    )
+
+    expect(
+      await screen.findByText(/wait for deployment confirmations/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: /check reaction confirmations/i }),
+    ).toBeTruthy()
   })
 
   it('derives and paginates exact visible comment histories only on request', async () => {

@@ -105,6 +105,12 @@ function reactionStatus(state: PostReactionReadModelState) {
     return 'Reading one bounded range for likes and one for reposts…'
   }
   if (state.phase === 'catchup') {
+    if (
+      state.stream.likes.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.likes.safeHead
+    ) {
+      return `Lifeinvader history can begin at block ${state.stream.startBlock.toString()}, but the confirmed head is still ${state.stream.likes.safeHead.toString()}. Wait for deployment confirmations, then check reactions again.`
+    }
     const likes = state.stream.likes.indexedThrough?.toString() ?? 'none'
     const reposts = state.stream.reposts.indexedThrough?.toString() ?? 'none'
     return `More confirmed reaction history remains. Likes indexed through ${likes}; reposts through ${reposts}.`
@@ -116,19 +122,24 @@ function reactionStatus(state: PostReactionReadModelState) {
     const pages =
       state.projection.likes.pagesScanned +
       state.projection.reposts.pagesScanned
-    return `Local ${state.projection.phase} projection: ${events.toString()} events across ${pages.toString()} bounded pages.`
+    return `Local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()}: ${events.toString()} events across ${pages.toString()} bounded pages.`
   }
   if (state.phase === 'complete') {
     return state.projection.safeHead === undefined
-      ? 'Reaction totals are exact for the currently confirmed empty range.'
-      : `Reaction totals are exact through confirmed block ${state.projection.safeHead.toString()}.`
+      ? `Reaction totals are exact from block ${state.projection.startBlock.toString()} for the currently confirmed empty range.`
+      : `Reaction totals are exact from block ${state.projection.startBlock.toString()} through confirmed block ${state.projection.safeHead.toString()}.`
   }
   return state.message
 }
 
 function reactionButtonLabel(state: PostReactionReadModelState) {
   if (state.phase === 'synchronizing') return 'Reading reactions…'
-  if (state.phase === 'catchup') return 'Load next reaction range'
+  if (state.phase === 'catchup') {
+    return state.stream.likes.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.likes.safeHead
+      ? 'Check reaction confirmations'
+      : 'Load next reaction range'
+  }
   if (state.phase === 'projecting') {
     return state.busy
       ? 'Processing reaction page…'

@@ -1,5 +1,5 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   encodeAbiParameters,
   keccak256,
@@ -7,8 +7,14 @@ import {
   stringToHex,
   toHex,
   type Address,
+  type Hex,
 } from 'viem'
-import { openEventCache, type EventCachePosition } from './event-cache'
+import {
+  BrowserEventCache,
+  openEventCache,
+  type EventCachePosition,
+} from './event-cache'
+import type { Eip1193Provider } from './ethereum'
 import {
   createEventCursor,
   type EventCursor,
@@ -23,7 +29,7 @@ import {
 import { PostReactionProjection } from './post-reaction-projection'
 import {
   POST_REACTION_EVENT_START_BLOCK,
-  type PostReactionProjectionAnchor,
+  synchronizePostReactionStream,
 } from './post-reaction-stream'
 import {
   POST_CONTENT_KIND_TOPIC,
@@ -31,10 +37,12 @@ import {
   PUBLISHED_REPOST_FILTER,
 } from './protocol-events'
 import {
+  LIFEINVADER_INIT_CODE,
   LIKE_SET_TOPIC,
   PROTOCOL_ADDRESS,
   REPOST_PUBLISHED_TOPIC,
 } from './protocol'
+import { ProtocolHistoryUnavailableError } from './protocol-history'
 
 const ACCOUNT_A = '0x000000000000000000000000000000000000aaaa' as Address
 const ACCOUNT_B = '0x000000000000000000000000000000000000bbbb' as Address
@@ -42,11 +50,23 @@ const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
 const FINALITY_DEPTH = 12n
 const HEAD = 17n
 const SAFE_HEAD = HEAD - FINALITY_DEPTH
+const PROTOCOL_RUNTIME_CODE =
+  `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}` as Hex
 
 type TestStorage = Required<
   Pick<OpenPostReactionProjectionRunOptions, 'databaseName' | 'factory'>
 > &
   Pick<OpenPostReactionProjectionRunOptions, 'keyRange'>
+
+type AnchorProviderControl = {
+  head: bigint
+  headAfterRead?: bigint
+  replaceSafeHeadAfterHeadReads?: {
+    hash: Hex
+    remaining: number
+  }
+  safeHeadHash: Hex
+}
 
 function hash(value: string) {
   return keccak256(stringToHex(value))
@@ -153,6 +173,57 @@ function storage(): TestStorage {
   }
 }
 
+async function unsupportedHistory(): Promise<never> {
+  throw new ProtocolHistoryUnavailableError(
+    0n,
+    new Error('Historical state is unavailable.'),
+  )
+}
+
+function anchorProvider() {
+  const control: AnchorProviderControl = {
+    head: HEAD,
+    safeHeadHash: blockHash(SAFE_HEAD),
+  }
+  const provider = {
+    request: vi.fn(async ({ method, params }) => {
+      if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+      if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_blockNumber') {
+        const head = control.head
+        if (control.headAfterRead !== undefined) {
+          control.head = control.headAfterRead
+          control.headAfterRead = undefined
+        }
+        if (control.replaceSafeHeadAfterHeadReads) {
+          control.replaceSafeHeadAfterHeadReads.remaining -= 1
+          if (control.replaceSafeHeadAfterHeadReads.remaining === 0) {
+            control.safeHeadHash = control.replaceSafeHeadAfterHeadReads.hash
+            delete control.replaceSafeHeadAfterHeadReads
+          }
+        }
+        return toHex(head)
+      }
+      if (method === 'eth_getBlockByNumber') {
+        const [number] = params as [Hex]
+        const blockNumber = BigInt(number)
+        return {
+          hash:
+            blockNumber === SAFE_HEAD
+              ? control.safeHeadHash
+              : blockHash(blockNumber),
+          number,
+        }
+      }
+      if (method === 'eth_getLogs') {
+        throw new Error('A caught-up reaction stream must not request logs.')
+      }
+      throw new Error(`Unexpected RPC method: ${method}`)
+    }),
+  } satisfies Eip1193Provider
+  return { control, provider }
+}
+
 async function populateStream(
   storageOptions: TestStorage,
   filter: EventLogFilter,
@@ -181,24 +252,20 @@ async function prepareProjection(
   reposts: readonly IndexedEventLog[],
 ) {
   const storageOptions = storage()
-  const likePosition = await populateStream(
-    storageOptions,
-    POST_LIKE_SET_FILTER,
-    likes,
-  )
-  const repostPosition = await populateStream(
-    storageOptions,
-    PUBLISHED_REPOST_FILTER,
-    reposts,
-  )
+  await populateStream(storageOptions, POST_LIKE_SET_FILTER, likes)
+  await populateStream(storageOptions, PUBLISHED_REPOST_FILTER, reposts)
+  const { control, provider } = anchorProvider()
+  const synchronized = await synchronizePostReactionStream(provider, 1n, {
+    resolveHistoryBoundary: unsupportedHistory,
+    storage: storageOptions,
+  })
+  if (!synchronized.projectionAnchor) {
+    throw new Error('The test streams did not issue a projection anchor.')
+  }
   return {
-    anchor: {
-      chainId: 1n,
-      head: HEAD,
-      likes: likePosition,
-      reposts: repostPosition,
-      safeHead: SAFE_HEAD,
-    } satisfies PostReactionProjectionAnchor,
+    anchor: synchronized.projectionAnchor,
+    control,
+    provider,
     storage: storageOptions,
   }
 }
@@ -225,6 +292,7 @@ describe('post reaction projection run', () => {
       phase: 'likes',
       reposts: { complete: false, logsProcessed: 0n, pagesScanned: 0n },
       safeHead: SAFE_HEAD,
+      startBlock: POST_REACTION_EVENT_START_BLOCK,
     })
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
     expect(() => run.baselines).toThrow(/not complete/i)
@@ -448,6 +516,95 @@ describe('post reaction projection run', () => {
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
   })
 
+  it('rejects an anchor whose confirmed block left the provider chain', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    prepared.control.safeHeadHash = hash('replacement safe head')
+
+    await expect(run.advance()).rejects.toThrow(/checkpoint changed/i)
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.getSummary(7n)).toThrow(/not complete/i)
+  })
+
+  it('rejects a provider head that regresses during final cache proof', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    prepared.control.headAfterRead = HEAD - 1n
+
+    await expect(run.advance()).rejects.toThrow(
+      /head moved behind the post reaction projection anchor/i,
+    )
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.getSummary(7n)).toThrow(/not complete/i)
+  })
+
+  it('rechecks the checkpoint after the final provider head read', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    prepared.control.replaceSafeHeadAfterHeadReads = {
+      hash: hash('replacement after the final head read'),
+      remaining: 2,
+    }
+
+    await expect(run.advance()).rejects.toThrow(/checkpoint changed/i)
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.getSummary(7n)).toThrow(/not complete/i)
+  })
+
+  it('does not start provider authentication after a projection is closed', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    expect(run.snapshot.phase).toBe('authenticate')
+
+    let enterAuthentication!: () => void
+    let releaseAuthentication!: () => void
+    const authenticationEntered = new Promise<void>((resolve) => {
+      enterAuthentication = resolve
+    })
+    const authenticationBlocked = new Promise<void>((resolve) => {
+      releaseAuthentication = resolve
+    })
+    const authenticate = vi
+      .spyOn(BrowserEventCache.prototype, 'authenticateBaselines')
+      .mockImplementationOnce(async () => {
+        enterAuthentication()
+        await authenticationBlocked
+      })
+    const providerRequestCount = prepared.provider.request.mock.calls.length
+
+    const advancing = run.advance()
+    await authenticationEntered
+    run.close()
+    releaseAuthentication()
+
+    await expect(advancing).rejects.toThrow(/cancelled/i)
+    expect(run.snapshot.phase).toBe('closed')
+    expect(authenticate).toHaveBeenCalledTimes(1)
+    expect(prepared.provider.request).toHaveBeenCalledTimes(
+      providerRequestCount,
+    )
+  })
+
   it('discards a partial projection when its scan session is invalidated', async () => {
     const prepared = await prepareProjection(
       [likeLog(1n), likeLog(2n, { account: ACCOUNT_B })],
@@ -478,6 +635,14 @@ describe('post reaction projection run', () => {
 
   it('rejects malformed, non-caught-up, and cross-filter anchors', async () => {
     const prepared = await prepareProjection([], [])
+    expect(Object.isFrozen(prepared.anchor)).toBe(true)
+    expect(Object.isFrozen(prepared.anchor.likes)).toBe(true)
+    expect(Object.isFrozen(prepared.anchor.likes.cursor)).toBe(true)
+    expect(Object.isFrozen(prepared.anchor.reposts)).toBe(true)
+    expect(Object.isFrozen(prepared.anchor.reposts.cursor)).toBe(true)
+    await expect(
+      openPostReactionProjectionRun({ ...prepared.anchor }, prepared.storage),
+    ).rejects.toThrow(/not issued by this page/i)
     const conflictingRepostCheckpoints =
       prepared.anchor.reposts.cursor.checkpoints.map(
         (checkpoint, index, all) =>

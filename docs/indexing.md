@@ -17,7 +17,7 @@ An event cursor is scoped to:
 
 The normalized filter is stored as a fixed-size hash. Topic alternatives are deduplicated and sorted before hashing, so equivalent filters share a cursor. A cursor for another filter or chain is rejected before log requests begin.
 
-The start block and finality depth are explicit cursor inputs. Post, comment, follow, and profile streams now obtain that input from a separately verified, bounded protocol-code discovery; other event families continue to use block zero while the optimization is integrated incrementally. The scanner never silently requests `0x0` through `latest` in one call. Changing the discovered boundary or confirmation policy selects a fresh cursor and cache rather than reinterpreting already accepted ranges.
+The start block and finality depth are explicit cursor inputs. Post, comment, reaction, follow, and profile streams now obtain that input from a separately verified, bounded protocol-code discovery; other event families continue to use block zero while the optimization is integrated incrementally. The scanner never silently requests `0x0` through `latest` in one call. Changing the discovered boundary or confirmation policy selects a fresh cursor and cache rather than reinterpreting already accepted ranges.
 
 ## Protocol history boundary
 
