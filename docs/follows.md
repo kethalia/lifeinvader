@@ -64,6 +64,25 @@ account and direction.
 
 The projection intentionally accepts only later complete-block pages. It does
 not trust or consume the recent stream preview, and it exposes no global count.
-The authenticated cache runner that feeds this projection, follow write helper,
-and UI remain separate milestones, so this is not yet a user-visible follower
-count.
+
+## Authenticated projection runs
+
+A projection run accepts only the exact immutable anchor issued by the current
+page. It reconstructs that anchor's filter from the account and direction,
+checks the cursor scope and safe-head boundary, and scans at most one bounded
+local-cache page per explicit `advance()` call. A dense block stays intact even
+when it exceeds the requested page size.
+
+When scanning reaches the frozen tail, the runner compares the complete log
+count and last position with the cache baseline. It then authenticates that
+baseline, brackets provider chain/head/checkpoint verification with another
+exact cache proof, and only afterward marks the projection complete. Completed
+relationship pages, final counts, projection progress, and the reusable
+baseline cannot be read before that point; the run snapshot exposes only
+explicitly provisional work counters. Cache changes, reorgs, chain changes,
+malformed pages, cancellation, or closure discard all partial derived state.
+
+Projection steps do not request more logs from the RPC endpoint; only the final
+wallet context and canonical-checkpoint proof cross the provider boundary. The
+follow write helper and UI remain separate milestones, so this is not yet a
+user-visible follower count.
