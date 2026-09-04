@@ -53,6 +53,13 @@ export class ProtocolHistoryUnavailableError extends Error {
   }
 }
 
+class ProtocolHistoryTimeoutError extends Error {
+  constructor() {
+    super('Protocol history discovery timed out.')
+    this.name = 'ProtocolHistoryTimeoutError'
+  }
+}
+
 export function isProtocolHistoryUnavailableError(
   error: unknown,
 ): error is ProtocolHistoryUnavailableError {
@@ -160,7 +167,7 @@ async function requestInContext(
   const value = await beforeDeadline(
     () => context.provider.request(request),
     context.deadline,
-    () => new Error('Protocol history discovery timed out.'),
+    () => new ProtocolHistoryTimeoutError(),
     context.signal,
     () => discoveryCancelled(context.contextChanged),
   )
@@ -290,6 +297,7 @@ export async function discoverProtocolHistoryBoundary(
       })
     } catch (error) {
       refreshContext()
+      if (error instanceof ProtocolHistoryTimeoutError) throw error
       throw new ProtocolHistoryUnavailableError(blockNumber, error)
     }
     const code = parseCode(value)

@@ -18,7 +18,11 @@ import {
   synchronizeFollowStream,
   type FollowStreamStorageOptions,
 } from './follow-stream'
-import type { Eip1193Provider, ProviderRequest } from './ethereum'
+import {
+  WALLET_READ_TIMEOUT_MS,
+  type Eip1193Provider,
+  type ProviderRequest,
+} from './ethereum'
 import { BrowserEventCache, openEventCache } from './event-cache'
 import { createEventCursor, type IndexedEventLog } from './event-indexer'
 import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
@@ -115,7 +119,10 @@ function providerFor(
   } satisfies Eip1193Provider
 }
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('follow stream synchronization', () => {
   it('rejects invalid scopes before RPC or storage work', async () => {
@@ -387,6 +394,50 @@ describe('follow stream synchronization', () => {
       }),
     ).resolves.toMatchObject({ caughtUp: true, startBlock: 0n })
     expect(fromBlock).toBe('0x0')
+  })
+
+  it('does not start a genesis scan while a historical code request is timed out', async () => {
+    vi.useFakeTimers()
+    const requests: ProviderRequest[] = []
+    const provider: Eip1193Provider = {
+      async request(request) {
+        requests.push(request)
+        const { method, params } = request
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          return new Promise<unknown>(() => undefined)
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const outcome = synchronizeFollowStream(
+      provider,
+      1n,
+      ACCOUNT_A,
+      'following',
+      { storage: storage() },
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(WALLET_READ_TIMEOUT_MS)
+    const error = await outcome
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/history discovery timed out/i)
+    expect(requests).not.toContainEqual(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
   })
 
   it('waits to project a deployment newer than the confirmed head', async () => {

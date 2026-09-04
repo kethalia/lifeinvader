@@ -3,6 +3,7 @@ import { keccak256, stringToHex, type Hex } from 'viem'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import {
   discoverProtocolHistoryBoundary,
+  isProtocolHistoryUnavailableError,
   resolveProtocolHistoryBoundary,
 } from './protocol-history'
 import { LIFEINVADER_INIT_CODE, PROTOCOL_ADDRESS } from './protocol'
@@ -85,7 +86,10 @@ function providerWithDeployment({
   }
 }
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('protocol history discovery', () => {
   it('finds and authenticates the first confirmed protocol-code block', async () => {
@@ -213,6 +217,27 @@ describe('protocol history discovery', () => {
     expect(
       prepared.requests.filter(({ method }) => method === 'eth_getCode'),
     ).toHaveLength(2)
+  })
+
+  it('does not classify a local deadline as unavailable history', async () => {
+    vi.useFakeTimers()
+    const prepared = providerWithDeployment({
+      onCode: () => new Promise<unknown>(() => undefined),
+    })
+    const outcome = discoverProtocolHistoryBoundary(prepared.provider, 1n, {
+      timeoutMs: 25,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(25)
+    const error = await outcome
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/discovery timed out/i)
+    expect(isProtocolHistoryUnavailableError(error)).toBe(false)
   })
 
   it('brackets discovery with the selected chain and anchored head', async () => {
