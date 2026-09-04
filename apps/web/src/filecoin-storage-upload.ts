@@ -1,18 +1,31 @@
 import {
+  fwss as STORAGE_EVENT_ABI,
+  fwssView as APPROVAL_READ_ABI,
+  serviceProviderRegistry as PROVIDER_READ_ABI,
+} from '@filoz/synapse-core/abis'
+import {
+  hasActivePDPProduct,
+  parsePDPProvider,
+} from '@filoz/synapse-core/sp-registry'
+import {
+  calculate as calculatePieceCid,
+  from as parsePieceCid,
+} from '@filoz/synapse-core/piece'
+import { EIP712Types } from '@filoz/synapse-core/typed-data'
+import {
   bytesToHex,
   custom,
   decodeEventLog,
   decodeFunctionData,
+  decodeFunctionResult,
   encodeEventTopics,
   getAddress,
-  hexToBytes,
   isAddress,
   maxUint256,
   type Address,
   type Hash,
   type Hex,
 } from 'viem'
-import { CID } from 'multiformats/cid'
 import {
   getRpcErrorCode,
   parseAccounts,
@@ -56,108 +69,23 @@ const STORAGE_DOMAIN_NAME = 'FilecoinWarmStorageService'
 const STORAGE_DOMAIN_VERSION = '1'
 const PIECE_METADATA_KEY = 'ipfsRootCID'
 const PDP_PRODUCT_TYPE = 0n
-const PIECE_MULTIHASH_CODE = 0x1011
-
-const PROVIDER_READ_ABI = [
-  {
-    inputs: [
-      { name: 'providerId', type: 'uint256' },
-      { name: 'productType', type: 'uint8' },
-    ],
-    name: 'getProviderWithProduct',
-    outputs: [],
-    stateMutability: 'view',
-    type: 'function',
-  },
-] as const
-
-const APPROVAL_READ_ABI = [
-  {
-    inputs: [{ name: 'providerId', type: 'uint256' }],
-    name: 'isProviderApproved',
-    outputs: [{ name: '', type: 'bool' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-] as const
-
-const STORAGE_EVENT_ABI = [
-  {
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'dataSetId', type: 'uint256' },
-      { indexed: true, name: 'providerId', type: 'uint256' },
-      { indexed: false, name: 'pdpRailId', type: 'uint256' },
-      { indexed: false, name: 'cacheMissRailId', type: 'uint256' },
-      { indexed: false, name: 'cdnRailId', type: 'uint256' },
-      { indexed: false, name: 'payer', type: 'address' },
-      { indexed: false, name: 'serviceProvider', type: 'address' },
-      { indexed: false, name: 'payee', type: 'address' },
-      { indexed: false, name: 'metadataKeys', type: 'string[]' },
-      { indexed: false, name: 'metadataValues', type: 'string[]' },
-    ],
-    name: 'DataSetCreated',
-    type: 'event',
-  },
-  {
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'dataSetId', type: 'uint256' },
-      { indexed: true, name: 'pieceId', type: 'uint256' },
-      {
-        components: [{ name: 'data', type: 'bytes' }],
-        indexed: false,
-        name: 'pieceCid',
-        type: 'tuple',
-      },
-      { indexed: false, name: 'keys', type: 'string[]' },
-      { indexed: false, name: 'values', type: 'string[]' },
-    ],
-    name: 'PieceAdded',
-    type: 'event',
-  },
-] as const
 
 const EIP712_FIELDS = {
-  AddPieces: [
-    { name: 'clientDataSetId', type: 'uint256' },
-    { name: 'nonce', type: 'uint256' },
-    { name: 'pieceData', type: 'Cid[]' },
-    { name: 'pieceMetadata', type: 'PieceMetadata[]' },
-  ],
-  Cid: [{ name: 'data', type: 'bytes' }],
-  CreateDataSet: [
-    { name: 'clientDataSetId', type: 'uint256' },
-    { name: 'payee', type: 'address' },
-    { name: 'metadata', type: 'MetadataEntry[]' },
-  ],
+  ...EIP712Types,
   EIP712Domain: [
     { name: 'name', type: 'string' },
     { name: 'version', type: 'string' },
     { name: 'chainId', type: 'uint256' },
     { name: 'verifyingContract', type: 'address' },
   ],
-  MetadataEntry: [
-    { name: 'key', type: 'string' },
-    { name: 'value', type: 'string' },
-  ],
-  Permit: [
-    { name: 'owner', type: 'address' },
-    { name: 'spender', type: 'address' },
-    { name: 'value', type: 'uint256' },
-    { name: 'nonce', type: 'uint256' },
-    { name: 'deadline', type: 'uint256' },
-  ],
-  PieceMetadata: [
-    { name: 'pieceIndex', type: 'uint256' },
-    { name: 'metadata', type: 'MetadataEntry[]' },
-  ],
-  SchedulePieceRemovals: [
-    { name: 'clientDataSetId', type: 'uint256' },
-    { name: 'pieceIds', type: 'uint256[]' },
-  ],
-  TerminateService: [{ name: 'dataSetId', type: 'uint256' }],
 } as const
+
+type PieceDetails<Bytes> = {
+  bytes: Bytes
+  paddedSize: bigint
+  size: number
+  text: string
+}
 
 export type FilecoinStorageUploadPlan = {
   account: Address
@@ -165,26 +93,11 @@ export type FilecoinStorageUploadPlan = {
   chainId: bigint
   mediaCid: string
   network: FilecoinStorageNetwork
+  piece: PieceDetails<Hex>
   providerId: bigint
 }
 
-export type FilecoinStorageUploadProvider = {
-  ipniIpfs: boolean
-  isActive: boolean
-  maxPieceSizeInBytes: bigint
-  minPieceSizeInBytes: bigint
-  paymentTokenAddress: string
-  providerId: bigint
-  serviceProvider: string
-  serviceUrl: string
-}
-
-export type FilecoinStorageUploadPiece = {
-  bytes: Uint8Array
-  paddedSize: bigint
-  size: number
-  text: string
-}
+export type FilecoinStorageUploadPiece = PieceDetails<Uint8Array>
 
 export type FilecoinStorageUploadCheckpoint = {
   account: Address
@@ -192,12 +105,7 @@ export type FilecoinStorageUploadCheckpoint = {
   chainId: bigint
   ipfsIndexingRequested: true
   mediaCid: string
-  piece: {
-    bytes: Hex
-    paddedSize: bigint
-    size: number
-    text: string
-  }
+  piece: PieceDetails<Hex>
   provider: {
     id: bigint
     serviceProvider: Address
@@ -216,7 +124,6 @@ export type FilecoinStorageUploadExecutorResult = {
 
 export type FilecoinStorageUploadExecutor = (input: {
   authorizeCommit(): Promise<void>
-  onProviderSelected(provider: FilecoinStorageUploadProvider): void
   onStored(piece: FilecoinStorageUploadPiece): void
   onSubmitted(hash: Hash): void
   plan: FilecoinStorageUploadPlan
@@ -266,7 +173,6 @@ class FilecoinStorageUploadError extends Error {}
 export class FilecoinStorageSubmissionUnknownError extends Error {
   readonly checkpoint: FilecoinStorageUploadCheckpoint
   readonly transactionHash?: Hash
-
   constructor(
     cause: unknown,
     checkpoint: FilecoinStorageUploadCheckpoint,
@@ -275,7 +181,7 @@ export class FilecoinStorageSubmissionUnknownError extends Error {
     super(
       transactionHash
         ? `The storage provider reported transaction ${transactionHash}, but its final result is unknown. Check that transaction before authorizing another storage agreement.`
-        : 'The signed storage authorization reached the provider, but no transaction hash was returned. The provider may still submit it; check wallet and provider activity before trying again.',
+        : 'The signed storage authorization was released for provider submission, but no transaction hash was returned. The provider may still submit it; check wallet and provider activity before trying again.',
       { cause },
     )
     this.name = 'FilecoinStorageSubmissionUnknownError'
@@ -296,18 +202,15 @@ function uploadError(reason: string, options?: ErrorOptions) {
     options,
   )
 }
-
 function sameAddress(first: string, second: string) {
   return first.toLowerCase() === second.toLowerCase()
 }
-
 function parseAddress(value: unknown, label: string): Address {
   if (typeof value !== 'string' || !isAddress(value)) {
     throw uploadError(`the ${label} is invalid.`)
   }
   return getAddress(value)
 }
-
 function parseHex(value: unknown, label: string, maximumBytes: number): Hex {
   if (
     typeof value !== 'string' ||
@@ -318,7 +221,6 @@ function parseHex(value: unknown, label: string, maximumBytes: number): Hex {
   }
   return value as Hex
 }
-
 function parseQuantity(value: unknown, label: string): bigint {
   if (
     (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) ||
@@ -329,7 +231,6 @@ function parseQuantity(value: unknown, label: string): bigint {
   }
   throw uploadError(`the ${label} is invalid.`)
 }
-
 function assertUnsigned(
   value: unknown,
   label: string,
@@ -442,6 +343,7 @@ export async function planFilecoinStorageUpload(
     expectedChainId,
     snapshot.carBytes.byteLength,
   )
+  const pieceCid = await calculatePieceCid(snapshot.carBytes)
   return Object.freeze({
     account,
     carBytes: snapshot.carBytes,
@@ -450,6 +352,12 @@ export async function planFilecoinStorageUpload(
     network: Object.freeze({
       ...network,
       contracts: Object.freeze({ ...network.contracts }),
+    }),
+    piece: Object.freeze({
+      bytes: bytesToHex(pieceCid.bytes),
+      paddedSize: pieceCid.paddedSize,
+      size: pieceCid.size,
+      text: pieceCid.toString(),
     }),
     providerId,
   })
@@ -482,16 +390,16 @@ function normalizeServiceUrl(value: unknown) {
 }
 
 function normalizeProvider(
-  value: FilecoinStorageUploadProvider,
+  value: ReturnType<typeof parsePDPProvider>,
   plan: FilecoinStorageUploadPlan,
 ) {
   if (!value || typeof value !== 'object') {
-    throw uploadError('the adapter returned invalid provider details.')
+    throw uploadError('the registry returned invalid provider details.')
   }
-  if (value.providerId !== plan.providerId || value.isActive !== true) {
+  if (value.id !== plan.providerId || value.isActive !== true) {
     throw uploadError('the selected provider is unavailable.')
   }
-  if (value.ipniIpfs !== true) {
+  if (value.pdp.ipniIpfs !== true) {
     throw uploadError('the selected provider does not advertise IPFS indexing.')
   }
   const serviceProvider = parseAddress(
@@ -501,22 +409,22 @@ function normalizeProvider(
   // FWSS fixes the payment token in the preflighted contract graph. Current
   // provider registrations may use the zero-address sentinel for this
   // informational capability, so only its encoding is checked here.
-  parseAddress(value.paymentTokenAddress, 'provider payment token')
+  parseAddress(value.pdp.paymentTokenAddress, 'provider payment token')
   if (
-    typeof value.minPieceSizeInBytes !== 'bigint' ||
-    typeof value.maxPieceSizeInBytes !== 'bigint' ||
-    value.minPieceSizeInBytes < 0n ||
-    value.maxPieceSizeInBytes < value.minPieceSizeInBytes ||
-    value.maxPieceSizeInBytes > maxUint256 ||
-    BigInt(plan.carBytes.byteLength) < value.minPieceSizeInBytes ||
-    BigInt(plan.carBytes.byteLength) > value.maxPieceSizeInBytes
+    typeof value.pdp.minPieceSizeInBytes !== 'bigint' ||
+    typeof value.pdp.maxPieceSizeInBytes !== 'bigint' ||
+    value.pdp.minPieceSizeInBytes < 0n ||
+    value.pdp.maxPieceSizeInBytes < value.pdp.minPieceSizeInBytes ||
+    value.pdp.maxPieceSizeInBytes > maxUint256 ||
+    BigInt(plan.carBytes.byteLength) < value.pdp.minPieceSizeInBytes ||
+    BigInt(plan.carBytes.byteLength) > value.pdp.maxPieceSizeInBytes
   ) {
     throw uploadError('the prepared CAR is outside the provider size range.')
   }
   return Object.freeze({
     id: plan.providerId,
     serviceProvider,
-    serviceUrl: normalizeServiceUrl(value.serviceUrl),
+    serviceUrl: normalizeServiceUrl(value.pdp.serviceURL),
   })
 }
 
@@ -533,29 +441,30 @@ function normalizePiece(
     !Number.isSafeInteger(value.size) ||
     value.size !== plan.carBytes.byteLength ||
     typeof value.paddedSize !== 'bigint' ||
-    value.paddedSize < BigInt(value.size) ||
-    (value.paddedSize & (value.paddedSize - 1n)) !== 0n ||
     typeof value.text !== 'string' ||
     value.text.length === 0 ||
     value.text.length > 256
   ) {
     throw uploadError('the provider returned an invalid PieceCID result.')
   }
-  let cid: CID
+  let cid: ReturnType<typeof parsePieceCid>
   try {
-    cid = CID.decode(value.bytes)
+    cid = parsePieceCid(value.bytes)
   } catch (cause) {
     throw uploadError('the provider returned an invalid PieceCID result.', {
       cause,
     })
   }
   if (
-    cid.version !== 1 ||
-    cid.code !== 0x55 ||
-    cid.multihash.code !== PIECE_MULTIHASH_CODE ||
-    cid.toString() !== value.text
+    cid.toString() !== value.text ||
+    bytesToHex(cid.bytes).toLowerCase() !== plan.piece.bytes.toLowerCase() ||
+    value.paddedSize !== plan.piece.paddedSize ||
+    value.size !== plan.piece.size ||
+    value.text !== plan.piece.text
   ) {
-    throw uploadError('the provider returned an unsupported PieceCID result.')
+    throw uploadError(
+      'the provider returned a PieceCID that does not match the uploaded CAR.',
+    )
   }
   return Object.freeze({
     bytes: bytesToHex(cid.bytes),
@@ -577,7 +486,11 @@ function makeCheckpoint(
     ipfsIndexingRequested: true,
     mediaCid: plan.mediaCid,
     piece,
-    provider,
+    provider: Object.freeze({
+      id: provider.id,
+      serviceProvider: provider.serviceProvider,
+      serviceUrl: provider.serviceUrl,
+    }),
     withCDN: false,
   })
 }
@@ -812,35 +725,86 @@ function validateReadCall(
   }
   const target = parseAddress(call.to, 'contract-read target')
   const data = parseHex(call.data, 'contract-read data', 4_096)
-  let valid = false
+  let kind: 'approval' | 'provider' | undefined
   try {
     if (sameAddress(target, plan.network.contracts.serviceProviderRegistry)) {
       const decoded = decodeFunctionData({ abi: PROVIDER_READ_ABI, data })
-      valid =
+      if (
         decoded.functionName === 'getProviderWithProduct' &&
         decoded.args[0] === plan.providerId &&
         BigInt(decoded.args[1]) === PDP_PRODUCT_TYPE
+      ) {
+        kind = 'provider'
+      }
     } else if (sameAddress(target, plan.network.contracts.fwssView)) {
       const decoded = decodeFunctionData({ abi: APPROVAL_READ_ABI, data })
-      valid =
+      if (
         decoded.functionName === 'isProviderApproved' &&
         decoded.args[0] === plan.providerId
+      ) {
+        kind = 'approval'
+      }
     }
   } catch {
-    valid = false
+    kind = undefined
   }
-  if (!valid) {
+  if (!kind) {
     throw uploadError('the adapter requested an unexpected contract read.')
   }
   return {
-    method: 'eth_call',
-    params: [{ data, to: target }, 'latest'],
-  } satisfies ProviderRequest
+    kind,
+    request: {
+      method: 'eth_call',
+      params: [{ data, to: target }, 'latest'],
+    } satisfies ProviderRequest,
+  }
+}
+
+function authenticateProviderRead(
+  value: unknown,
+  plan: FilecoinStorageUploadPlan,
+) {
+  const data = parseHex(value, 'provider-registry response', 16_384)
+  try {
+    const decoded = decodeFunctionResult({
+      abi: PROVIDER_READ_ABI,
+      data,
+      functionName: 'getProviderWithProduct',
+    })
+    if (!hasActivePDPProduct(decoded)) {
+      throw uploadError('the selected provider has no active PDP product.')
+    }
+    return normalizeProvider(parsePDPProvider(decoded), plan)
+  } catch (cause) {
+    if (cause instanceof FilecoinStorageUploadError) throw cause
+    throw uploadError('the wallet returned invalid provider-registry data.', {
+      cause,
+    })
+  }
+}
+
+function authenticateApprovalRead(value: unknown) {
+  const data = parseHex(value, 'provider-approval response', 32)
+  try {
+    if (
+      decodeFunctionResult({
+        abi: APPROVAL_READ_ABI,
+        data,
+        functionName: 'isProviderApproved',
+      }) !== true
+    ) {
+      throw uploadError('the selected provider is not approved for storage.')
+    }
+  } catch (cause) {
+    if (cause instanceof FilecoinStorageUploadError) throw cause
+    throw uploadError('the wallet returned invalid provider-approval data.', {
+      cause,
+    })
+  }
 }
 
 const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   authorizeCommit,
-  onProviderSelected,
   onStored,
   onSubmitted,
   plan,
@@ -861,18 +825,7 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   if (!binding) {
     throw uploadError(`chain ${plan.chainId.toString()} is unsupported.`)
   }
-  const transport = custom(
-    {
-      request: ({ method, params }) =>
-        request({
-          method,
-          ...(params === undefined
-            ? {}
-            : { params: params as readonly unknown[] | object }),
-        }),
-    },
-    { retryCount: 0 },
-  )
+  const transport = custom({ request }, { retryCount: 0 })
   const synapse = Synapse.create({
     account: plan.account,
     chain: binding.chain,
@@ -892,17 +845,6 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   if (!provider || !approved) {
     throw uploadError('the selected provider is not registered and approved.')
   }
-  onProviderSelected({
-    ipniIpfs: provider.pdp.ipniIpfs,
-    isActive: provider.isActive,
-    maxPieceSizeInBytes: provider.pdp.maxPieceSizeInBytes,
-    minPieceSizeInBytes: provider.pdp.minPieceSizeInBytes,
-    paymentTokenAddress: provider.pdp.paymentTokenAddress,
-    providerId: provider.id,
-    serviceProvider: provider.serviceProvider,
-    serviceUrl: provider.pdp.serviceURL,
-  })
-
   const context = new StorageContext({
     dataSetId: undefined,
     dataSetMetadata: { ...FILECOIN_STORAGE_DATA_SET_METADATA },
@@ -913,6 +855,7 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   })
   const stored = await context.store(plan.carBytes, {
     onProgress: reportProgress,
+    pieceCid: parsePieceCid(plan.piece.bytes),
     signal,
   })
   onStored({
@@ -1173,22 +1116,19 @@ function normalizeCheckpoint(
     throw uploadError('the checkpoint provider ID is invalid.')
   }
   const pieceBytes = parseHex(value.piece.bytes, 'checkpoint PieceCID', 128)
-  let pieceCid: CID
+  let pieceCid: ReturnType<typeof parsePieceCid>
   try {
-    pieceCid = CID.decode(hexToBytes(pieceBytes))
+    pieceCid = parsePieceCid(pieceBytes)
   } catch (cause) {
     throw uploadError('the checkpoint PieceCID is invalid.', { cause })
   }
   if (
-    pieceCid.version !== 1 ||
-    pieceCid.code !== 0x55 ||
-    pieceCid.multihash.code !== PIECE_MULTIHASH_CODE ||
     pieceCid.toString() !== value.piece.text ||
     !Number.isSafeInteger(value.piece.size) ||
     value.piece.size !== value.carByteLength ||
+    pieceCid.size !== value.piece.size ||
     typeof value.piece.paddedSize !== 'bigint' ||
-    value.piece.paddedSize < BigInt(value.piece.size) ||
-    (value.piece.paddedSize & (value.piece.paddedSize - 1n)) !== 0n
+    pieceCid.paddedSize !== value.piece.paddedSize
   ) {
     throw uploadError('the checkpoint PieceCID details are invalid.')
   }
@@ -1322,7 +1262,6 @@ export async function uploadFilecoinStorage(
   ) {
     throw uploadError('the pinned storage-contract graph is not ready.')
   }
-
   const guard = await createTransactionGuard(wallet, plan.account, plan.chainId)
   const operationController = new AbortController()
   const abortOperation = () => {
@@ -1360,28 +1299,37 @@ export async function uploadFilecoinStorage(
       throw error
     }
   }
-
   let requestCount = 0
   let signatureCount = 0
+  let signaturePending = false
   let clientDataSetId: bigint | undefined
-  let selectedProvider: ReturnType<typeof normalizeProvider> | undefined
-  let storedPiece: ReturnType<typeof normalizePiece> | undefined
+  let authenticatedProvider: ReturnType<typeof normalizeProvider> | undefined
+  let providerReadState: 'complete' | 'none' | 'pending' = 'none'
+  let approvalReadState: 'complete' | 'none' | 'pending' = 'none'
   let checkpoint: FilecoinStorageUploadCheckpoint | undefined
   let commitAuthorized = false
   let submittedHash: Hash | undefined
+  let recoveryHash: Hash | undefined
   let submittedCount = 0
   let walletRejection: unknown
   let transportClosed = false
   let lastProgress = 0
   const pendingRequests = new Set<Promise<unknown>>()
-
   const assertTransportOpen = () => {
     if (transportClosed) {
       throw uploadError('the adapter used a closed upload transport.')
     }
   }
+  const assertOperationActive = () => {
+    if (operationController.signal.aborted) {
+      throw uploadError('the upload was cancelled.', {
+        cause: operationController.signal.reason,
+      })
+    }
+  }
   const requestThroughTransport = async (request: ProviderRequest) => {
     assertTransportOpen()
+    assertOperationActive()
     const method = (request as { method?: unknown } | null)?.method
     if (typeof method !== 'string') {
       throw uploadError('the adapter requested an invalid RPC method.')
@@ -1390,17 +1338,23 @@ export async function uploadFilecoinStorage(
     if (requestCount > MAX_FILECOIN_STORAGE_UPLOAD_RPC_REQUESTS) {
       throw uploadError('the adapter exceeded its wallet RPC request budget.')
     }
-
     if (
-      method === 'eth_accounts' ||
-      method === 'eth_blockNumber' ||
-      method === 'eth_chainId' ||
-      method === 'eth_call'
+      ['eth_accounts', 'eth_blockNumber', 'eth_chainId', 'eth_call'].includes(
+        method,
+      )
     ) {
-      const forwarded =
-        method === 'eth_call'
-          ? validateReadCall(request, plan)
-          : ({ method } satisfies ProviderRequest)
+      const read =
+        method === 'eth_call' ? validateReadCall(request, plan) : undefined
+      if (read) {
+        const state =
+          read.kind === 'provider' ? providerReadState : approvalReadState
+        if (state !== 'none') {
+          throw uploadError('the adapter repeated a storage contract read.')
+        }
+        if (read.kind === 'provider') providerReadState = 'pending'
+        else approvalReadState = 'pending'
+      }
+      const forwarded = read?.request ?? ({ method } satisfies ProviderRequest)
       if (
         method !== 'eth_call' &&
         request.params !== undefined &&
@@ -1417,6 +1371,15 @@ export async function uploadFilecoinStorage(
         () => uploadError('the upload was cancelled.'),
       )
       assertTransportOpen()
+      assertOperationActive()
+      if (read?.kind === 'provider') {
+        authenticatedProvider = authenticateProviderRead(result, plan)
+        assertOperationActive()
+        providerReadState = 'complete'
+      } else if (read?.kind === 'approval') {
+        authenticateApprovalRead(result)
+        approvalReadState = 'complete'
+      }
       if (method === 'eth_chainId' && parseChainId(result) !== plan.chainId) {
         throw uploadError('the wallet chain changed during the upload.')
       }
@@ -1431,50 +1394,68 @@ export async function uploadFilecoinStorage(
       }
       return result
     }
-
     if (method === 'eth_signTypedData_v4') {
-      if (!checkpoint || commitAuthorized || signatureCount >= 2) {
+      if (
+        !checkpoint ||
+        commitAuthorized ||
+        signaturePending ||
+        signatureCount >= 2
+      ) {
         throw uploadError('the adapter requested an unexpected signature.')
       }
-      let forwarded: ProviderRequest
-      if (signatureCount === 0) {
-        const validated = validateCreateAuthorization(
-          request,
-          plan,
-          checkpoint.provider,
-        )
-        clientDataSetId = validated.clientDataSetId
-        forwarded = validated.request
-      } else {
-        if (clientDataSetId === undefined) {
-          throw uploadError('the data-set authorization is missing.')
-        }
-        forwarded = validateAddPiecesAuthorization(
-          request,
-          plan,
-          checkpoint,
-          clientDataSetId,
-        )
-      }
-      signatureCount += 1
-      await guard.assertSubmission()
-      assertTransportOpen()
-      let signatureValue: unknown
+      signaturePending = true
       try {
-        signatureValue = await wallet.request(forwarded)
-      } catch (error) {
-        if (getRpcErrorCode(error) === 4001) walletRejection = error
-        throw error
+        let forwarded: ProviderRequest
+        let nextClientDataSetId: bigint | undefined
+        if (signatureCount === 0) {
+          const validated = validateCreateAuthorization(
+            request,
+            plan,
+            checkpoint.provider,
+          )
+          nextClientDataSetId = validated.clientDataSetId
+          forwarded = validated.request
+        } else {
+          if (clientDataSetId === undefined) {
+            throw uploadError('the data-set authorization is missing.')
+          }
+          forwarded = validateAddPiecesAuthorization(
+            request,
+            plan,
+            checkpoint,
+            clientDataSetId,
+          )
+        }
+        await guard.assertSubmission()
+        assertTransportOpen()
+        assertOperationActive()
+        let signatureValue: unknown
+        try {
+          signatureValue = await wallet.request(forwarded)
+        } catch (error) {
+          assertOperationActive()
+          if (getRpcErrorCode(error) === 4001) walletRejection = error
+          throw error
+        }
+        assertOperationActive()
+        guard.assertUnchanged()
+        assertTransportOpen()
+        const signature = parseHex(
+          signatureValue,
+          'wallet storage signature',
+          65,
+        )
+        if (signature.length !== 132) {
+          throw uploadError('the wallet returned an invalid storage signature.')
+        }
+        if (nextClientDataSetId !== undefined)
+          clientDataSetId = nextClientDataSetId
+        signatureCount += 1
+        return signature
+      } finally {
+        signaturePending = false
       }
-      guard.assertUnchanged()
-      assertTransportOpen()
-      const signature = parseHex(signatureValue, 'wallet storage signature', 65)
-      if (signature.length !== 132) {
-        throw uploadError('the wallet returned an invalid storage signature.')
-      }
-      return signature
     }
-
     throw uploadError(
       `the adapter requested forbidden RPC method ${method.slice(0, 80)}.`,
     )
@@ -1499,28 +1480,31 @@ export async function uploadFilecoinStorage(
     transportClosed = true
     await Promise.allSettled([...pendingRequests])
   }
-
-  const onProviderSelected = (value: FilecoinStorageUploadProvider) => {
-    assertTransportOpen()
-    if (selectedProvider || storedPiece || signatureCount !== 0) {
-      throw uploadError('the adapter selected more than one provider.')
-    }
-    selectedProvider = normalizeProvider(value, plan)
-  }
   const onStored = (value: FilecoinStorageUploadPiece) => {
     assertTransportOpen()
-    if (!selectedProvider || storedPiece || signatureCount !== 0) {
+    assertOperationActive()
+    if (
+      providerReadState !== 'complete' ||
+      approvalReadState !== 'complete' ||
+      !authenticatedProvider
+    ) {
+      throw uploadError('the adapter used an unauthenticated provider.')
+    }
+    if (checkpoint || signaturePending || signatureCount !== 0) {
       throw uploadError('the adapter reported an unexpected stored piece.')
     }
-    storedPiece = normalizePiece(value, plan)
-    checkpoint = makeCheckpoint(plan, selectedProvider, storedPiece)
+    const storedPiece = normalizePiece(value, plan)
+    checkpoint = makeCheckpoint(plan, authenticatedProvider, storedPiece)
     options.onStored?.(checkpoint)
   }
   const reportProgress = (bytesUploaded: number) => {
     assertTransportOpen()
+    assertOperationActive()
     if (
-      !selectedProvider ||
-      storedPiece ||
+      !authenticatedProvider ||
+      providerReadState !== 'complete' ||
+      approvalReadState !== 'complete' ||
+      checkpoint ||
       !Number.isSafeInteger(bytesUploaded) ||
       bytesUploaded < lastProgress ||
       bytesUploaded > plan.carBytes.byteLength
@@ -1532,9 +1516,11 @@ export async function uploadFilecoinStorage(
   }
   const authorizeCommit = async () => {
     assertTransportOpen()
+    assertOperationActive()
     if (
       commitAuthorized ||
       !checkpoint ||
+      signaturePending ||
       signatureCount !== 2 ||
       lastProgress !== plan.carBytes.byteLength
     ) {
@@ -1542,6 +1528,7 @@ export async function uploadFilecoinStorage(
     }
     await guard.assertSubmission()
     assertTransportOpen()
+    assertOperationActive()
     commitAuthorized = true
   }
   const onSubmitted = (value: Hash) => {
@@ -1551,9 +1538,9 @@ export async function uploadFilecoinStorage(
     }
     submittedCount += 1
     submittedHash = parseTransactionHash(value)
+    recoveryHash = submittedHash
     options.onSubmitted?.(submittedHash)
   }
-
   try {
     let executionResult: FilecoinStorageUploadExecutorResult
     try {
@@ -1561,7 +1548,6 @@ export async function uploadFilecoinStorage(
         executionResult = await (options.executeUpload ?? executeSynapseUpload)(
           {
             authorizeCommit,
-            onProviderSelected,
             onStored,
             onSubmitted,
             plan,
@@ -1584,7 +1570,7 @@ export async function uploadFilecoinStorage(
         throw new FilecoinStorageSubmissionUnknownError(
           error,
           checkpoint,
-          submittedHash,
+          recoveryHash,
         )
       }
       if (error instanceof FilecoinStorageUploadError) throw error
@@ -1592,11 +1578,8 @@ export async function uploadFilecoinStorage(
         cause: error,
       })
     }
-
     try {
       if (
-        !selectedProvider ||
-        !storedPiece ||
         !checkpoint ||
         !commitAuthorized ||
         signatureCount !== 2 ||
@@ -1620,6 +1603,7 @@ export async function uploadFilecoinStorage(
         ? parseTransactionHash(executionResult.confirmedTxHash)
         : initialHash
       if (transactionHash.toLowerCase() !== initialHash.toLowerCase()) {
+        recoveryHash = transactionHash
         options.onSubmitted?.(transactionHash)
       }
       await guard.assertSubmission()
@@ -1652,8 +1636,12 @@ export async function uploadFilecoinStorage(
         transactionHash,
       })
     } catch (error) {
-      if (commitAuthorized && checkpoint && !submittedHash) {
-        throw new FilecoinStorageSubmissionUnknownError(error, checkpoint)
+      if (commitAuthorized && checkpoint) {
+        throw new FilecoinStorageSubmissionUnknownError(
+          error,
+          checkpoint,
+          recoveryHash,
+        )
       }
       throw error
     }

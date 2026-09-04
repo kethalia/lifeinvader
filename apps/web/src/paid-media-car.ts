@@ -1,4 +1,5 @@
 import { CarBufferReader, CarBufferWriter } from '@ipld/car'
+import * as dagPb from '@ipld/dag-pb'
 import { importByteStream, type WritableStorage } from 'ipfs-unixfs-importer'
 import { CID } from 'multiformats/cid'
 import { sha256 } from 'multiformats/hashes/sha2'
@@ -323,6 +324,7 @@ export async function validatePreparedMediaCar(
 
   let hasRoot = false
   const seen = new Set<string>()
+  const blocksByCid = new Map<string, (typeof blocks)[number]>()
   for (const block of blocks) {
     const text = block.cid.toString()
     if (
@@ -337,6 +339,7 @@ export async function validatePreparedMediaCar(
       throw invalidPreparedCar('the archive contains an unsupported block.')
     }
     seen.add(text)
+    blocksByCid.set(text, block)
     hasRoot ||= block.cid.equals(rootCid)
     const digest = await sha256.digest(block.bytes)
     if (!equalBytes(block.cid.multihash.bytes, digest.bytes)) {
@@ -345,6 +348,41 @@ export async function validatePreparedMediaCar(
   }
   if (!hasRoot) {
     throw invalidPreparedCar('the declared root block is missing.')
+  }
+
+  const reachable = new Set<string>()
+  const pending = [rootCid]
+  while (pending.length > 0) {
+    const cid = pending.pop()
+    if (!cid || reachable.has(cid.toString())) continue
+    const block = blocksByCid.get(cid.toString())
+    if (!block) {
+      throw invalidPreparedCar('the archive DAG references a missing block.')
+    }
+    reachable.add(cid.toString())
+    if (block.cid.code === 0x70) {
+      let node: ReturnType<typeof dagPb.decode>
+      try {
+        node = dagPb.decode(block.bytes)
+      } catch (cause) {
+        throw invalidPreparedCar('the archive contains invalid dag-pb data.', {
+          cause,
+        })
+      }
+      for (const link of node.Links) {
+        if (
+          link.Hash.version !== 1 ||
+          (link.Hash.code !== 0x55 && link.Hash.code !== 0x70) ||
+          link.Hash.multihash.code !== 0x12
+        ) {
+          throw invalidPreparedCar('the archive DAG has an unsupported link.')
+        }
+        pending.push(link.Hash)
+      }
+    }
+  }
+  if (reachable.size !== blocks.length) {
+    throw invalidPreparedCar('the archive contains an unreachable block.')
   }
 
   return Object.freeze({

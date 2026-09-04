@@ -280,25 +280,12 @@ describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
       { calibration, mainnet },
     )
     if (!binding) throw new Error('Calibration binding is unavailable.')
-    const transport = custom(
-      {
-        request: ({ method, params }) =>
-          provider.request({
-            method,
-            ...(params === undefined
-              ? {}
-              : { params: params as readonly unknown[] | object }),
-          }),
-      },
-      { retryCount: 0 },
-    )
+    const transport = custom(provider, { retryCount: 0 })
     const synapse = Synapse.create({
       account: UNUSED_QUOTE_ACCOUNT,
       chain: binding.chain,
-      pieceBatching: false,
       source: 'lifeinvader',
       transport,
-      withCDN: false,
     })
     const service = new warmStorage.WarmStorageService({
       client: synapse.client,

@@ -1,4 +1,5 @@
-import { CarBufferReader } from '@ipld/car'
+import { CarBufferReader, CarBufferWriter } from '@ipld/car'
+import { CID } from 'multiformats/cid'
 import { sha256 } from 'multiformats/hashes/sha2'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -40,6 +41,18 @@ function mediaFile(
     stream: () => byteStream(snapshot),
     type: options.type ?? 'image/gif',
   }
+}
+
+function encodeCar(root: CID, blocks: { bytes: Uint8Array; cid: CID }[]) {
+  const length = blocks.reduce(
+    (total, block) => total + CarBufferWriter.blockLength(block),
+    CarBufferWriter.headerLength({ roots: [root] }),
+  )
+  const writer = CarBufferWriter.createWriter(new ArrayBuffer(length), {
+    roots: [root],
+  })
+  blocks.forEach((block) => writer.write(block))
+  return writer.close()
 }
 
 describe('paid media CAR preparation', () => {
@@ -132,6 +145,36 @@ describe('paid media CAR preparation', () => {
     await expect(validatePreparedMediaCar(corrupted)).rejects.toThrow(
       /failed CID verification/i,
     )
+  })
+
+  it('requires every linked block and rejects unreachable CAR payloads', async () => {
+    const content = new Uint8Array(UNIXFS_CHUNK_BYTES + 257)
+    const prepared = await preparePaidMediaCar(mediaFile(content))
+    const blocks = CarBufferReader.fromBytes(prepared.carBytes).blocks()
+    const leaf = blocks.find(({ cid }) => cid.code === 0x55)
+    if (!leaf) throw new Error('Expected a raw UnixFS leaf fixture.')
+
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: encodeCar(
+          prepared.rootCid,
+          blocks.filter(({ cid }) => !cid.equals(leaf.cid)),
+        ),
+      }),
+    ).rejects.toThrow(/references a missing block/i)
+
+    const extraBytes = new Uint8Array([1, 2, 3, 4])
+    const extraCid = CID.createV1(0x55, await sha256.digest(extraBytes))
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: encodeCar(prepared.rootCid, [
+          ...blocks,
+          { bytes: extraBytes, cid: extraCid },
+        ]),
+      }),
+    ).rejects.toThrow(/unreachable block/i)
   })
 
   it('rejects inconsistent roots and malformed or unbounded archives', async () => {

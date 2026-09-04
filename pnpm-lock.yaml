@@ -17,12 +17,18 @@ importers:
 
   apps/web:
     dependencies:
+      '@filoz/synapse-core':
+        specifier: 0.9.0
+        version: 0.9.0(typescript@7.0.2)(viem@2.56.2(typescript@7.0.2)(zod@4.4.3))
       '@filoz/synapse-sdk':
         specifier: 2.0.0
         version: 2.0.0(typescript@7.0.2)(viem@2.56.2(typescript@7.0.2)(zod@4.4.3))
       '@ipld/car':
         specifier: 5.4.7
         version: 5.4.7
+      '@ipld/dag-pb':
+        specifier: 4.1.7
+        version: 4.1.7
       ipfs-unixfs-importer:
         specifier: 16.1.5
         version: 16.1.5(supports-color@10.2.2)

@@ -1,9 +1,18 @@
-import { CID } from 'multiformats/cid'
+import {
+  fwss,
+  fwssView,
+  serviceProviderRegistry,
+} from '@filoz/synapse-core/abis'
+import { calculate } from '@filoz/synapse-core/piece'
+import { EIP712Types } from '@filoz/synapse-core/typed-data'
 import {
   bytesToHex,
   encodeAbiParameters,
   encodeEventTopics,
   encodeFunctionData,
+  encodeFunctionResult,
+  numberToHex,
+  stringToHex,
   type Hash,
   type Hex,
 } from 'viem'
@@ -39,109 +48,24 @@ const REPLACEMENT_HASH = `0x${'23'.repeat(32)}` as Hash
 const BLOCK_HASH = `0x${'34'.repeat(32)}` as Hash
 const SIGNATURE = `0x${'56'.repeat(65)}` as Hex
 const CALIBRATION = FILECOIN_STORAGE_NETWORKS[1]
-const PIECE_CID_TEXT =
-  'bafkzcibduukaynfuioybwrsevewtttso22ucohqntpc5h7crizsaw5h7gxd74eav'
-const PIECE_CID = CID.parse(PIECE_CID_TEXT)
+let piece: Awaited<ReturnType<typeof calculate>>
 
-const PROVIDER_READ_ABI = [
-  {
-    inputs: [
-      { name: 'providerId', type: 'uint256' },
-      { name: 'productType', type: 'uint8' },
-    ],
-    name: 'getProviderWithProduct',
-    outputs: [],
-    stateMutability: 'view',
-    type: 'function',
-  },
-] as const
-
-const APPROVAL_READ_ABI = [
-  {
-    inputs: [{ name: 'providerId', type: 'uint256' }],
-    name: 'isProviderApproved',
-    outputs: [{ name: '', type: 'bool' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-] as const
-
-const EVENT_ABI = [
-  {
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'dataSetId', type: 'uint256' },
-      { indexed: true, name: 'providerId', type: 'uint256' },
-      { indexed: false, name: 'pdpRailId', type: 'uint256' },
-      { indexed: false, name: 'cacheMissRailId', type: 'uint256' },
-      { indexed: false, name: 'cdnRailId', type: 'uint256' },
-      { indexed: false, name: 'payer', type: 'address' },
-      { indexed: false, name: 'serviceProvider', type: 'address' },
-      { indexed: false, name: 'payee', type: 'address' },
-      { indexed: false, name: 'metadataKeys', type: 'string[]' },
-      { indexed: false, name: 'metadataValues', type: 'string[]' },
-    ],
-    name: 'DataSetCreated',
-    type: 'event',
-  },
-  {
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'dataSetId', type: 'uint256' },
-      { indexed: true, name: 'pieceId', type: 'uint256' },
-      {
-        components: [{ name: 'data', type: 'bytes' }],
-        indexed: false,
-        name: 'pieceCid',
-        type: 'tuple',
-      },
-      { indexed: false, name: 'keys', type: 'string[]' },
-      { indexed: false, name: 'values', type: 'string[]' },
-    ],
-    name: 'PieceAdded',
-    type: 'event',
-  },
-] as const
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next) => {
+    resolve = next
+  })
+  return { promise, resolve }
+}
 
 const TYPES = {
-  AddPieces: [
-    { name: 'clientDataSetId', type: 'uint256' },
-    { name: 'nonce', type: 'uint256' },
-    { name: 'pieceData', type: 'Cid[]' },
-    { name: 'pieceMetadata', type: 'PieceMetadata[]' },
-  ],
-  Cid: [{ name: 'data', type: 'bytes' }],
-  CreateDataSet: [
-    { name: 'clientDataSetId', type: 'uint256' },
-    { name: 'payee', type: 'address' },
-    { name: 'metadata', type: 'MetadataEntry[]' },
-  ],
+  ...EIP712Types,
   EIP712Domain: [
     { name: 'name', type: 'string' },
     { name: 'version', type: 'string' },
     { name: 'chainId', type: 'uint256' },
     { name: 'verifyingContract', type: 'address' },
   ],
-  MetadataEntry: [
-    { name: 'key', type: 'string' },
-    { name: 'value', type: 'string' },
-  ],
-  Permit: [
-    { name: 'owner', type: 'address' },
-    { name: 'spender', type: 'address' },
-    { name: 'value', type: 'uint256' },
-    { name: 'nonce', type: 'uint256' },
-    { name: 'deadline', type: 'uint256' },
-  ],
-  PieceMetadata: [
-    { name: 'pieceIndex', type: 'uint256' },
-    { name: 'metadata', type: 'MetadataEntry[]' },
-  ],
-  SchedulePieceRemovals: [
-    { name: 'clientDataSetId', type: 'uint256' },
-    { name: 'pieceIds', type: 'uint256[]' },
-  ],
-  TerminateService: [{ name: 'dataSetId', type: 'uint256' }],
 } as const
 
 let prepared: PreparedMediaCar
@@ -162,6 +86,7 @@ beforeAll(async () => {
       }),
     type: 'image/gif',
   })
+  piece = await calculate(prepared.carBytes)
 })
 
 function readyQuote(
@@ -232,7 +157,7 @@ function addAuthorization(
     message: {
       clientDataSetId: CLIENT_DATA_SET_ID.toString(),
       nonce: '61',
-      pieceData: [{ data: bytesToHex(PIECE_CID.bytes) }],
+      pieceData: [{ data: bytesToHex(piece.bytes) }],
       pieceMetadata: [
         {
           metadata: [{ key: 'ipfsRootCID', value: mediaCid }],
@@ -257,14 +182,55 @@ function providerDetails(overrides: Record<string, unknown> = {}) {
     serviceProvider: SERVICE_PROVIDER,
     serviceUrl: 'https://provider.example/pdp/',
     ...overrides,
-  } as Parameters<
-    Parameters<FilecoinStorageUploadExecutor>[0]['onProviderSelected']
-  >[0] & { carByteLength?: number }
+  }
+}
+
+function providerReadResult(overrides: Record<string, unknown> = {}) {
+  const provider = providerDetails(overrides)
+  return encodeFunctionResult({
+    abi: serviceProviderRegistry,
+    functionName: 'getProviderWithProduct',
+    result: {
+      product: {
+        capabilityKeys: [
+          'serviceURL',
+          'minPieceSizeInBytes',
+          'maxPieceSizeInBytes',
+          'storagePricePerTibPerDay',
+          'minProvingPeriodInEpochs',
+          'location',
+          'paymentTokenAddress',
+          'ipniIpfs',
+        ],
+        isActive: true,
+        productType: 0,
+      },
+      productCapabilityValues: [
+        stringToHex(provider.serviceUrl),
+        numberToHex(provider.minPieceSizeInBytes, { size: 32 }),
+        numberToHex(provider.maxPieceSizeInBytes, { size: 32 }),
+        '0x01',
+        '0x01',
+        stringToHex('test'),
+        provider.paymentTokenAddress as Hex,
+        provider.ipniIpfs ? '0x01' : '0x00',
+      ],
+      providerId: provider.providerId,
+      providerInfo: {
+        description: 'Fixture provider',
+        isActive: provider.isActive,
+        name: 'Fixture',
+        payee: provider.serviceProvider as `0x${string}`,
+        serviceProvider: provider.serviceProvider as `0x${string}`,
+      },
+    },
+  })
 }
 
 function storageLogs(
   hash: Hash = REPLACEMENT_HASH,
   overrides: {
+    cdnRailId?: bigint
     dataSetId?: bigint
     dataSetMetadataValues?: string[]
     mediaCid?: string
@@ -301,7 +267,7 @@ function storageLogs(
         [
           67n,
           0n,
-          0n,
+          overrides.cdnRailId ?? 0n,
           ACCOUNT,
           serviceProvider,
           serviceProvider,
@@ -310,7 +276,7 @@ function storageLogs(
         ],
       ),
       topics: encodeEventTopics({
-        abi: EVENT_ABI,
+        abi: fwss,
         args: { dataSetId, providerId },
         eventName: 'DataSetCreated',
       }),
@@ -327,13 +293,13 @@ function storageLogs(
           { type: 'string[]' },
         ],
         [
-          { data: overrides.pieceCid ?? bytesToHex(PIECE_CID.bytes) },
+          { data: overrides.pieceCid ?? bytesToHex(piece.bytes) },
           ['ipfsRootCID'],
           [overrides.mediaCid ?? prepared.mediaCid.text],
         ],
       ),
       topics: encodeEventTopics({
-        abi: EVENT_ABI,
+        abi: fwss,
         args: { dataSetId, pieceId },
         eventName: 'PieceAdded',
       }),
@@ -343,28 +309,54 @@ function storageLogs(
 
 function walletProvider({
   account = ACCOUNT,
+  approved = true,
   hash = REPLACEMENT_HASH,
   logs = storageLogs(hash),
   methods = [],
+  providerOverrides = {},
+  signatureRequest,
   signatureError,
 }: {
   account?: string
+  approved?: boolean
   hash?: Hash
   logs?: unknown[]
   methods?: string[]
+  providerOverrides?: Record<string, unknown>
+  signatureRequest?: () => Promise<unknown>
   signatureError?: unknown
 } = {}): Eip1193Provider {
   return {
-    async request({ method }: ProviderRequest) {
+    async request({ method, params }: ProviderRequest) {
       methods.push(method)
       if (method === 'eth_accounts') return [account]
       if (method === 'eth_chainId') {
         return `0x${FILECOIN_CALIBRATION_CHAIN_ID.toString(16)}`
       }
       if (method === 'eth_blockNumber') return '0x29'
-      if (method === 'eth_call') return '0x'
+      if (method === 'eth_call') {
+        const call = Array.isArray(params) ? params[0] : undefined
+        const target =
+          typeof call === 'object' && call !== null && 'to' in call
+            ? String(call.to).toLowerCase()
+            : ''
+        if (
+          target === CALIBRATION.contracts.serviceProviderRegistry.toLowerCase()
+        ) {
+          return providerReadResult(providerOverrides)
+        }
+        if (target === CALIBRATION.contracts.fwssView.toLowerCase()) {
+          return encodeFunctionResult({
+            abi: fwssView,
+            functionName: 'isProviderApproved',
+            result: approved,
+          })
+        }
+        throw new Error(`Unexpected eth_call target ${target}`)
+      }
       if (method === 'eth_signTypedData_v4') {
         if (signatureError) throw signatureError
+        if (signatureRequest) return await signatureRequest()
         return SIGNATURE
       }
       if (method === 'eth_getTransactionReceipt') {
@@ -391,6 +383,72 @@ function inspection() {
   }))
 }
 
+async function selectProvider(
+  input: Pick<Parameters<FilecoinStorageUploadExecutor>[0], 'plan' | 'request'>,
+) {
+  const reads = [
+    [
+      input.plan.network.contracts.serviceProviderRegistry,
+      encodeFunctionData({
+        abi: serviceProviderRegistry,
+        args: [input.plan.providerId, 0],
+        functionName: 'getProviderWithProduct',
+      }),
+    ],
+    [
+      input.plan.network.contracts.fwssView,
+      encodeFunctionData({
+        abi: fwssView,
+        args: [input.plan.providerId],
+        functionName: 'isProviderApproved',
+      }),
+    ],
+  ] as const
+  for (const [to, data] of reads) {
+    await input.request({
+      method: 'eth_call',
+      params: [{ data, to }, 'latest'],
+    })
+  }
+}
+
+async function stagePiece(
+  input: Pick<
+    Parameters<FilecoinStorageUploadExecutor>[0],
+    'onStored' | 'plan' | 'reportProgress' | 'request'
+  >,
+  progress = input.plan.carBytes.byteLength,
+) {
+  await selectProvider(input)
+  input.reportProgress(progress)
+  input.onStored({
+    bytes: piece.bytes,
+    paddedSize: piece.paddedSize,
+    size: input.plan.carBytes.byteLength,
+    text: piece.toString(),
+  })
+}
+
+function requestSignature(
+  input: Parameters<FilecoinStorageUploadExecutor>[0],
+  data: string,
+) {
+  return input.request({
+    method: 'eth_signTypedData_v4',
+    params: [input.plan.account, data],
+  })
+}
+
+async function signAndAuthorize(
+  input: Parameters<FilecoinStorageUploadExecutor>[0],
+  createData = createAuthorization(),
+  addData = addAuthorization(input.plan.mediaCid),
+) {
+  await requestSignature(input, createData)
+  await requestSignature(input, addData)
+  await input.authorizeCommit()
+}
+
 function successfulExecutor({
   confirmedTxHash = REPLACEMENT_HASH,
   createData = createAuthorization(),
@@ -398,7 +456,6 @@ function successfulExecutor({
   dataSetId = DATA_SET_ID,
   initialTxHash = TX_HASH,
   pieceId = PIECE_ID,
-  providerOverrides,
 }: {
   addData?: string
   confirmedTxHash?: Hash
@@ -406,63 +463,11 @@ function successfulExecutor({
   dataSetId?: bigint
   initialTxHash?: Hash
   pieceId?: bigint
-  providerOverrides?: Record<string, unknown>
 } = {}): FilecoinStorageUploadExecutor {
-  return async ({
-    authorizeCommit,
-    onProviderSelected,
-    onStored,
-    onSubmitted,
-    plan,
-    reportProgress,
-    request,
-  }) => {
-    await request({
-      method: 'eth_call',
-      params: [
-        {
-          data: encodeFunctionData({
-            abi: PROVIDER_READ_ABI,
-            args: [plan.providerId, 0],
-            functionName: 'getProviderWithProduct',
-          }),
-          to: plan.network.contracts.serviceProviderRegistry,
-        },
-        'latest',
-      ],
-    })
-    await request({
-      method: 'eth_call',
-      params: [
-        {
-          data: encodeFunctionData({
-            abi: APPROVAL_READ_ABI,
-            args: [plan.providerId],
-            functionName: 'isProviderApproved',
-          }),
-          to: plan.network.contracts.fwssView,
-        },
-        'latest',
-      ],
-    })
-    onProviderSelected(providerDetails(providerOverrides))
-    reportProgress(plan.carBytes.byteLength)
-    onStored({
-      bytes: PIECE_CID.bytes,
-      paddedSize: 512n,
-      size: plan.carBytes.byteLength,
-      text: PIECE_CID_TEXT,
-    })
-    await request({
-      method: 'eth_signTypedData_v4',
-      params: [plan.account, createData],
-    })
-    await request({
-      method: 'eth_signTypedData_v4',
-      params: [plan.account, addData ?? addAuthorization(plan.mediaCid)],
-    })
-    await authorizeCommit()
-    onSubmitted(initialTxHash)
+  return async (input) => {
+    await stagePiece(input)
+    await signAndAuthorize(input, createData, addData)
+    input.onSubmitted(initialTxHash)
     return {
       confirmedTxHash,
       dataSetId,
@@ -481,6 +486,7 @@ async function runUpload(
     onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => void
     onSubmitted?: (hash: Hash) => void
     provider?: Eip1193Provider
+    signal?: AbortSignal
   } = {},
 ) {
   const hash = options.hash ?? REPLACEMENT_HASH
@@ -499,10 +505,18 @@ async function runUpload(
       onSubmitted: options.onSubmitted,
       pollIntervalMs: 1,
       receiptTimeoutMs: 100,
+      signal: options.signal,
     },
   )
 }
 
+function recoveryFailure(cause: RegExp, hash = REPLACEMENT_HASH) {
+  return {
+    cause: { message: expect.stringMatching(cause) },
+    name: 'FilecoinStorageSubmissionUnknownError',
+    transactionHash: hash,
+  }
+}
 describe('Filecoin storage upload planning', () => {
   it('snapshots one ready quote and one explicit provider', async () => {
     const plan = await planFilecoinStorageUpload(
@@ -514,7 +528,6 @@ describe('Filecoin storage upload planning', () => {
     )
     const byte = plan.carBytes[0]
     prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
-
     expect(plan).toMatchObject({
       account: ACCOUNT,
       chainId: FILECOIN_CALIBRATION_CHAIN_ID,
@@ -523,64 +536,38 @@ describe('Filecoin storage upload planning', () => {
     })
     expect(plan.carBytes[0]).toBe(byte)
     expect(plan.carBytes).not.toBe(prepared.carBytes)
+    expect(plan.piece).toEqual({
+      bytes: bytesToHex(piece.bytes),
+      paddedSize: piece.paddedSize,
+      size: piece.size,
+      text: piece.toString(),
+    })
     expect(Object.isFrozen(plan)).toBe(true)
-
+    expect(Object.isFrozen(plan.piece)).toBe(true)
     prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
   })
-
-  it('rejects stale, unfunded, inconsistent, and unsupported plans', async () => {
-    await expect(
+  it('rejects stale and unsupported upload plans', async () => {
+    const attempt = (
+      quote: FilecoinStorageQuote,
+      selectedProvider = PROVIDER_ID,
+      chainId = FILECOIN_CALIBRATION_CHAIN_ID,
+    ) =>
       planFilecoinStorageUpload(
         prepared,
-        readyQuote({ dataSize: 999n }),
-        PROVIDER_ID,
+        quote,
+        selectedProvider,
         ACCOUNT,
-        FILECOIN_CALIBRATION_CHAIN_ID,
-      ),
-    ).rejects.toThrow(/different media or wallet context/i)
-    await expect(
-      planFilecoinStorageUpload(
-        prepared,
-        readyQuote({
-          depositNeeded: 1n,
-          needsServiceApproval: true,
-          ready: false,
-        }),
-        PROVIDER_ID,
-        ACCOUNT,
-        FILECOIN_CALIBRATION_CHAIN_ID,
-      ),
-    ).rejects.toThrow(/not ready/i)
-    await expect(
-      planFilecoinStorageUpload(
-        prepared,
-        readyQuote({ fees: { ...readyQuote().fees, total: 99n } }),
-        PROVIDER_ID,
-        ACCOUNT,
-        FILECOIN_CALIBRATION_CHAIN_ID,
-      ),
-    ).rejects.toThrow(/internally inconsistent/i)
-    await expect(
-      planFilecoinStorageUpload(
-        prepared,
-        readyQuote(),
-        0n,
-        ACCOUNT,
-        FILECOIN_CALIBRATION_CHAIN_ID,
-      ),
-    ).rejects.toThrow(/provider ID/i)
-    await expect(
-      planFilecoinStorageUpload(
-        prepared,
-        readyQuote(),
-        PROVIDER_ID,
-        ACCOUNT,
-        1n,
-      ),
-    ).rejects.toThrow(/unsupported/i)
+        chainId,
+      )
+    await expect(attempt(readyQuote({ dataSize: 999n }))).rejects.toThrow(
+      /different media/i,
+    )
+    await expect(attempt(readyQuote(), 0n)).rejects.toThrow(/provider ID/i)
+    await expect(attempt(readyQuote(), PROVIDER_ID, 1n)).rejects.toThrow(
+      /unsupported/i,
+    )
   })
 })
-
 describe('Filecoin storage upload execution', () => {
   it('constrains reads and signatures, follows a replacement, and verifies events', async () => {
     const methods: string[] = []
@@ -591,7 +578,6 @@ describe('Filecoin storage upload execution', () => {
       onSubmitted: (hash) => submitted.push(hash),
       provider: walletProvider({ methods }),
     })
-
     expect(result).toMatchObject({
       account: ACCOUNT,
       carByteLength: prepared.carBytes.byteLength,
@@ -610,7 +596,7 @@ describe('Filecoin storage upload execution', () => {
       withCDN: false,
     })
     expect(result.providerPieceUrl).toBe(
-      `https://provider.example/pdp/piece/${PIECE_CID_TEXT}`,
+      `https://provider.example/pdp/piece/${piece.toString()}`,
     )
     expect(result.receipt.hash).toBe(REPLACEMENT_HASH)
     expect(submitted).toEqual([TX_HASH, REPLACEMENT_HASH])
@@ -628,7 +614,6 @@ describe('Filecoin storage upload execution', () => {
       throw new Error('unreachable')
     }
     await expect(runUpload(forbidden)).rejects.toThrow(/forbidden RPC method/i)
-
     const wrongRead: FilecoinStorageUploadExecutor = async ({
       plan,
       request,
@@ -638,7 +623,7 @@ describe('Filecoin storage upload execution', () => {
         params: [
           {
             data: encodeFunctionData({
-              abi: APPROVAL_READ_ABI,
+              abi: fwssView,
               args: [plan.providerId + 1n],
               functionName: 'isProviderApproved',
             }),
@@ -652,7 +637,6 @@ describe('Filecoin storage upload execution', () => {
     await expect(runUpload(wrongRead)).rejects.toThrow(
       /unexpected contract read/i,
     )
-
     const greedy: FilecoinStorageUploadExecutor = async ({ request }) => {
       for (
         let index = 0;
@@ -682,7 +666,6 @@ describe('Filecoin storage upload execution', () => {
         return candidate.method === 'eth_signTypedData_v4'
       }),
     ).toHaveLength(0)
-
     const walletForPiece = walletProvider()
     const pieceRequest = vi.spyOn(walletForPiece, 'request')
     await expect(
@@ -708,92 +691,131 @@ describe('Filecoin storage upload execution', () => {
   })
 
   it('rejects providers that cannot perform the promised IPFS path', async () => {
-    await expect(
-      runUpload(successfulExecutor({ providerOverrides: { ipniIpfs: false } })),
-    ).rejects.toThrow(/does not advertise IPFS indexing/i)
-    await expect(
-      runUpload(
-        successfulExecutor({
-          providerOverrides: { serviceUrl: 'http://provider.example/' },
+    const cases: [Record<string, unknown>, RegExp][] = [
+      [{ ipniIpfs: false }, /does not advertise IPFS indexing/i],
+      [{ serviceUrl: 'http://provider.example/' }, /credential-free HTTPS/i],
+      [
+        { minPieceSizeInBytes: BigInt(prepared.carBytes.byteLength + 1) },
+        /outside the provider size range/i,
+      ],
+    ]
+    for (const [providerOverrides, message] of cases) {
+      await expect(
+        runUpload(successfulExecutor(), {
+          provider: walletProvider({ providerOverrides }),
         }),
-      ),
-    ).rejects.toThrow(/credential-free HTTPS/i)
+      ).rejects.toThrow(message)
+    }
+  })
+
+  it('requires authenticated registry and approval reads before storage', async () => {
+    const skipsReads: FilecoinStorageUploadExecutor = async (input) => {
+      input.onStored({
+        bytes: piece.bytes,
+        paddedSize: piece.paddedSize,
+        size: input.plan.carBytes.byteLength,
+        text: piece.toString(),
+      })
+      throw new Error('unreachable')
+    }
+    await expect(runUpload(skipsReads)).rejects.toThrow(
+      /unauthenticated provider/i,
+    )
     await expect(
-      runUpload(
-        successfulExecutor({
-          providerOverrides: { paymentTokenAddress: 'not-an-address' },
-        }),
-      ),
-    ).rejects.toThrow(/provider payment token is invalid/i)
-    await expect(
-      runUpload(
-        successfulExecutor({
-          providerOverrides: {
-            minPieceSizeInBytes: BigInt(prepared.carBytes.byteLength + 1),
-          },
-        }),
-      ),
-    ).rejects.toThrow(/outside the provider size range/i)
+      runUpload(successfulExecutor(), {
+        provider: walletProvider({ approved: false }),
+      }),
+    ).rejects.toThrow(/not approved/i)
+  })
+
+  it('rejects a provider PieceCID for bytes other than the planned CAR', async () => {
+    const wrongPiece = await calculate(
+      new Uint8Array(prepared.carBytes.byteLength).fill(7),
+    )
+    const dishonest: FilecoinStorageUploadExecutor = async (input) => {
+      return await successfulExecutor()({
+        ...input,
+        onStored(value) {
+          input.onStored({
+            ...value,
+            bytes: wrongPiece.bytes,
+            paddedSize: wrongPiece.paddedSize,
+            text: wrongPiece.toString(),
+          })
+        },
+      })
+    }
+    await expect(runUpload(dishonest)).rejects.toThrow(/does not match/i)
   })
 
   it('requires a complete upload and exactly two signatures before commit', async () => {
-    const incomplete: FilecoinStorageUploadExecutor = async ({
-      authorizeCommit,
-      onProviderSelected,
-      onStored,
-      plan,
-      reportProgress,
-      request,
-    }) => {
-      onProviderSelected(providerDetails())
-      reportProgress(plan.carBytes.byteLength - 1)
-      onStored({
-        bytes: PIECE_CID.bytes,
-        paddedSize: 512n,
-        size: plan.carBytes.byteLength,
-        text: PIECE_CID_TEXT,
-      })
-      await request({
-        method: 'eth_signTypedData_v4',
-        params: [plan.account, createAuthorization()],
-      })
-      await request({
-        method: 'eth_signTypedData_v4',
-        params: [plan.account, addAuthorization(plan.mediaCid)],
-      })
-      await authorizeCommit()
+    const incomplete: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input, input.plan.carBytes.byteLength - 1)
+      await signAndAuthorize(input)
       throw new Error('unreachable')
     }
     await expect(runUpload(incomplete)).rejects.toThrow(
       /incomplete storage commit/i,
     )
+  })
 
-    const oneSignature: FilecoinStorageUploadExecutor = async ({
-      authorizeCommit,
-      onProviderSelected,
-      onStored,
-      plan,
-      reportProgress,
-      request,
-    }) => {
-      onProviderSelected(providerDetails())
-      reportProgress(plan.carBytes.byteLength)
-      onStored({
-        bytes: PIECE_CID.bytes,
-        paddedSize: 512n,
-        size: plan.carBytes.byteLength,
-        text: PIECE_CID_TEXT,
-      })
-      await request({
-        method: 'eth_signTypedData_v4',
-        params: [plan.account, createAuthorization()],
-      })
-      await authorizeCommit()
+  it('serializes wallet prompts and withholds signatures after cancellation', async () => {
+    const delayedWallet = () => {
+      const prompted = deferred<void>()
+      const response = deferred<Hex>()
+      let calls = 0
+      return {
+        get calls() {
+          return calls
+        },
+        prompted,
+        provider: walletProvider({
+          signatureRequest() {
+            calls += 1
+            prompted.resolve(undefined)
+            return response.promise
+          },
+        }),
+        response,
+      }
+    }
+    const concurrentWallet = delayedWallet()
+    const concurrent: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input)
+      const first = requestSignature(input, createAuthorization())
+      await concurrentWallet.prompted.promise
+      await expect(
+        requestSignature(input, addAuthorization(input.plan.mediaCid)),
+      ).rejects.toThrow(/unexpected signature/i)
+      concurrentWallet.response.resolve(SIGNATURE)
+      await first
+      await expect(input.authorizeCommit()).rejects.toThrow(/incomplete/i)
+      throw new Error('fixture stopped after first signature')
+    }
+    await expect(
+      runUpload(concurrent, { provider: concurrentWallet.provider }),
+    ).rejects.toThrow(/provider did not complete/i)
+    expect(concurrentWallet.calls).toBe(1)
+    const cancelledWallet = delayedWallet()
+    const controller = new AbortController()
+    let signatureReleased = false
+    const cancelled: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input)
+      const pending = requestSignature(input, createAuthorization())
+      await cancelledWallet.prompted.promise
+      controller.abort(new DOMException('Stop upload.', 'AbortError'))
+      cancelledWallet.response.resolve(SIGNATURE)
+      await pending
+      signatureReleased = true
       throw new Error('unreachable')
     }
-    await expect(runUpload(oneSignature)).rejects.toThrow(
-      /incomplete storage commit/i,
-    )
+    await expect(
+      runUpload(cancelled, {
+        provider: cancelledWallet.provider,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/cancelled/i)
+    expect(signatureReleased).toBe(false)
   })
 
   it('preserves wallet rejection before any provider commit', async () => {
@@ -831,38 +853,22 @@ describe('Filecoin storage upload execution', () => {
     expect(failure.transactionHash).toBe(TX_HASH)
     expect(failure.checkpoint).toEqual(checkpoints[0])
     expect(failure.checkpoint.mediaCid).toBe(prepared.mediaCid.text)
-
-    const noHash: FilecoinStorageUploadExecutor = async ({
-      authorizeCommit,
-      onProviderSelected,
-      onStored,
-      plan,
-      reportProgress,
-      request,
-    }) => {
-      onProviderSelected(providerDetails())
-      reportProgress(plan.carBytes.byteLength)
-      onStored({
-        bytes: PIECE_CID.bytes,
-        paddedSize: 512n,
-        size: plan.carBytes.byteLength,
-        text: PIECE_CID_TEXT,
-      })
-      await request({
-        method: 'eth_signTypedData_v4',
-        params: [plan.account, createAuthorization()],
-      })
-      await request({
-        method: 'eth_signTypedData_v4',
-        params: [plan.account, addAuthorization(plan.mediaCid)],
-      })
-      await authorizeCommit()
+    const noHash: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input)
+      await signAndAuthorize(input)
       throw new Error('provider disconnected before returning a hash')
     }
     await expect(runUpload(noHash)).rejects.toMatchObject({
       name: 'FilecoinStorageSubmissionUnknownError',
       transactionHash: undefined,
     })
+    const malformed: FilecoinStorageUploadExecutor = async (input) => ({
+      ...(await successfulExecutor({ confirmedTxHash: TX_HASH })(input)),
+      pieceIds: [],
+    })
+    await expect(runUpload(malformed)).rejects.toMatchObject(
+      recoveryFailure(/invalid commit result/i, TX_HASH),
+    )
   })
 
   it('releases both wallet listener layers when registration fails', async () => {
@@ -883,7 +889,6 @@ describe('Filecoin storage upload execution', () => {
         listeners.get(event)?.delete(listener)
       },
     }
-
     await expect(runUpload(successfulExecutor(), { provider })).rejects.toBe(
       registrationFailure,
     )
@@ -933,56 +938,36 @@ describe('Filecoin storage receipt authentication', () => {
           dataSetMetadataValues: ['another-app', ''],
         }),
       }),
-    ).rejects.toThrow(/data-set event changed/i)
-    const cdnLogs = storageLogs()
-    const dataSet = cdnLogs[0] as Record<string, unknown>
-    dataSet.data = encodeAbiParameters(
-      [
-        { type: 'uint256' },
-        { type: 'uint256' },
-        { type: 'uint256' },
-        { type: 'address' },
-        { type: 'address' },
-        { type: 'address' },
-        { type: 'string[]' },
-        { type: 'string[]' },
-      ],
-      [
-        67n,
-        0n,
-        1n,
-        ACCOUNT,
-        SERVICE_PROVIDER,
-        SERVICE_PROVIDER,
-        ['source', 'withIPFSIndexing'],
-        ['lifeinvader', ''],
-      ],
-    )
+    ).rejects.toMatchObject(recoveryFailure(/data-set event changed/i))
     await expect(
-      runUpload(successfulExecutor(), { logs: cdnLogs }),
-    ).rejects.toThrow(/data-set event changed/i)
+      runUpload(successfulExecutor(), {
+        logs: storageLogs(REPLACEMENT_HASH, { cdnRailId: 1n }),
+      }),
+    ).rejects.toMatchObject(recoveryFailure(/data-set event changed/i))
     await expect(
       runUpload(successfulExecutor(), {
         logs: storageLogs(REPLACEMENT_HASH, {
           mediaCid: 'bafkqaaa',
         }),
       }),
-    ).rejects.toThrow(/piece event changed/i)
+    ).rejects.toMatchObject(recoveryFailure(/piece event changed/i))
     await expect(
       runUpload(successfulExecutor(), {
         logs: storageLogs(REPLACEMENT_HASH, {
           serviceProvider: OTHER_ACCOUNT,
         }),
       }),
-    ).rejects.toThrow(/data-set event changed/i)
+    ).rejects.toMatchObject(recoveryFailure(/data-set event changed/i))
     const duplicated = storageLogs()
     duplicated.push(duplicated[1] as (typeof duplicated)[number])
     await expect(
       runUpload(successfulExecutor(), { logs: duplicated }),
-    ).rejects.toThrow(/exactly one data set and one piece/i)
+    ).rejects.toMatchObject(
+      recoveryFailure(/exactly one data set and one piece/i),
+    )
     await expect(
       runUpload(successfulExecutor({ pieceId: PIECE_ID + 1n })),
-    ).rejects.toThrow(/provider result disagrees/i)
+    ).rejects.toMatchObject(recoveryFailure(/provider result disagrees/i))
   })
 
   it('rejects noncanonical receipt fields and wrong recovery context', async () => {
@@ -997,7 +982,6 @@ describe('Filecoin storage receipt authentication', () => {
     expect(() =>
       assertFilecoinStorageUploadReceipt(logs, receipt, saved),
     ).toThrow(/not canonical/i)
-
     await expect(
       checkFilecoinStorageUploadReceipt(
         walletProvider(),
