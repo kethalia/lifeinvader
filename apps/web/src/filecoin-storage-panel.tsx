@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { formatUnits } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
 import {
   FILECOIN_CALIBRATION_CHAIN_ID,
@@ -9,6 +10,11 @@ import {
   type FilecoinStorageInspection,
   type FilecoinStorageInspectionOptions,
 } from './filecoin-storage'
+import {
+  quoteFilecoinStorage,
+  type FilecoinStorageQuote,
+  type FilecoinStorageQuoteOptions,
+} from './filecoin-storage-quote'
 import type { PreparedMediaCar } from './paid-media-car'
 import type { WalletSession } from './wallet-session'
 
@@ -17,10 +23,22 @@ export type FilecoinStorageInspector = (
   options?: FilecoinStorageInspectionOptions,
 ) => Promise<FilecoinStorageInspection>
 
+export type FilecoinStorageQuoter = (
+  provider: Eip1193Provider,
+  carByteLength: number,
+  options: FilecoinStorageQuoteOptions,
+) => Promise<FilecoinStorageQuote>
+
 type InspectionState =
   | { kind: 'idle' }
   | { kind: 'checking' }
   | { inspection: FilecoinStorageInspection; kind: 'complete' }
+  | { kind: 'error'; message: string }
+
+type QuoteState =
+  | { kind: 'idle' }
+  | { kind: 'checking' }
+  | { kind: 'complete'; quote: FilecoinStorageQuote }
   | { kind: 'error'; message: string }
 
 function formatByteLength(bytes: number) {
@@ -33,47 +51,74 @@ function shortAddress(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`
 }
 
+function formatUsdfc(value: bigint, decimals: number) {
+  return `${formatUnits(value, decimals)} USDFC`
+}
+
 export function FilecoinStoragePanel({
   disabled = false,
   inspectStorage = inspectFilecoinStorage,
   prepared,
   publicationChainId,
+  quoteStorage = quoteFilecoinStorage,
   session,
 }: {
   disabled?: boolean
   inspectStorage?: FilecoinStorageInspector
   prepared?: PreparedMediaCar
   publicationChainId?: bigint
+  quoteStorage?: FilecoinStorageQuoter
   session: WalletSession
 }) {
   const titleId = useId()
-  const operationSequence = useRef(0)
-  const activeController = useRef<AbortController | undefined>(undefined)
+  const inspectionSequence = useRef(0)
+  const quoteSequence = useRef(0)
+  const activeInspectionController = useRef<AbortController | undefined>(
+    undefined,
+  )
+  const activeQuoteController = useRef<AbortController | undefined>(undefined)
   const [state, setState] = useState<InspectionState>({ kind: 'idle' })
+  const [quoteState, setQuoteState] = useState<QuoteState>({ kind: 'idle' })
   const network = getFilecoinStorageNetwork(session.chainId)
 
   useEffect(() => {
-    operationSequence.current += 1
-    activeController.current?.abort()
-    activeController.current = undefined
+    inspectionSequence.current += 1
+    quoteSequence.current += 1
+    activeInspectionController.current?.abort()
+    activeQuoteController.current?.abort()
+    activeInspectionController.current = undefined
+    activeQuoteController.current = undefined
     setState({ kind: 'idle' })
+    setQuoteState({ kind: 'idle' })
     return () => {
-      operationSequence.current += 1
-      activeController.current?.abort()
-      activeController.current = undefined
+      inspectionSequence.current += 1
+      quoteSequence.current += 1
+      activeInspectionController.current?.abort()
+      activeQuoteController.current?.abort()
+      activeInspectionController.current = undefined
+      activeQuoteController.current = undefined
     }
-  }, [prepared?.mediaCid.text, session.chainId, session.provider])
+  }, [
+    prepared?.mediaCid.text,
+    session.account,
+    session.chainId,
+    session.provider,
+  ])
 
   if (!prepared) return null
 
   const runInspection = () => {
     const provider = session.provider
     if (!provider || session.status !== 'connected' || !network) return
-    const operationId = ++operationSequence.current
-    activeController.current?.abort()
+    const operationId = ++inspectionSequence.current
+    quoteSequence.current += 1
+    activeInspectionController.current?.abort()
+    activeQuoteController.current?.abort()
     const controller = new AbortController()
-    activeController.current = controller
+    activeInspectionController.current = controller
+    activeQuoteController.current = undefined
     setState({ kind: 'checking' })
+    setQuoteState({ kind: 'idle' })
     void (async () => {
       try {
         const inspection = await inspectStorage(provider, {
@@ -81,14 +126,14 @@ export function FilecoinStoragePanel({
           signal: controller.signal,
         })
         if (
-          operationId !== operationSequence.current ||
+          operationId !== inspectionSequence.current ||
           controller.signal.aborted
         )
           return
         setState({ inspection, kind: 'complete' })
       } catch (error) {
         if (
-          operationId !== operationSequence.current ||
+          operationId !== inspectionSequence.current ||
           controller.signal.aborted
         )
           return
@@ -100,14 +145,64 @@ export function FilecoinStoragePanel({
           ),
         })
       } finally {
-        if (operationId === operationSequence.current) {
-          activeController.current = undefined
+        if (operationId === inspectionSequence.current) {
+          activeInspectionController.current = undefined
+        }
+      }
+    })()
+  }
+
+  const runQuote = () => {
+    const provider = session.provider
+    const account = session.account
+    if (
+      !provider ||
+      !account ||
+      session.status !== 'connected' ||
+      !network ||
+      state.kind !== 'complete' ||
+      state.inspection.kind !== 'ready'
+    )
+      return
+    const operationId = ++quoteSequence.current
+    activeQuoteController.current?.abort()
+    const controller = new AbortController()
+    activeQuoteController.current = controller
+    setQuoteState({ kind: 'checking' })
+    void (async () => {
+      try {
+        const quote = await quoteStorage(
+          provider,
+          prepared.carBytes.byteLength,
+          {
+            expectedAccount: account,
+            expectedChainId: network.chainId,
+            signal: controller.signal,
+          },
+        )
+        if (operationId !== quoteSequence.current || controller.signal.aborted)
+          return
+        setQuoteState({ kind: 'complete', quote })
+      } catch (error) {
+        if (operationId !== quoteSequence.current || controller.signal.aborted)
+          return
+        setQuoteState({
+          kind: 'error',
+          message: describeRpcError(
+            error,
+            'Filecoin storage costs could not be quoted through the wallet.',
+          ),
+        })
+      } finally {
+        if (operationId === quoteSequence.current) {
+          activeQuoteController.current = undefined
         }
       }
     })()
   }
 
   const inspection = state.kind === 'complete' ? state.inspection : undefined
+  const quote = quoteState.kind === 'complete' ? quoteState.quote : undefined
   return (
     <section className="filecoin-storage-panel" aria-labelledby={titleId}>
       <div>
@@ -145,7 +240,11 @@ export function FilecoinStoragePanel({
           </p>
           <button
             type="button"
-            disabled={disabled || state.kind === 'checking'}
+            disabled={
+              disabled ||
+              state.kind === 'checking' ||
+              quoteState.kind === 'checking'
+            }
             onClick={runInspection}
           >
             {state.kind === 'checking'
@@ -161,14 +260,31 @@ export function FilecoinStoragePanel({
           {inspection?.kind === 'ready' ? (
             <div className="filecoin-storage-ready" role="status">
               <p>
-                {inspection.network.name} is ready for a paid-storage adapter.
+                {inspection.network.name} passed the pinned storage-contract
+                checks.
               </p>
               <code title={inspection.network.contracts.fwss}>
                 FWSS {shortAddress(inspection.network.contracts.fwss)}
               </code>
               <p>
-                This preflight did not upload bytes, approve USDFC, pay for
-                storage, pin the CID, or publish a post.
+                Quote one new, non-CDN data set for one proof-backed copy of
+                this CAR. The quote uses only capped wallet reads.
+              </p>
+              <button
+                type="button"
+                disabled={disabled || quoteState.kind === 'checking'}
+                onClick={runQuote}
+              >
+                {quoteState.kind === 'checking'
+                  ? 'Reading Filecoin costs…'
+                  : quoteState.kind === 'complete' ||
+                      quoteState.kind === 'error'
+                    ? 'Refresh one-copy quote'
+                    : 'Quote one Filecoin copy'}
+              </button>
+              <p>
+                The preflight and quote do not upload bytes, approve USDFC, fund
+                Filecoin Pay, pin the CID, or publish a post.
               </p>
             </div>
           ) : null}
@@ -205,6 +321,71 @@ export function FilecoinStoragePanel({
           {state.kind === 'error' ? (
             <p className="error-message" role="alert">
               {state.message}
+            </p>
+          ) : null}
+          {quoteState.kind === 'checking' ? (
+            <p role="status">
+              Reading current Filecoin Pay balances, service approval, rates,
+              fees, and lockups…
+            </p>
+          ) : null}
+          {quote ? (
+            <div className="filecoin-storage-quote" role="status">
+              <p>
+                One-copy estimate for a new data set and{' '}
+                {formatByteLength(Number(quote.dataSize))} CAR:
+              </p>
+              <dl>
+                <div>
+                  <dt>Monthly rate</dt>
+                  <dd>
+                    <code>
+                      {formatUsdfc(quote.rates.perMonth, quote.tokenDecimals)}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>One-time fees</dt>
+                  <dd>
+                    <code>
+                      {formatUsdfc(quote.fees.total, quote.tokenDecimals)}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Required lockup</dt>
+                  <dd>
+                    <code>
+                      {formatUsdfc(quote.lockups.total, quote.tokenDecimals)}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Deposit needed</dt>
+                  <dd>
+                    <code>
+                      {formatUsdfc(quote.depositNeeded, quote.tokenDecimals)}
+                    </code>
+                  </dd>
+                </div>
+              </dl>
+              <p>
+                {quote.ready
+                  ? 'Existing Filecoin Pay funds and service approval satisfy this estimate.'
+                  : quote.needsServiceApproval
+                    ? 'Funding would also require a maximum FWSS service approval.'
+                    : 'The service approval is sufficient, but Filecoin Pay needs the displayed deposit.'}
+              </p>
+              <p>
+                Costs are live chain state and may change. Refresh before a
+                later funding transaction. No transaction or provider upload was
+                requested.
+              </p>
+            </div>
+          ) : null}
+          {quoteState.kind === 'error' ? (
+            <p className="error-message" role="alert">
+              {quoteState.message}
             </p>
           ) : null}
         </div>

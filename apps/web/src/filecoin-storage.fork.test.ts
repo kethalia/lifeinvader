@@ -1,11 +1,16 @@
 // @vitest-environment node
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
-import type { Eip1193Provider, ProviderRequest } from './ethereum'
+import {
+  parseAccounts,
+  type Eip1193Provider,
+  type ProviderRequest,
+} from './ethereum'
 import {
   FILECOIN_CALIBRATION_CHAIN_ID,
   inspectFilecoinStorage,
 } from './filecoin-storage'
+import { quoteFilecoinStorage } from './filecoin-storage-quote'
 
 const forkRpcUrl = process.env.LIFEINVADER_FILECOIN_FORK_RPC_URL
 const describeFork = forkRpcUrl ? describe : describe.skip
@@ -15,10 +20,11 @@ type JsonRpcResponse = {
   result?: unknown
 }
 
-function httpProvider(url: string): Eip1193Provider {
+function httpProvider(url: string, methods: string[] = []): Eip1193Provider {
   let requestId = 0
   return {
     async request({ method, params }: ProviderRequest) {
+      methods.push(method)
       const response = await fetch(url, {
         body: JSON.stringify({
           id: ++requestId,
@@ -58,4 +64,37 @@ describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
       },
     })
   }, 20_000)
+
+  it('quotes one current non-CDN copy without sending a transaction', async () => {
+    if (!forkRpcUrl) return
+    const methods: string[] = []
+    const provider = httpProvider(forkRpcUrl, methods)
+    const account = parseAccounts(
+      await provider.request({ method: 'eth_accounts' }),
+    )[0]
+    expect(account).toBeDefined()
+    if (!account) return
+    methods.length = 0
+
+    const quote = await quoteFilecoinStorage(provider, 273, {
+      expectedAccount: account,
+      expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+    })
+
+    expect(quote).toMatchObject({
+      account,
+      chainId: FILECOIN_CALIBRATION_CHAIN_ID,
+      copies: 1,
+      dataSize: 273n,
+      tokenDecimals: 18,
+      tokenSymbol: 'USDFC',
+      withCDN: false,
+    })
+    expect(quote.rates.perMonth).toBeGreaterThan(0n)
+    expect(quote.fees.total).toBeGreaterThan(0n)
+    expect(quote.lockups.total).toBeGreaterThan(0n)
+    expect(methods.length).toBeLessThanOrEqual(16)
+    expect(methods).not.toContain('eth_sendTransaction')
+    expect(methods).not.toContain('eth_signTypedData_v4')
+  }, 30_000)
 })
