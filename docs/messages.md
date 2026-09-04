@@ -42,3 +42,9 @@ Message identifiers are allocated by the contract and are shared with group mess
 The React client exposes an explicitly public composer and a selected-conversation reader without introducing a server or hosted database. Sending requires a separate no-privacy acknowledgment, preserves a returned transaction hash through uncertain receipt reads, and verifies the exact message event before reporting success. A hashless provider failure remains locked until the user confirms that they checked wallet activity, preventing an accidental duplicate broadcast.
 
 Conversation reads never begin as an effect of connecting, typing, or rendering. Each click advances no more than one bounded range for the exact address pair, stale reads are cancelled when the wallet context or recipient changes, and partial catch-up results remain hidden. Status copy names the verified start block, and a pending deployment offers a confirmation check instead of implying that history was scanned. Once caught up, the interface renders the newest retained page oldest first and labels that retention boundary rather than implying complete historical pagination.
+
+If the user selects a separate read RPC, conversation synchronization uses its
+wallet-anchored provider and identifies that source in the interface. Replacing
+or clearing the read provider immediately aborts and hides state from the old
+transport. Message submission, ambiguous-hash recovery, and receipt
+verification always retain the original injected wallet provider.

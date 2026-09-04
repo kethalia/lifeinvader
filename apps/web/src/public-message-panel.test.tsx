@@ -208,6 +208,7 @@ describe('PublicMessagePanel', () => {
 
   it('submits a normalized public event, preserves its hash, and clears only the confirmed draft', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const pendingReceipt = deferred<TransactionReceipt>()
     const sendMessage = vi.fn<typeof sendDirectMessage>(
       async (
@@ -224,6 +225,7 @@ describe('PublicMessagePanel', () => {
     )
     render(
       <PublicMessagePanel
+        readProvider={readProvider}
         sendMessage={sendMessage}
         session={connectedSession(provider)}
       />,
@@ -243,6 +245,7 @@ describe('PublicMessagePanel', () => {
       { body: 'Everyone can read this.', mediaCid: MEDIA_CID.bytes },
       expect.any(Function),
     )
+    expect(readProvider.request).not.toHaveBeenCalled()
 
     await act(async () => pendingReceipt.resolve(RECEIPT))
     expect(await screen.findByText(/was included in block 42/i)).toBeTruthy()
@@ -435,6 +438,7 @@ describe('PublicMessagePanel', () => {
 
   it('advances exactly one bounded range per click and withholds partial history', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const newer = publicMessage('Newer public event.', 2n, {
       mediaCid: MEDIA_CID.bytes,
       recipient: ACCOUNT,
@@ -450,6 +454,7 @@ describe('PublicMessagePanel', () => {
       .mockResolvedValueOnce(snapshot([newer, older]))
     render(
       <PublicMessagePanel
+        readProvider={readProvider}
         session={connectedSession(provider)}
         synchronize={synchronize}
       />,
@@ -484,7 +489,7 @@ describe('PublicMessagePanel', () => {
     expect(synchronize).toHaveBeenCalledTimes(2)
     expect(synchronize).toHaveBeenNthCalledWith(
       2,
-      provider,
+      readProvider,
       1n,
       ACCOUNT,
       getAddress(RECIPIENT),
@@ -570,6 +575,69 @@ describe('PublicMessagePanel', () => {
         name: /load confirmed public conversation/i,
       }),
     ).toBeTruthy()
+  })
+
+  it('aborts and hides read state when the selected read provider changes', async () => {
+    const walletProvider = { request: vi.fn() } as Eip1193Provider
+    const firstReadProvider = { request: vi.fn() } as Eip1193Provider
+    const secondReadProvider = { request: vi.fn() } as Eip1193Provider
+    const pending = deferred<DirectMessageStreamSnapshot>()
+    const synchronize = vi
+      .fn<DirectMessageStreamSynchronizer>()
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValueOnce(
+        snapshot([publicMessage('Second provider history.', 2n)]),
+      )
+    const view = render(
+      <PublicMessagePanel
+        readProvider={firstReadProvider}
+        session={connectedSession(walletProvider)}
+        synchronize={synchronize}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText(/recipient address/i), {
+      target: { value: RECIPIENT },
+    })
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /load confirmed public conversation/i,
+      }),
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(1))
+    const firstSignal = synchronize.mock.calls[0]?.[4]?.signal
+
+    view.rerender(
+      <PublicMessagePanel
+        readProvider={secondReadProvider}
+        session={connectedSession(walletProvider)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true))
+    expect(
+      screen.getByRole('button', {
+        name: /load confirmed public conversation/i,
+      }),
+    ).toBeTruthy()
+    await act(async () =>
+      pending.resolve(snapshot([publicMessage('Stale history.', 1n)])),
+    )
+    expect(screen.queryByText('Stale history.')).toBeNull()
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /load confirmed public conversation/i,
+      }),
+    )
+    expect(await screen.findByText('Second provider history.')).toBeTruthy()
+    expect(synchronize).toHaveBeenNthCalledWith(
+      2,
+      secondReadProvider,
+      1n,
+      ACCOUNT,
+      getAddress(RECIPIENT),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
   })
 
   it('rejects a synchronizer result for a different conversation', async () => {

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState } from 'react'
+import type { DirectMessageStreamSynchronizer } from './direct-message-stream'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSynchronizer } from './post-feed'
 import type {
@@ -48,10 +49,12 @@ const networkFacts = [
 ] as const
 
 export function App({
+  synchronizeDirectMessages,
   synchronizePostFeed,
   synchronizeProfile,
   waitForPostConfirmation,
 }: {
+  synchronizeDirectMessages?: DirectMessageStreamSynchronizer
   synchronizePostFeed?: PostFeedSynchronizer
   synchronizeProfile?: ProfileStreamSynchronizer
   waitForPostConfirmation?: PostFeedConfirmationWaiter
@@ -122,7 +125,11 @@ export function App({
 
         <ReadRpcPanel controller={readRpc} session={walletSession.session} />
 
-        <PublicMessagePanel session={walletSession.session} />
+        <PublicMessagePanel
+          readProvider={readRpc.selection?.provider}
+          session={walletSession.session}
+          synchronize={synchronizeDirectMessages}
+        />
 
         <Suspense
           fallback={
