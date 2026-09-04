@@ -90,6 +90,18 @@ const SET_LIKE_ABI = [
     outputs: [],
   },
 ] as const
+const SET_FOLLOW_ABI = [
+  {
+    type: 'function',
+    name: 'setFollow',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'followed', type: 'address' },
+      { name: 'following', type: 'bool' },
+    ],
+    outputs: [],
+  },
+] as const
 const SET_PROFILE_ABI = [
   {
     type: 'function',
@@ -310,6 +322,7 @@ const PROFILE_DATA_PARAMETERS = [
   { type: 'bytes' },
 ] as const
 const LIKE_DATA_PARAMETERS = [{ type: 'bool' }] as const
+const FOLLOW_DATA_PARAMETERS = LIKE_DATA_PARAMETERS
 const DIRECT_MESSAGE_DATA_PARAMETERS = [
   { type: 'uint256' },
   { type: 'string' },
@@ -800,6 +813,11 @@ export type ExpectedGroupMembership = {
   groupId: bigint
   joined: boolean
 }
+export type ExpectedFollow = {
+  followed: Address
+  follower: Address
+  following: boolean
+}
 export type ExpectedGroupMessage = PostPayload & {
   groupId: bigint
   sender: Address
@@ -1062,6 +1080,27 @@ export function assertExpectedGroupMembership(
   }
 }
 
+export function assertExpectedFollow(
+  logs: unknown,
+  expected: ExpectedFollow,
+  receipt: TransactionReceipt,
+) {
+  if (
+    !hasExpectedProtocolLog(
+      logs,
+      receipt,
+      [
+        FOLLOW_SET_TOPIC,
+        expectedTopic(expected.follower),
+        expectedTopic(expected.followed),
+      ],
+      encodeAbiParameters(FOLLOW_DATA_PARAMETERS, [expected.following]),
+    )
+  ) {
+    throw new Error('The receipt did not contain the expected follow event.')
+  }
+}
+
 export function assertExpectedGroupMessage(
   logs: unknown,
   expected: ExpectedGroupMessage,
@@ -1156,6 +1195,7 @@ export async function waitForTransactionReceipt(
     assertCurrentChain?: () => Promise<void>
     assertUnchanged?: () => void
     expectedDirectMessage?: ExpectedDirectMessage
+    expectedFollow?: ExpectedFollow
     expectedGroupCreated?: ExpectedGroupCreated
     expectedGroupMembership?: ExpectedGroupMembership
     expectedGroupMessage?: ExpectedGroupMessage
@@ -1243,6 +1283,9 @@ export async function waitForTransactionReceipt(
               options.expectedDirectMessage,
               receipt,
             )
+          }
+          if (!reverted && options.expectedFollow) {
+            assertExpectedFollow(logs, options.expectedFollow, receipt)
           }
           if (!reverted && options.expectedGroupCreated) {
             groupId = assertExpectedGroupCreated(
@@ -1511,6 +1554,65 @@ export async function setPostLike(
     onSubmitted,
     localProvider,
   )
+}
+
+function normalizeFollowAccount(value: unknown, label: string) {
+  if (typeof value !== 'string' || !isAddress(value)) {
+    throw new Error(`The ${label} account is invalid.`)
+  }
+  const account = getAddress(value)
+  if (account.toLowerCase() === ZERO_ADDRESS) {
+    throw new Error(`The ${label} account must be nonzero.`)
+  }
+  return account
+}
+
+export async function setFollow(
+  provider: Eip1193Provider,
+  accountValue: Address,
+  chainId: bigint,
+  followedValue: Address,
+  following: boolean,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+): Promise<TransactionReceipt> {
+  const follower = normalizeFollowAccount(accountValue, 'follower')
+  const followed = normalizeFollowAccount(followedValue, 'followed')
+  if (follower.toLowerCase() === followed.toLowerCase()) {
+    throw new Error('An account cannot follow itself.')
+  }
+  const guard = await createTransactionGuard(provider, follower, chainId)
+  try {
+    if ((await inspectProtocol(provider)).kind !== 'ready') {
+      throw new Error(
+        'Verified Lifeinvader v1 code is required before changing a follow.',
+      )
+    }
+    const hash = await sendTransaction(
+      provider,
+      {
+        data: encodeFunctionData({
+          abi: SET_FOLLOW_ABI,
+          functionName: 'setFollow',
+          args: [followed, following],
+        }),
+        from: follower,
+        to: PROTOCOL_ADDRESS,
+      },
+      guard,
+      onSubmitted,
+      localProvider,
+    )
+    return await waitForTransactionReceipt(provider, hash, {
+      assertCurrentChain: guard.assertSubmission,
+      assertUnchanged: guard.assertUnchanged,
+      expectedFollow: { followed, follower, following },
+      localProvider,
+      selectedChainId: chainId,
+    })
+  } finally {
+    guard.release()
+  }
 }
 
 export async function setProfile(

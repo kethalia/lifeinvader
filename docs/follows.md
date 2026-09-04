@@ -100,5 +100,15 @@ projection, and ignores late results. A deferred corruption error resets only
 that exact directional account cache before offering a retry; if IndexedDB
 cannot be reset, the current page reports that browser data must be cleared.
 
-The follow write helper and visible UI remain separate milestones, so these
-chain-derived relationships are not yet shown in the app.
+## Receipt-authenticated writes
+
+The browser submits `setFollow(followed, following)` only after rejecting an
+invalid, zero, or self target and binding the action to the click-time wallet
+account and chain. A transaction is not reported as successful merely because
+it was mined: its canonical receipt must contain the exact v1 `FollowSet` event
+for the selected follower, followed account, and boolean state. Wallet
+rejections remain retryable, while an ambiguous provider failure preserves the
+possibility that the transaction was broadcast.
+
+The visible follow UI remains a separate milestone, so these chain-derived
+relationships and write controls are not yet shown in the app.
