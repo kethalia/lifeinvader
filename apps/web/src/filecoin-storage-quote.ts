@@ -7,11 +7,8 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
-import {
-  FILECOIN_CALIBRATION_CHAIN_ID,
-  FILECOIN_MAINNET_CHAIN_ID,
-  getFilecoinStorageNetwork,
-} from './filecoin-storage'
+import { getFilecoinStorageNetwork } from './filecoin-storage'
+import { bindFilecoinStorageSynapseChain } from './filecoin-storage-synapse'
 
 export const FILECOIN_STORAGE_QUOTE_TIMEOUT_MS = 30_000
 export const MAX_FILECOIN_STORAGE_QUOTE_RPC_REQUESTS = 16
@@ -166,56 +163,12 @@ const readSynapseCosts: FilecoinStorageCostReader = async ({
   request,
 }) => {
   const { Synapse, calibration, mainnet } = await import('@filoz/synapse-sdk')
-  const chainTemplate =
-    chainId === FILECOIN_MAINNET_CHAIN_ID
-      ? mainnet
-      : chainId === FILECOIN_CALIBRATION_CHAIN_ID
-        ? calibration
-        : undefined
-  const network = getFilecoinStorageNetwork(chainId)
-  if (!chainTemplate || !network) {
+  const binding = bindFilecoinStorageSynapseChain(chainId, {
+    calibration,
+    mainnet,
+  })
+  if (!binding) {
     throw quoteError(`chain ${chainId.toString()} is unsupported.`)
-  }
-
-  // Bind SDK reads to the exact address graph that the preceding preflight
-  // verified instead of trusting addresses bundled into a dependency release.
-  const chain = {
-    ...chainTemplate,
-    contracts: {
-      ...chainTemplate.contracts,
-      endorsements: {
-        ...chainTemplate.contracts.endorsements,
-        address: network.contracts.endorsements,
-      },
-      filecoinPay: {
-        ...chainTemplate.contracts.filecoinPay,
-        address: network.contracts.filecoinPay,
-      },
-      fwss: {
-        ...chainTemplate.contracts.fwss,
-        address: network.contracts.fwss,
-      },
-      fwssView: {
-        ...chainTemplate.contracts.fwssView,
-        address: network.contracts.fwssView,
-      },
-      pdp: {
-        ...chainTemplate.contracts.pdp,
-        address: network.contracts.pdp,
-      },
-      serviceProviderRegistry: {
-        ...chainTemplate.contracts.serviceProviderRegistry,
-        address: network.contracts.serviceProviderRegistry,
-      },
-      sessionKeyRegistry: {
-        ...chainTemplate.contracts.sessionKeyRegistry,
-        address: network.contracts.sessionKeyRegistry,
-      },
-      usdfc: {
-        ...chainTemplate.contracts.usdfc,
-        address: network.contracts.usdfc,
-      },
-    },
   }
 
   const transport = custom(
@@ -232,7 +185,7 @@ const readSynapseCosts: FilecoinStorageCostReader = async ({
   )
   const synapse = Synapse.create({
     account,
-    chain,
+    chain: binding.chain,
     pieceBatching: false,
     source: 'lifeinvader',
     transport,

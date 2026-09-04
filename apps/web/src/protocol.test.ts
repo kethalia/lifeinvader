@@ -23,6 +23,7 @@ import {
   assertExpectedPostAction,
   assertProtocolConfiguration,
   COMMENT_PUBLISHED_TOPIC,
+  createTransactionGuard,
   createGroup,
   deployProtocol,
   DIRECT_MESSAGE_SENT_TOPIC,
@@ -207,6 +208,27 @@ describe('protocol transactions', () => {
         expectProtocol: true,
       }),
     ).rejects.toThrow(/did not deploy/i)
+  })
+  it('authenticates caller-defined receipt logs only after canonical inclusion', async () => {
+    const assertReceiptLogs = vi.fn()
+    await expect(
+      waitForTransactionReceipt(receiptProvider(), TRANSACTION_HASH, {
+        assertReceiptLogs,
+      }),
+    ).resolves.toMatchObject({ hash: TRANSACTION_HASH })
+    expect(assertReceiptLogs).toHaveBeenCalledWith(undefined, {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    })
+
+    await expect(
+      waitForTransactionReceipt(receiptProvider(), TRANSACTION_HASH, {
+        assertReceiptLogs: () => {
+          throw new Error('Expected funding event is missing.')
+        },
+      }),
+    ).rejects.toThrow(/funding event is missing/i)
   })
   it('rejects an oversized UTF-8 body before opening the wallet', async () => {
     const request = vi.fn()
@@ -1079,6 +1101,47 @@ describe('protocol transactions', () => {
   })
 })
 describe('transaction chain binding', () => {
+  it('cleans listeners recorded before a nonstandard provider throws', async () => {
+    const removed: string[] = []
+    const request = vi.fn(async () => {
+      throw new Error('Wallet reads must not start.')
+    })
+    const provider: Eip1193Provider = {
+      request,
+      on: vi.fn((event) => {
+        if (event === 'disconnect') throw new Error('Listener attach failed.')
+      }),
+      removeListener: vi.fn((event) => {
+        removed.push(event)
+      }),
+    }
+
+    await expect(createTransactionGuard(provider, ACCOUNT, 1n)).rejects.toThrow(
+      /listener attach failed/i,
+    )
+    expect(request).not.toHaveBeenCalled()
+    expect(removed).toEqual(['chainChanged', 'disconnect'])
+  })
+
+  it('attempts every listener cleanup once without masking the outcome', async () => {
+    const removed: string[] = []
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) =>
+        method === 'eth_chainId' ? '0x1' : [ACCOUNT],
+      ),
+      on: vi.fn(),
+      removeListener: vi.fn((event) => {
+        removed.push(event)
+        if (event === 'chainChanged') throw new Error('Cleanup failed.')
+      }),
+    }
+    const guard = await createTransactionGuard(provider, ACCOUNT, 1n)
+
+    expect(() => guard.release()).not.toThrow()
+    expect(() => guard.release()).not.toThrow()
+    expect(removed).toEqual(['chainChanged', 'disconnect', 'accountsChanged'])
+  })
+
   it('rejects a chain different from the click-time selection', async () => {
     const request = vi.fn(async ({ method }: ProviderRequest) => {
       if (method === 'eth_chainId') return '0x2'

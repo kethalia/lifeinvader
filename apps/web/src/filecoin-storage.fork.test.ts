@@ -7,6 +7,7 @@ import {
   FILECOIN_CALIBRATION_CHAIN_ID,
   inspectFilecoinStorage,
 } from './filecoin-storage'
+import { fundFilecoinStorage } from './filecoin-storage-funding'
 import { quoteFilecoinStorage } from './filecoin-storage-quote'
 
 const forkRpcUrl = process.env.LIFEINVADER_FILECOIN_FORK_RPC_URL
@@ -14,10 +15,33 @@ const describeFork = forkRpcUrl ? describe : describe.skip
 const UNUSED_QUOTE_ACCOUNT = getAddress(
   '0x000000000000000000000000000000000000a11c',
 )
+const FUNDED_ANVIL_ACCOUNT = getAddress(
+  '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+)
 
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
   result?: unknown
+}
+
+async function rpc(
+  url: string,
+  method: string,
+  params: readonly unknown[] = [],
+) {
+  const response = await fetch(url, {
+    body: JSON.stringify({ id: 1, jsonrpc: '2.0', method, params }),
+    headers: { 'content-type': 'application/json' },
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new Error(`Local fork RPC returned HTTP ${response.status}.`)
+  }
+  const payload = (await response.json()) as JsonRpcResponse
+  if (payload.error) {
+    throw new Error(payload.error.message ?? 'Local fork RPC request failed.')
+  }
+  return payload.result
 }
 
 function httpProvider(
@@ -116,4 +140,52 @@ describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
     expect(methods).not.toContain('eth_sendTransaction')
     expect(methods).not.toContain('eth_signTypedData_v4')
   }, 30_000)
+
+  it('funds and approves one quote through an authenticated transaction', async () => {
+    if (!forkRpcUrl) return
+    const snapshot = await rpc(forkRpcUrl, 'evm_snapshot')
+    if (typeof snapshot !== 'string' || !/^0x[0-9a-f]+$/i.test(snapshot)) {
+      throw new Error('Local fork RPC returned an invalid snapshot identifier.')
+    }
+    const methods: string[] = []
+    const provider = httpProvider(forkRpcUrl, methods, FUNDED_ANVIL_ACCOUNT)
+    try {
+      const quote = await quoteFilecoinStorage(provider, 273, {
+        expectedAccount: FUNDED_ANVIL_ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+      })
+      expect(quote.ready).toBe(false)
+      expect(quote.depositNeeded > 0n || quote.needsServiceApproval).toBe(true)
+      const submitted: string[] = []
+
+      const receipt = await fundFilecoinStorage(provider, quote, {
+        expectedAccount: FUNDED_ANVIL_ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+        onSubmitted: (hash) => submitted.push(hash),
+        pollIntervalMs: 10,
+        receiptTimeoutMs: 30_000,
+      })
+      expect(submitted).toEqual([receipt.hash])
+      expect(
+        methods.filter((method) => method === 'eth_sendTransaction'),
+      ).toHaveLength(1)
+      expect(
+        methods.filter((method) => method === 'eth_signTypedData_v4'),
+      ).toHaveLength(quote.depositNeeded > 0n ? 1 : 0)
+
+      const refreshed = await quoteFilecoinStorage(provider, 273, {
+        expectedAccount: FUNDED_ANVIL_ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+      })
+      expect(refreshed).toMatchObject({
+        depositNeeded: 0n,
+        needsServiceApproval: false,
+        ready: true,
+      })
+    } finally {
+      if ((await rpc(forkRpcUrl, 'evm_revert', [snapshot])) !== true) {
+        throw new Error('Local fork RPC did not restore the funding snapshot.')
+      }
+    }
+  }, 60_000)
 })

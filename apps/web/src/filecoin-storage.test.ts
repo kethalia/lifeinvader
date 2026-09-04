@@ -201,7 +201,7 @@ describe('Filecoin storage deployment inspection', () => {
 
   it('reports every missing dependency after the graph matches', async () => {
     const { provider } = deploymentProvider({
-      missingCode: ['endorsements', 'usdfc'],
+      missingCode: ['endorsements', 'multicall3', 'usdfc'],
     })
 
     await expect(inspectFilecoinStorage(provider)).resolves.toMatchObject({
@@ -209,6 +209,11 @@ describe('Filecoin storage deployment inspection', () => {
         {
           address: CALIBRATION.contracts.endorsements,
           contract: 'endorsements',
+          kind: 'missing-code',
+        },
+        {
+          address: CALIBRATION.contracts.multicall3,
+          contract: 'multicall3',
           kind: 'missing-code',
         },
         {
