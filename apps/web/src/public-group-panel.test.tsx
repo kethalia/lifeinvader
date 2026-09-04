@@ -230,6 +230,12 @@ describe('PublicGroupPanel', () => {
         name: 'Load confirmed members',
       }).disabled,
     ).toBe(false)
+    expect(screen.getByText('Selected public group #18.')).toBeTruthy()
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', {
+        name: 'Load confirmed group messages',
+      }).disabled,
+    ).toBe(false)
   })
 
   it('accepts a valid direct group ID and rejects malformed selections', () => {
@@ -257,6 +263,7 @@ describe('PublicGroupPanel', () => {
         name: 'Load confirmed members',
       }).disabled,
     ).toBe(false)
+    expect(screen.getByText('Selected public group #17.')).toBeTruthy()
   })
 
   it('steps exact-group catch-up and local projection before listing members', async () => {

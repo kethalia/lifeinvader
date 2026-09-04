@@ -15,6 +15,7 @@ import {
 } from './group-membership-read-model'
 import { decodeMediaCid } from './media-cid'
 import type { PublishedGroup } from './protocol-events'
+import { PublicGroupMessagePanel } from './public-group-message-panel'
 import type { WalletSession } from './wallet-session'
 
 const MEMBER_PAGE_SIZE = 25
@@ -544,6 +545,10 @@ export function PublicGroupPanel({
 
         <GroupTransactionConsole
           onSelectGroup={selectGroup}
+          selectedGroupId={selectedGroupId}
+          session={session}
+        />
+        <PublicGroupMessagePanel
           selectedGroupId={selectedGroupId}
           session={session}
         />
