@@ -29,6 +29,8 @@ function storageCosts(
       cacheMissLockup: 0n,
       cdnLockup: 0n,
       lifecycleLockup: 8_000_000_000_000_000n,
+      rateDeltaPerEpoch: 120_000n,
+      reserveReplenishment: 0n,
       streamingLockup: 0n,
       total: 8_000_000_000_000_000n,
     },
@@ -212,6 +214,19 @@ describe('Filecoin storage quotes', () => {
       ),
     ).rejects.toThrow(/forbidden RPC method personal_sign/i)
 
+    const malformedWallet = quoteProvider()
+    await expect(
+      quoteFilecoinStorage(
+        malformedWallet.provider,
+        273,
+        quoteOptions(async ({ request }) => {
+          await request({ method: 42 as never })
+          return storageCosts()
+        }),
+      ),
+    ).rejects.toThrow(/forbidden RPC method <invalid>/i)
+    expect(malformedWallet.requests).toHaveLength(2)
+
     const noisyWallet = quoteProvider()
     await expect(
       quoteFilecoinStorage(
@@ -253,6 +268,45 @@ describe('Filecoin storage quotes', () => {
         ),
       ).toBe(true)
     }
+  })
+
+  it('removes listeners when provider registration fails partway through', async () => {
+    const wallet = quoteProvider()
+    const addListener = wallet.provider.on?.bind(wallet.provider)
+    wallet.provider.on = vi.fn((event, listener) => {
+      addListener?.(event, listener)
+      if (event === 'chainChanged') throw new Error('Listener failure')
+    })
+
+    await expect(
+      quoteFilecoinStorage(
+        wallet.provider,
+        273,
+        quoteOptions(async () => storageCosts()),
+      ),
+    ).rejects.toThrow(/listener failure/i)
+    expect(
+      [...wallet.listeners.values()].every((listeners) => listeners.size === 0),
+    ).toBe(true)
+  })
+
+  it('does not replace a quote result when provider cleanup throws', async () => {
+    const wallet = quoteProvider()
+    wallet.provider.removeListener = vi.fn(() => {
+      throw new Error('Cleanup failure')
+    })
+
+    await expect(
+      quoteFilecoinStorage(
+        wallet.provider,
+        273,
+        quoteOptions(async () => storageCosts()),
+      ),
+    ).resolves.toMatchObject({
+      account: ACCOUNT,
+      chainId: FILECOIN_CALIBRATION_CHAIN_ID,
+      dataSize: 273n,
+    })
   })
 
   it('brackets the cost result with fresh account and chain reads', async () => {
@@ -322,6 +376,21 @@ describe('Filecoin storage quotes', () => {
         ),
       ),
     ).rejects.toThrow(/inconsistent service fees/i)
+
+    await expect(
+      quoteFilecoinStorage(
+        wallet.provider,
+        273,
+        quoteOptions(async () =>
+          storageCosts({
+            lockups: {
+              ...storageCosts().lockups,
+              total: 8_000_000_000_000_001n,
+            },
+          }),
+        ),
+      ),
+    ).rejects.toThrow(/inconsistent payment lockups/i)
 
     await expect(
       quoteFilecoinStorage(

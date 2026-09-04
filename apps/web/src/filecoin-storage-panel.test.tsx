@@ -55,6 +55,8 @@ const quote: FilecoinStorageQuote = {
     cacheMissLockup: 0n,
     cdnLockup: 0n,
     lifecycleLockup: 8_000_000_000_000_000n,
+    rateDeltaPerEpoch: 120_000n,
+    reserveReplenishment: 0n,
     streamingLockup: 0n,
     total: 8_000_000_000_000_000n,
   },
@@ -225,6 +227,7 @@ describe('FilecoinStoragePanel', () => {
     expect(screen.getByText('0.008 USDFC')).toBeTruthy()
     expect(screen.getByText('0.013 USDFC')).toBeTruthy()
     expect(screen.getByText(/maximum FWSS service approval/i)).toBeTruthy()
+    expect(screen.getByText(/do not add them again.*deposit/i)).toBeTruthy()
     expect(screen.getByText(/no transaction or provider upload/i)).toBeTruthy()
   })
 
@@ -372,6 +375,62 @@ describe('FilecoinStoragePanel', () => {
     expect(
       screen.getByRole('button', { name: /^check Filecoin contracts$/i }),
     ).toBeTruthy()
+  })
+
+  it('clears wallet work across a disconnect with retained context', async () => {
+    const inspectStorage = vi.fn<FilecoinStorageInspector>(async () => ({
+      kind: 'ready',
+      network: CALIBRATION,
+    }))
+    let quoteSignal: AbortSignal | undefined
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>(
+      (_provider, _size, options) => {
+        quoteSignal = options.signal
+        return new Promise(() => undefined)
+      },
+    )
+    const { rerender } = render(
+      <FilecoinStoragePanel
+        inspectStorage={inspectStorage}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={connectedSession()}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /^check Filecoin contracts$/i }),
+    )
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /quote one Filecoin copy/i,
+      }),
+    )
+
+    rerender(
+      <FilecoinStoragePanel
+        inspectStorage={inspectStorage}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={{ ...connectedSession(), status: 'disconnected' }}
+      />,
+    )
+    await waitFor(() => expect(quoteSignal?.aborted).toBe(true))
+    expect(screen.getByText(/reconnect the wallet/i)).toBeTruthy()
+
+    rerender(
+      <FilecoinStoragePanel
+        inspectStorage={inspectStorage}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={connectedSession()}
+      />,
+    )
+    expect(
+      screen.getByRole('button', { name: /^check Filecoin contracts$/i }),
+    ).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: /quote one Filecoin copy/i }),
+    ).toBeNull()
   })
 
   it('clears an old quote before a fresh contract inspection', async () => {

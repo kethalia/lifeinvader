@@ -103,6 +103,7 @@ export function FilecoinStoragePanel({
     session.account,
     session.chainId,
     session.provider,
+    session.status,
   ])
 
   if (!prepared) return null
@@ -375,6 +376,10 @@ export function FilecoinStoragePanel({
                   : quote.needsServiceApproval
                     ? 'Funding would also require a maximum FWSS service approval.'
                     : 'The service approval is sufficient, but Filecoin Pay needs the displayed deposit.'}
+              </p>
+              <p>
+                One-time fees are paid from the lifecycle reserve represented in
+                the lockup; do not add them again to the deposit estimate.
               </p>
               <p>
                 Costs are live chain state and may change. Refresh before a

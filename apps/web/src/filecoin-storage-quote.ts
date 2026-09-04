@@ -34,6 +34,8 @@ export type FilecoinStorageCosts = {
     cacheMissLockup: bigint
     cdnLockup: bigint
     lifecycleLockup: bigint
+    rateDeltaPerEpoch: bigint
+    reserveReplenishment: bigint
     streamingLockup: bigint
     total: bigint
   }
@@ -114,6 +116,14 @@ function validateCosts(value: FilecoinStorageCosts): FilecoinStorageCosts {
   assertNonNegative(value.fees?.addPiecesFee, 'piece fee')
   assertNonNegative(value.fees?.total, 'total fee')
   assertNonNegative(value.lockups?.lifecycleLockup, 'lifecycle lockup')
+  assertNonNegative(
+    value.lockups?.rateDeltaPerEpoch,
+    'per-epoch lockup-rate delta',
+  )
+  assertNonNegative(
+    value.lockups?.reserveReplenishment,
+    'reserve-replenishment lockup',
+  )
   assertNonNegative(value.lockups?.streamingLockup, 'streaming lockup')
   assertNonNegative(value.lockups?.cdnLockup, 'CDN lockup')
   assertNonNegative(value.lockups?.cacheMissLockup, 'cache-miss lockup')
@@ -130,6 +140,16 @@ function validateCosts(value: FilecoinStorageCosts): FilecoinStorageCosts {
     value.fees.createDataSetFee + value.fees.addPiecesFee
   ) {
     throw quoteError('Synapse returned inconsistent service fees.')
+  }
+  if (
+    value.lockups.total !==
+    value.lockups.lifecycleLockup +
+      value.lockups.reserveReplenishment +
+      value.lockups.streamingLockup +
+      value.lockups.cdnLockup +
+      value.lockups.cacheMissLockup
+  ) {
+    throw quoteError('Synapse returned inconsistent payment lockups.')
   }
   if (
     value.ready !== (value.depositNeeded === 0n && !value.needsFwssMaxApproval)
@@ -213,14 +233,14 @@ const readSynapseCosts: FilecoinStorageCostReader = async ({
   const synapse = Synapse.create({
     account,
     chain,
+    pieceBatching: false,
     source: 'lifeinvader',
     transport,
     withCDN: false,
   })
   return await synapse.storage.getUploadCosts({
-    dataSize,
     isNewDataSet: true,
-    pieceCount: 1n,
+    pieceSizes: [dataSize],
     withCDN: false,
   })
 }
@@ -259,11 +279,7 @@ export async function quoteFilecoinStorage(
   }
   const addProviderListener = provider.on?.bind(provider)
   const removeProviderListener = provider.removeListener?.bind(provider)
-  if (addProviderListener && removeProviderListener) {
-    addProviderListener('accountsChanged', handleContextChange)
-    addProviderListener('chainChanged', handleContextChange)
-    addProviderListener('disconnect', handleContextChange)
-  }
+  const registeredContextEvents: string[] = []
 
   const deadline = Date.now() + timeoutMs
   let requestCount = 0
@@ -274,9 +290,10 @@ export async function quoteFilecoinStorage(
   }
   const read = async (request: ProviderRequest) => {
     assertContextStable()
-    if (!QUOTE_RPC_METHODS.has(request.method)) {
+    const method = (request as { method?: unknown } | null)?.method
+    if (typeof method !== 'string' || !QUOTE_RPC_METHODS.has(method)) {
       throw quoteError(
-        `the quote adapter requested forbidden RPC method ${request.method.slice(0, 80)}.`,
+        `the quote adapter requested forbidden RPC method ${typeof method === 'string' ? method.slice(0, 80) : '<invalid>'}.`,
       )
     }
     requestCount += 1
@@ -308,6 +325,14 @@ export async function quoteFilecoinStorage(
   }
 
   try {
+    if (addProviderListener && removeProviderListener) {
+      for (const event of ['accountsChanged', 'chainChanged', 'disconnect']) {
+        // Record first: a nonstandard provider may attach the listener and
+        // still throw, in which case the finally block must attempt cleanup.
+        registeredContextEvents.push(event)
+        addProviderListener(event, handleContextChange)
+      }
+    }
     await readContext()
     const costs = validateCosts(
       await beforeDeadline(
@@ -341,10 +366,14 @@ export async function quoteFilecoinStorage(
       withCDN: false,
     }
   } finally {
-    if (addProviderListener && removeProviderListener) {
-      removeProviderListener('accountsChanged', handleContextChange)
-      removeProviderListener('chainChanged', handleContextChange)
-      removeProviderListener('disconnect', handleContextChange)
+    if (removeProviderListener) {
+      for (const event of registeredContextEvents) {
+        try {
+          removeProviderListener(event, handleContextChange)
+        } catch {
+          // A provider cleanup failure must not replace the quote outcome.
+        }
+      }
     }
   }
 }

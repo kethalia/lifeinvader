@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@filoz/synapse-sdk": "1.2.1",
+    "@filoz/synapse-sdk": "2.0.0",
     "@ipld/car": "5.4.7",
     "ipfs-unixfs-importer": "16.1.5",
     "multiformats": "14.0.5",
