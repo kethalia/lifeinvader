@@ -536,7 +536,7 @@ describe('FilecoinStoragePanel', () => {
       },
     )
     const onWriteLockChange = vi.fn()
-    await renderFundingQuote({
+    const view = await renderFundingQuote({
       fundStorage,
       onWriteLockChange,
       quoteStorage,
@@ -581,6 +581,25 @@ describe('FilecoinStoragePanel', () => {
     ).toBeTruthy()
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+
+    view.rerender(
+      <FilecoinStoragePanel
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={{
+          ...connectedSession(),
+          account: '0x000000000000000000000000000000000000b0bb',
+        }}
+      />,
+    )
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/account funding confirmed in block 42/i),
+      ).toBeNull(),
     )
   })
 
@@ -720,6 +739,147 @@ describe('FilecoinStoragePanel', () => {
       screen.queryByText(/account funding confirmed in block 42/i),
     ).toBeNull()
     expect(onWriteLockChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it('invalidates receipt completion across a context change and recovers with a fresh quote signal', async () => {
+    const readyQuote = {
+      ...quote,
+      depositNeeded: 0n,
+      needsServiceApproval: false,
+      ready: true,
+    }
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>()
+    quoteStorage
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(readyQuote)
+    const pendingFunding = deferred<TransactionReceipt>()
+    const fundStorage = vi.fn<FilecoinStorageFunder>(
+      async (_provider, _quote, options) => {
+        options.onSubmitted?.(TRANSACTION_HASH)
+        return await pendingFunding.promise
+      },
+    )
+    const checkFundingReceipt = vi.fn<FilecoinStorageFundingReceiptChecker>(
+      async () => receipt,
+    )
+    const onWriteLockChange = vi.fn()
+    const view = await renderFundingQuote({
+      checkFundingReceipt,
+      fundStorage,
+      onWriteLockChange,
+      quoteStorage,
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+    await screen.findByTitle(TRANSACTION_HASH)
+
+    view.rerender(
+      <FilecoinStoragePanel
+        checkFundingReceipt={checkFundingReceipt}
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={{
+          ...connectedSession(),
+          account: '0x000000000000000000000000000000000000b0bb',
+        }}
+      />,
+    )
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /context or prepared CAR changed before.*receipt/i,
+    )
+
+    view.rerender(
+      <FilecoinStoragePanel
+        checkFundingReceipt={checkFundingReceipt}
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={connectedSession()}
+      />,
+    )
+    await act(async () => pendingFunding.resolve(receipt))
+    expect(
+      screen.queryByText(/account funding confirmed in block 42/i),
+    ).toBeNull()
+    expect(
+      screen.queryByText(/reading current Filecoin Pay balances/i),
+    ).toBeNull()
+    expect(quoteStorage).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /check funding receipt again/i }),
+    )
+    expect(
+      await screen.findByText(/account funding confirmed in block 42/i),
+    ).toBeTruthy()
+    await waitFor(() => expect(quoteStorage).toHaveBeenCalledTimes(3))
+    expect(checkFundingReceipt).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+  })
+
+  it('lets a reviewed unknown funding hash release the global write lock', async () => {
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>(async () => quote)
+    const fundStorage = vi.fn<FilecoinStorageFunder>(
+      async (_provider, _quote, options) => {
+        options.onSubmitted?.(TRANSACTION_HASH)
+        throw new Error('Receipt unavailable.')
+      },
+    )
+    const onWriteLockChange = vi.fn()
+    const view = await renderFundingQuote({
+      fundStorage,
+      onWriteLockChange,
+      quoteStorage,
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+    await screen.findByTitle(TRANSACTION_HASH)
+
+    view.rerender(
+      <FilecoinStoragePanel
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={{
+          ...connectedSession(),
+          account: '0x000000000000000000000000000000000000b0bb',
+        }}
+      />,
+    )
+    const retryButton = await screen.findByRole('button', {
+      name: /reconnect original wallet/i,
+    })
+    expect((retryButton as HTMLButtonElement).disabled).toBe(true)
+    const clearButton = screen.getByRole('button', {
+      name: /I checked this funding hash; clear lock/i,
+    }) as HTMLButtonElement
+    expect(clearButton.disabled).toBe(false)
+    fireEvent.click(clearButton)
+
+    await waitFor(() =>
+      expect(screen.queryByTitle(TRANSACTION_HASH)).toBeNull(),
+    )
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
   })
 
   it('retains a submitted hash across context changes and recovers its receipt', async () => {

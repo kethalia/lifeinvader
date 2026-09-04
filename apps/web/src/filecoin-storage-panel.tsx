@@ -159,16 +159,19 @@ function FilecoinFundingStatus({
   contextCurrent,
   disabled,
   onClearAmbiguous,
+  onClearUnknown,
   onRetryReceipt,
   state,
 }: {
   contextCurrent: boolean
   disabled: boolean
   onClearAmbiguous(): void
+  onClearUnknown(): void
   onRetryReceipt(): void
   state: FundingState
 }) {
   if (state.kind === 'idle') return null
+  if (!contextCurrent && !fundingStateLocksWrites(state)) return null
   if (state.kind === 'refreshing') {
     return <p role="status">Refreshing every displayed funding term…</p>
   }
@@ -218,15 +221,20 @@ function FilecoinFundingStatus({
             : 'has an unknown final status. Do not submit another funding transaction yet.'}
         </p>
         {state.kind === 'unknown' ? (
-          <button
-            disabled={disabled || !contextCurrent}
-            onClick={onRetryReceipt}
-            type="button"
-          >
-            {contextCurrent
-              ? 'Check funding receipt again'
-              : 'Reconnect original wallet to check receipt'}
-          </button>
+          <div className="transaction-recovery-actions">
+            <button
+              disabled={disabled || !contextCurrent}
+              onClick={onRetryReceipt}
+              type="button"
+            >
+              {contextCurrent
+                ? 'Check funding receipt again'
+                : 'Reconnect original wallet to check receipt'}
+            </button>
+            <button onClick={onClearUnknown} type="button">
+              I checked this funding hash; clear lock
+            </button>
+          </div>
         ) : null}
       </div>
     )
@@ -311,36 +319,54 @@ export function FilecoinStoragePanel({
   useEffect(() => {
     inspectionSequence.current += 1
     quoteSequence.current += 1
+    fundingSequence.current += 1
     activeInspectionController.current?.abort()
     activeQuoteController.current?.abort()
     activeFundingController.current?.abort()
     activeInspectionController.current = undefined
     activeQuoteController.current = undefined
     activeFundingController.current = undefined
+    fundingOperationActive.current = false
     setState({ kind: 'idle' })
     setQuoteState({ kind: 'idle' })
-    setFundingState((current) =>
-      current.kind === 'opening'
-        ? {
-            context: current.context,
-            kind: 'ambiguous',
-            message:
-              'The wallet context or prepared CAR changed while the Filecoin Pay request was open.',
-          }
-        : current,
-    )
+    setFundingState((current) => {
+      if (current.kind === 'opening') {
+        return {
+          context: current.context,
+          kind: 'ambiguous',
+          message:
+            'The wallet context or prepared CAR changed while the Filecoin Pay request was open.',
+        }
+      }
+      if (current.kind === 'pending') {
+        return {
+          context: current.context,
+          hash: current.hash,
+          kind: 'unknown',
+          message:
+            'The wallet context or prepared CAR changed before the Filecoin Pay receipt was confirmed.',
+        }
+      }
+      if (current.kind === 'unknown' || current.kind === 'ambiguous') {
+        return current
+      }
+      return { kind: 'idle' }
+    })
     setFundingAcknowledged(false)
     return () => {
       inspectionSequence.current += 1
       quoteSequence.current += 1
+      fundingSequence.current += 1
       activeInspectionController.current?.abort()
       activeQuoteController.current?.abort()
       activeFundingController.current?.abort()
       activeInspectionController.current = undefined
       activeQuoteController.current = undefined
       activeFundingController.current = undefined
+      fundingOperationActive.current = false
     }
   }, [
+    prepared?.carBytes,
     prepared?.mediaCid.text,
     session.account,
     session.chainId,
@@ -460,7 +486,12 @@ export function FilecoinStoragePanel({
     operationId: number,
     signal: AbortSignal,
   ) => {
-    if (!fundingContextMatchesSession(context, sessionRef.current)) return
+    if (
+      operationId !== fundingSequence.current ||
+      signal.aborted ||
+      !fundingContextMatchesSession(context, sessionRef.current)
+    )
+      return
     setQuoteState({ kind: 'checking' })
     try {
       const refreshed = await quoteStorage(
@@ -655,6 +686,15 @@ export function FilecoinStoragePanel({
     setFundingState({ kind: 'idle' })
   }
 
+  const clearUnknownFunding = () => {
+    if (fundingState.kind !== 'unknown') return
+    fundingSequence.current += 1
+    activeFundingController.current?.abort()
+    activeFundingController.current = undefined
+    fundingOperationActive.current = false
+    setFundingState({ kind: 'idle' })
+  }
+
   const retryFundingReceipt = () => {
     if (
       fundingState.kind !== 'unknown' ||
@@ -683,9 +723,11 @@ export function FilecoinStoragePanel({
           expectedAccount: context.account,
           expectedChainId: context.chainId,
         })
+        if (operationId !== fundingSequence.current) return
         setFundingState({ context, kind: 'confirmed', receipt })
         await refreshQuoteAfterFunding(context, operationId, controller.signal)
       } catch (error) {
+        if (operationId !== fundingSequence.current) return
         setFundingState({
           context,
           hash,
@@ -696,7 +738,9 @@ export function FilecoinStoragePanel({
           ),
         })
       } finally {
-        fundingOperationActive.current = false
+        if (operationId === fundingSequence.current) {
+          fundingOperationActive.current = false
+        }
         if (activeFundingController.current === controller) {
           activeFundingController.current = undefined
         }
@@ -708,7 +752,9 @@ export function FilecoinStoragePanel({
   const quote = quoteState.kind === 'complete' ? quoteState.quote : undefined
   const fundingContextCurrent =
     fundingState.kind !== 'idle' &&
-    fundingContextMatchesSession(fundingState.context, session)
+    fundingContextMatchesSession(fundingState.context, session) &&
+    fundingState.context.mediaCid === prepared.mediaCid.text &&
+    fundingState.context.carByteLength === prepared.carBytes.byteLength
   const fundingButtonLabel =
     fundingState.kind === 'refreshing'
       ? 'Refreshing funding quote…'
@@ -978,6 +1024,7 @@ export function FilecoinStoragePanel({
         contextCurrent={fundingContextCurrent}
         disabled={disabled}
         onClearAmbiguous={clearAmbiguousFunding}
+        onClearUnknown={clearUnknownFunding}
         onRetryReceipt={retryFundingReceipt}
         state={fundingState}
       />
