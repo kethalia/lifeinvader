@@ -26,10 +26,11 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import type { FollowDirection } from './follow-projection'
 
 export const FOLLOW_EVENT_PAGE_SIZE = 200
 export const FOLLOW_EVENT_START_BLOCK = 0n
-export type FollowDirection = 'followers' | 'following'
+export type { FollowDirection } from './follow-projection'
 
 export type FollowProjectionAnchor = {
   readonly account: Address

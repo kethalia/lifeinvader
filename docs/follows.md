@@ -47,6 +47,23 @@ also interrupts wallet and cache authentication and removes temporary wallet
 listeners. A malformed cached page is cleared only for its exact directional
 account scope and is rebuilt from block zero.
 
-The follow write helper, complete-state projection, and UI are separate
-milestones. Until those land, this module is an indexing foundation rather
-than a user-visible follower count.
+## Deterministic relationship projection
+
+`FollowProjection` reduces complete, strictly ordered pages for one normalized
+account and one direction. Outgoing projections key active relationships by the
+followed account; incoming projections key them by the follower. Every decoded
+event is checked against that selected scope before a page can mutate state,
+and the latest signal for each ordered pair wins.
+
+Active relationships are indexed by address, so reads return stable ascending
+pages without sorting or copying the entire result set. Each read is capped at
+200 relationships. Progress records the signal count, active count, last log,
+and monotonic confirmed checkpoint, while results and progress are returned as
+defensive copies. Resetting clears only derived state and preserves the selected
+account and direction.
+
+The projection intentionally accepts only later complete-block pages. It does
+not trust or consume the recent stream preview, and it exposes no global count.
+The authenticated cache runner that feeds this projection, follow write helper,
+and UI remain separate milestones, so this is not yet a user-visible follower
+count.
