@@ -31,6 +31,8 @@ import { useWalletProviders } from './wallet-providers'
 import type { WalletSession, WalletSessionController } from './wallet-session'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
+import { PaidMediaPicker, type PaidMediaPreparer } from './paid-media-picker'
+import type { PreparedMediaCar } from './paid-media-car'
 import { ProfileComposer } from './profile-composer'
 import { ProfileReader } from './profile-reader'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
@@ -190,11 +192,13 @@ function TransactionStatus({
 }
 export function WalletPanel({
   onPostConfirmed,
+  prepareMediaAction,
   publishPostAction = publishPost,
   setProfileAction = setProfile,
   walletSession,
 }: {
   onPostConfirmed(post: IncludedPost): void
+  prepareMediaAction?: PaidMediaPreparer
   publishPostAction?: typeof publishPost
   setProfileAction?: typeof setProfile
   walletSession: WalletSessionController
@@ -214,6 +218,10 @@ export function WalletPanel({
   >([])
   const [body, setBody] = useState('')
   const [mediaCidInput, setMediaCidInput] = useState('')
+  const [mediaPickerRevision, setMediaPickerRevision] = useState(0)
+  const [mediaPreparationBusy, setMediaPreparationBusy] = useState(false)
+  const [mediaPreparationFailed, setMediaPreparationFailed] = useState(false)
+  const [preparedMedia, setPreparedMedia] = useState<PreparedMediaCar>()
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
   let mediaCidError: string | undefined
   try {
@@ -223,11 +231,34 @@ export function WalletPanel({
       error instanceof Error ? error.message : 'The media CID is invalid.'
   }
   const composeRevision = useRef(0)
+  const mediaPreparationBusyRef = useRef(false)
+  const mediaPreparationFailedRef = useRef(false)
   const inspectionSequence = useRef(0)
   const operationSequence = useRef(0)
   const sessionRef = useRef(session)
   const transactionSequence = useRef(0)
   sessionRef.current = session
+  const handlePreparedMedia = (prepared: PreparedMediaCar | undefined) => {
+    composeRevision.current += 1
+    setPreparedMedia(prepared)
+    setMediaCidInput(prepared?.mediaCid.text ?? '')
+  }
+  const handleMediaPreparingChange = (preparing: boolean) => {
+    mediaPreparationBusyRef.current = preparing
+    setMediaPreparationBusy(preparing)
+  }
+  const handleMediaPreparationErrorChange = (failed: boolean) => {
+    mediaPreparationFailedRef.current = failed
+    setMediaPreparationFailed(failed)
+  }
+  const clearPreparedMedia = () => {
+    mediaPreparationBusyRef.current = false
+    mediaPreparationFailedRef.current = false
+    setMediaPreparationBusy(false)
+    setMediaPreparationFailed(false)
+    setPreparedMedia(undefined)
+    setMediaPickerRevision((current) => current + 1)
+  }
   const refreshInspection = useCallback(async () => {
     const requestId = ++inspectionSequence.current
     const provider = session.provider
@@ -382,6 +413,7 @@ export function WalletPanel({
             composeRevision.current += 1
             setBody('')
             setMediaCidInput('')
+            clearPreparedMedia()
           }
           onPostConfirmed({
             blockHash: nextReceipt.blockHash,
@@ -471,6 +503,8 @@ export function WalletPanel({
       !provider ||
       !account ||
       chainId === undefined ||
+      mediaPreparationBusyRef.current ||
+      mediaPreparationFailedRef.current ||
       mediaCidError !== undefined
     )
       return
@@ -594,6 +628,7 @@ export function WalletPanel({
               composeRevision.current += 1
               setBody('')
               setMediaCidInput('')
+              clearPreparedMedia()
             }
             onPostConfirmed({
               blockHash: nextReceipt.blockHash,
@@ -809,22 +844,38 @@ export function WalletPanel({
                 }}
                 placeholder="What should survive every rebrand?"
               />
-              <label htmlFor="post-media-cid">
-                IPFS media CID (already uploaded, optional)
-              </label>
+              <PaidMediaPicker
+                key={mediaPickerRevision}
+                disabled={busyAction !== undefined || transactionWriteLocked}
+                initialPrepared={preparedMedia}
+                onPrepared={handlePreparedMedia}
+                onPreparationErrorChange={handleMediaPreparationErrorChange}
+                onPreparingChange={handleMediaPreparingChange}
+                {...(prepareMediaAction
+                  ? { prepareMedia: prepareMediaAction }
+                  : {})}
+              />
+              <label htmlFor="post-media-cid">IPFS media CID (optional)</label>
               <input
                 id="post-media-cid"
                 aria-describedby="post-media-cid-help"
                 aria-invalid={mediaCidError ? true : undefined}
-                disabled={busyAction === 'post' || transactionWriteLocked}
+                disabled={
+                  busyAction === 'post' ||
+                  transactionWriteLocked ||
+                  mediaPreparationBusy ||
+                  mediaPreparationFailed
+                }
                 maxLength={MAX_MEDIA_CID_TEXT_LENGTH}
                 onChange={(event) => {
                   composeRevision.current += 1
+                  setPreparedMedia(undefined)
                   setMediaCidInput(event.target.value)
                 }}
                 placeholder="bafy… or Qm…"
                 type="text"
                 value={mediaCidInput}
+                readOnly={preparedMedia !== undefined}
               />
               <p
                 className={
@@ -833,9 +884,11 @@ export function WalletPanel({
                 id="post-media-cid-help"
               >
                 {mediaCidError ??
-                  (parsedMediaCid
-                    ? `Will commit canonical CIDv1 bytes (${parsedMediaCid.codec}).`
-                    : 'This records an address only. It does not upload or guarantee storage.')}
+                  (preparedMedia
+                    ? 'Prepared locally. Remove it above to enter another CID; no upload or storage has happened.'
+                    : parsedMediaCid
+                      ? `Will commit canonical CIDv1 bytes (${parsedMediaCid.codec}).`
+                      : 'This records an address only. It does not upload or guarantee storage.')}
               </p>
               <div className="compose-actions">
                 <span
@@ -853,6 +906,8 @@ export function WalletPanel({
                   disabled={
                     busyAction !== undefined ||
                     transactionWriteLocked ||
+                    mediaPreparationBusy ||
+                    mediaPreparationFailed ||
                     (bodyBytes === 0 && parsedMediaCid === undefined) ||
                     mediaCidError !== undefined ||
                     bodyBytes > MAX_POST_BODY_BYTES

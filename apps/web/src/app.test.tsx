@@ -7,10 +7,12 @@ import {
   waitFor,
 } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CID } from 'multiformats/cid'
 import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
 import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
+import type { PreparedMediaCar } from './paid-media-car'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
@@ -461,6 +463,100 @@ describe('App', () => {
       />,
     )
     expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+  })
+  it('prepares local media, locks publishing, and commits its CID', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const walletSession: WalletSessionController = {
+      connect: vi.fn(async () => undefined),
+      refresh: vi.fn(async () => undefined),
+      session: {
+        account: ACCOUNT,
+        chainId: 1n,
+        name: 'Media Wallet',
+        provider,
+        status: 'connected',
+      },
+    }
+    const preparation = deferred<PreparedMediaCar>()
+    let rejectPreparation = false
+    const prepareMediaAction = vi.fn(() =>
+      rejectPreparation
+        ? Promise.reject(new Error('Cannot prepare media: unreadable file.'))
+        : preparation.promise,
+    )
+    const publishPostAction = vi.fn<typeof publishPost>(async () => ({
+      blockHash: RECEIPT_BLOCK_HASH as TransactionReceipt['blockHash'],
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    }))
+    const onPostConfirmed = vi.fn()
+    render(
+      <WalletPanel
+        onPostConfirmed={onPostConfirmed}
+        prepareMediaAction={prepareMediaAction}
+        publishPostAction={publishPostAction}
+        walletSession={walletSession}
+      />,
+    )
+
+    const textarea = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(textarea, { target: { value: 'The receipt is forever.' } })
+    const file = new File(['media'], 'proof.gif', { type: 'image/gif' })
+    fireEvent.change(screen.getByLabelText(/prepare a local image/i), {
+      target: { files: [file] },
+    })
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect(prepareMediaAction).toHaveBeenCalledWith(
+      file,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+
+    const prepared: PreparedMediaCar = {
+      carBytes: new Uint8Array(273),
+      file: { name: file.name, size: file.size, type: file.type },
+      mediaCid: MEDIA_CID,
+      rootCid: CID.parse(MEDIA_CID.text),
+    }
+    await act(async () => preparation.resolve(prepared))
+
+    expect((await screen.findByRole('status')).textContent).toMatch(
+      /proof\.gif.*prepared locally/i,
+    )
+    const mediaInput = screen.getByLabelText(/IPFS media CID/i)
+    expect((mediaInput as HTMLInputElement).value).toBe(MEDIA_CID.text)
+    expect((mediaInput as HTMLInputElement).readOnly).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+
+    await waitFor(() => expect(publishPostAction).toHaveBeenCalledTimes(1))
+    expect(publishPostAction.mock.calls[0]?.[3]).toEqual({
+      body: 'The receipt is forever.',
+      mediaCid: MEDIA_CID.bytes,
+    })
+    expect(onPostConfirmed).toHaveBeenCalledTimes(1)
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
+    expect((mediaInput as HTMLInputElement).value).toBe('')
+    expect(screen.queryByText(/is prepared locally/i)).toBeNull()
+
+    fireEvent.change(textarea, { target: { value: 'Do not publish me yet.' } })
+    rejectPreparation = true
+    fireEvent.change(screen.getByLabelText(/prepare a local image/i), {
+      target: { files: [new File(['bad'], 'bad.gif')] },
+    })
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /unreadable file/i,
+    )
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect((mediaInput as HTMLInputElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: /clear media error/i }))
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
+    expect((mediaInput as HTMLInputElement).disabled).toBe(false)
   })
   it('preserves an unknown post while another chain starts a write', async () => {
     let chainId = '0x1'
