@@ -49,7 +49,6 @@ const BLOCK_HASH = `0x${'34'.repeat(32)}` as Hash
 const SIGNATURE = `0x${'56'.repeat(65)}` as Hex
 const CALIBRATION = FILECOIN_STORAGE_NETWORKS[1]
 let piece: Awaited<ReturnType<typeof calculate>>
-
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((next) => {
@@ -57,7 +56,6 @@ function deferred<T>() {
   })
   return { promise, resolve }
 }
-
 const TYPES = {
   ...EIP712Types,
   EIP712Domain: [
@@ -67,9 +65,7 @@ const TYPES = {
     { name: 'verifyingContract', type: 'address' },
   ],
 } as const
-
 let prepared: PreparedMediaCar
-
 beforeAll(async () => {
   const encoded = new TextEncoder().encode('public evidence '.repeat(16))
   const bytes = new Uint8Array(new ArrayBuffer(encoded.byteLength))
@@ -88,7 +84,6 @@ beforeAll(async () => {
   })
   piece = await calculate(prepared.carBytes)
 })
-
 function readyQuote(
   overrides: Partial<FilecoinStorageQuote> = {},
 ): FilecoinStorageQuote {
@@ -121,7 +116,6 @@ function readyQuote(
     ...overrides,
   }
 }
-
 function domain() {
   return {
     chainId: Number(FILECOIN_CALIBRATION_CHAIN_ID),
@@ -130,7 +124,6 @@ function domain() {
     version: '1',
   }
 }
-
 function createAuthorization(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
     domain: domain(),
@@ -147,7 +140,6 @@ function createAuthorization(overrides: Record<string, unknown> = {}) {
     types: TYPES,
   })
 }
-
 function addAuthorization(
   mediaCid: string,
   overrides: Record<string, unknown> = {},
@@ -170,7 +162,6 @@ function addAuthorization(
     types: TYPES,
   })
 }
-
 function providerDetails(overrides: Record<string, unknown> = {}) {
   return {
     ipniIpfs: true,
@@ -180,11 +171,10 @@ function providerDetails(overrides: Record<string, unknown> = {}) {
     paymentTokenAddress: CALIBRATION.contracts.usdfc,
     providerId: PROVIDER_ID,
     serviceProvider: SERVICE_PROVIDER,
-    serviceUrl: 'https://provider.example/pdp/',
+    serviceUrl: 'https://provider.example/pdp',
     ...overrides,
   }
 }
-
 function providerReadResult(overrides: Record<string, unknown> = {}) {
   const provider = providerDetails(overrides)
   return encodeFunctionResult({
@@ -226,7 +216,6 @@ function providerReadResult(overrides: Record<string, unknown> = {}) {
     },
   })
 }
-
 function storageLogs(
   hash: Hash = REPLACEMENT_HASH,
   overrides: {
@@ -306,7 +295,6 @@ function storageLogs(
     },
   ]
 }
-
 function walletProvider({
   account = ACCOUNT,
   approved = true,
@@ -375,14 +363,12 @@ function walletProvider({
     },
   }
 }
-
 function inspection() {
   return vi.fn(async () => ({
     kind: 'ready' as const,
     network: CALIBRATION,
   }))
 }
-
 async function selectProvider(
   input: Pick<Parameters<FilecoinStorageUploadExecutor>[0], 'plan' | 'request'>,
 ) {
@@ -411,7 +397,6 @@ async function selectProvider(
     })
   }
 }
-
 async function stagePiece(
   input: Pick<
     Parameters<FilecoinStorageUploadExecutor>[0],
@@ -428,7 +413,6 @@ async function stagePiece(
     text: piece.toString(),
   })
 }
-
 function requestSignature(
   input: Parameters<FilecoinStorageUploadExecutor>[0],
   data: string,
@@ -438,7 +422,6 @@ function requestSignature(
     params: [input.plan.account, data],
   })
 }
-
 async function signAndAuthorize(
   input: Parameters<FilecoinStorageUploadExecutor>[0],
   createData = createAuthorization(),
@@ -448,7 +431,6 @@ async function signAndAuthorize(
   await requestSignature(input, addData)
   await input.authorizeCommit()
 }
-
 function successfulExecutor({
   confirmedTxHash = REPLACEMENT_HASH,
   createData = createAuthorization(),
@@ -477,7 +459,6 @@ function successfulExecutor({
     }
   }
 }
-
 async function runUpload(
   executeUpload: FilecoinStorageUploadExecutor = successfulExecutor(),
   options: {
@@ -509,7 +490,6 @@ async function runUpload(
     },
   )
 }
-
 function recoveryFailure(cause: RegExp, hash = REPLACEMENT_HASH) {
   return {
     cause: { message: expect.stringMatching(cause) },
@@ -607,7 +587,6 @@ describe('Filecoin storage upload execution', () => {
     ).toHaveLength(2)
     expect(methods).not.toContain('eth_sendTransaction')
   })
-
   it('rejects arbitrary reads, transactions, and excess RPC requests', async () => {
     const forbidden: FilecoinStorageUploadExecutor = async ({ request }) => {
       await request({ method: 'eth_sendTransaction', params: [] })
@@ -649,27 +628,16 @@ describe('Filecoin storage upload execution', () => {
     }
     await expect(runUpload(greedy)).rejects.toThrow(/RPC request budget/i)
   })
-
   it('rejects changed typed-data terms before forwarding them', async () => {
-    const wallet = walletProvider()
-    const request = vi.spyOn(wallet, 'request')
-    await expect(
-      runUpload(
+    const cases: [FilecoinStorageUploadExecutor, RegExp, number][] = [
+      [
         successfulExecutor({
           createData: createAuthorization({ payee: OTHER_ACCOUNT }),
         }),
-        { provider: wallet },
-      ),
-    ).rejects.toThrow(/data-set authorization terms/i)
-    expect(
-      request.mock.calls.filter(([candidate]) => {
-        return candidate.method === 'eth_signTypedData_v4'
-      }),
-    ).toHaveLength(0)
-    const walletForPiece = walletProvider()
-    const pieceRequest = vi.spyOn(walletForPiece, 'request')
-    await expect(
-      runUpload(
+        /data-set authorization terms/i,
+        0,
+      ],
+      [
         successfulExecutor({
           addData: addAuthorization(prepared.mediaCid.text, {
             pieceMetadata: [
@@ -680,16 +648,23 @@ describe('Filecoin storage upload execution', () => {
             ],
           }),
         }),
-        { provider: walletForPiece },
-      ),
-    ).rejects.toThrow(/piece authorization terms/i)
-    expect(
-      pieceRequest.mock.calls.filter(([candidate]) => {
-        return candidate.method === 'eth_signTypedData_v4'
-      }),
-    ).toHaveLength(1)
+        /piece authorization terms/i,
+        1,
+      ],
+    ]
+    for (const [executor, message, signatures] of cases) {
+      const wallet = walletProvider()
+      const request = vi.spyOn(wallet, 'request')
+      await expect(runUpload(executor, { provider: wallet })).rejects.toThrow(
+        message,
+      )
+      expect(
+        request.mock.calls.filter(
+          ([candidate]) => candidate.method === 'eth_signTypedData_v4',
+        ),
+      ).toHaveLength(signatures)
+    }
   })
-
   it('rejects providers that cannot perform the promised IPFS path', async () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ ipniIpfs: false }, /does not advertise IPFS indexing/i],
@@ -707,7 +682,6 @@ describe('Filecoin storage upload execution', () => {
       ).rejects.toThrow(message)
     }
   })
-
   it('requires authenticated registry and approval reads before storage', async () => {
     const skipsReads: FilecoinStorageUploadExecutor = async (input) => {
       input.onStored({
@@ -727,7 +701,6 @@ describe('Filecoin storage upload execution', () => {
       }),
     ).rejects.toThrow(/not approved/i)
   })
-
   it('rejects a provider PieceCID for bytes other than the planned CAR', async () => {
     const wrongPiece = await calculate(
       new Uint8Array(prepared.carBytes.byteLength).fill(7),
@@ -747,7 +720,6 @@ describe('Filecoin storage upload execution', () => {
     }
     await expect(runUpload(dishonest)).rejects.toThrow(/does not match/i)
   })
-
   it('requires a complete upload and exactly two signatures before commit', async () => {
     const incomplete: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input, input.plan.carBytes.byteLength - 1)
@@ -758,25 +730,19 @@ describe('Filecoin storage upload execution', () => {
       /incomplete storage commit/i,
     )
   })
-
   it('serializes wallet prompts and withholds signatures after cancellation', async () => {
     const delayedWallet = () => {
       const prompted = deferred<void>()
       const response = deferred<Hex>()
-      let calls = 0
+      const signatureRequest = vi.fn(() => {
+        prompted.resolve(undefined)
+        return response.promise
+      })
       return {
-        get calls() {
-          return calls
-        },
         prompted,
-        provider: walletProvider({
-          signatureRequest() {
-            calls += 1
-            prompted.resolve(undefined)
-            return response.promise
-          },
-        }),
+        provider: walletProvider({ signatureRequest }),
         response,
+        signatureRequest,
       }
     }
     const concurrentWallet = delayedWallet()
@@ -795,7 +761,7 @@ describe('Filecoin storage upload execution', () => {
     await expect(
       runUpload(concurrent, { provider: concurrentWallet.provider }),
     ).rejects.toThrow(/provider did not complete/i)
-    expect(concurrentWallet.calls).toBe(1)
+    expect(concurrentWallet.signatureRequest).toHaveBeenCalledOnce()
     const cancelledWallet = delayedWallet()
     const controller = new AbortController()
     let signatureReleased = false
@@ -817,7 +783,6 @@ describe('Filecoin storage upload execution', () => {
     ).rejects.toThrow(/cancelled/i)
     expect(signatureReleased).toBe(false)
   })
-
   it('preserves wallet rejection before any provider commit', async () => {
     const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })
     await expect(
@@ -826,7 +791,6 @@ describe('Filecoin storage upload execution', () => {
       }),
     ).rejects.toBe(rejection)
   })
-
   it('returns a recovery checkpoint when provider submission is uncertain', async () => {
     const checkpoints: FilecoinStorageUploadCheckpoint[] = []
     const uncertain: FilecoinStorageUploadExecutor = async (input) => {
@@ -870,34 +834,27 @@ describe('Filecoin storage upload execution', () => {
       recoveryFailure(/invalid commit result/i, TX_HASH),
     )
   })
-
   it('releases both wallet listener layers when registration fails', async () => {
     const registrationFailure = new Error('listener registration failed')
     const base = walletProvider()
-    const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+    const listeners = new Set<(...args: unknown[]) => void>()
     let registrations = 0
     const provider: Eip1193Provider = {
       request: base.request,
-      on(event, listener) {
-        registrations += 1
-        if (registrations === 4) throw registrationFailure
-        const entries = listeners.get(event) ?? new Set()
-        entries.add(listener)
-        listeners.set(event, entries)
+      on(_event, listener) {
+        if (++registrations === 4) throw registrationFailure
+        listeners.add(listener)
       },
-      removeListener(event, listener) {
-        listeners.get(event)?.delete(listener)
+      removeListener(_event, listener) {
+        listeners.delete(listener)
       },
     }
     await expect(runUpload(successfulExecutor(), { provider })).rejects.toBe(
       registrationFailure,
     )
-    expect([...listeners.values()].every((entries) => entries.size === 0)).toBe(
-      true,
-    )
+    expect(listeners.size).toBe(0)
   })
 })
-
 describe('Filecoin storage receipt authentication', () => {
   async function checkpoint() {
     let captured: FilecoinStorageUploadCheckpoint | undefined
@@ -909,7 +866,6 @@ describe('Filecoin storage receipt authentication', () => {
     if (!captured) throw new Error('Checkpoint was not captured.')
     return captured
   }
-
   it('derives IDs from exact canonical events for later recovery', async () => {
     const saved = await checkpoint()
     await expect(
@@ -930,34 +886,20 @@ describe('Filecoin storage receipt authentication', () => {
       receipt: { hash: REPLACEMENT_HASH },
     })
   })
-
   it('rejects changed metadata, identities, duplicates, and provider result IDs', async () => {
-    await expect(
-      runUpload(successfulExecutor(), {
-        logs: storageLogs(REPLACEMENT_HASH, {
-          dataSetMetadataValues: ['another-app', ''],
+    const changed: [Parameters<typeof storageLogs>[1], RegExp][] = [
+      [{ dataSetMetadataValues: ['another-app', ''] }, /data-set event/i],
+      [{ cdnRailId: 1n }, /data-set event/i],
+      [{ mediaCid: 'bafkqaaa' }, /piece event/i],
+      [{ serviceProvider: OTHER_ACCOUNT }, /data-set event/i],
+    ]
+    for (const [overrides, message] of changed) {
+      await expect(
+        runUpload(successfulExecutor(), {
+          logs: storageLogs(REPLACEMENT_HASH, overrides),
         }),
-      }),
-    ).rejects.toMatchObject(recoveryFailure(/data-set event changed/i))
-    await expect(
-      runUpload(successfulExecutor(), {
-        logs: storageLogs(REPLACEMENT_HASH, { cdnRailId: 1n }),
-      }),
-    ).rejects.toMatchObject(recoveryFailure(/data-set event changed/i))
-    await expect(
-      runUpload(successfulExecutor(), {
-        logs: storageLogs(REPLACEMENT_HASH, {
-          mediaCid: 'bafkqaaa',
-        }),
-      }),
-    ).rejects.toMatchObject(recoveryFailure(/piece event changed/i))
-    await expect(
-      runUpload(successfulExecutor(), {
-        logs: storageLogs(REPLACEMENT_HASH, {
-          serviceProvider: OTHER_ACCOUNT,
-        }),
-      }),
-    ).rejects.toMatchObject(recoveryFailure(/data-set event changed/i))
+      ).rejects.toMatchObject(recoveryFailure(message))
+    }
     const duplicated = storageLogs()
     duplicated.push(duplicated[1] as (typeof duplicated)[number])
     await expect(
@@ -969,7 +911,6 @@ describe('Filecoin storage receipt authentication', () => {
       runUpload(successfulExecutor({ pieceId: PIECE_ID + 1n })),
     ).rejects.toMatchObject(recoveryFailure(/provider result disagrees/i))
   })
-
   it('rejects noncanonical receipt fields and wrong recovery context', async () => {
     const saved = await checkpoint()
     const receipt = {
@@ -996,7 +937,6 @@ describe('Filecoin storage receipt authentication', () => {
       ),
     ).rejects.toThrow(/different upload context/i)
   })
-
   it('does not mistake an indexing request for completed indexing', async () => {
     expect(FILECOIN_STORAGE_DATA_SET_METADATA).toEqual({
       source: 'lifeinvader',

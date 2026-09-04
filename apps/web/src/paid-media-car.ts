@@ -322,7 +322,6 @@ export async function validatePreparedMediaCar(
     )
   }
 
-  let hasRoot = false
   const seen = new Set<string>()
   const blocksByCid = new Map<string, (typeof blocks)[number]>()
   for (const block of blocks) {
@@ -340,49 +339,78 @@ export async function validatePreparedMediaCar(
     }
     seen.add(text)
     blocksByCid.set(text, block)
-    hasRoot ||= block.cid.equals(rootCid)
     const digest = await sha256.digest(block.bytes)
     if (!equalBytes(block.cid.multihash.bytes, digest.bytes)) {
       throw invalidPreparedCar('an archive block failed CID verification.')
     }
   }
-  if (!hasRoot) {
+  const rootBlock = blocksByCid.get(rootCid.toString())
+  if (!rootBlock) {
     throw invalidPreparedCar('the declared root block is missing.')
   }
 
-  const reachable = new Set<string>()
-  const pending = [rootCid]
-  while (pending.length > 0) {
-    const cid = pending.pop()
-    if (!cid || reachable.has(cid.toString())) continue
-    const block = blocksByCid.get(cid.toString())
-    if (!block) {
-      throw invalidPreparedCar('the archive DAG references a missing block.')
+  let fileBlocks = [rootBlock]
+  if (rootCid.code === 0x70) {
+    let node: ReturnType<typeof dagPb.decode>
+    try {
+      node = dagPb.decode(rootBlock.bytes)
+    } catch (cause) {
+      throw invalidPreparedCar('the archive contains invalid dag-pb data.', {
+        cause,
+      })
     }
-    reachable.add(cid.toString())
-    if (block.cid.code === 0x70) {
-      let node: ReturnType<typeof dagPb.decode>
-      try {
-        node = dagPb.decode(block.bytes)
-      } catch (cause) {
-        throw invalidPreparedCar('the archive contains invalid dag-pb data.', {
-          cause,
-        })
+    fileBlocks = node.Links.map((link) => {
+      if (
+        link.Hash.version !== 1 ||
+        link.Hash.code !== 0x55 ||
+        link.Hash.multihash.code !== 0x12
+      ) {
+        throw invalidPreparedCar(
+          'the archive does not match the deterministic UnixFS profile.',
+        )
       }
-      for (const link of node.Links) {
-        if (
-          link.Hash.version !== 1 ||
-          (link.Hash.code !== 0x55 && link.Hash.code !== 0x70) ||
-          link.Hash.multihash.code !== 0x12
-        ) {
-          throw invalidPreparedCar('the archive DAG has an unsupported link.')
-        }
-        pending.push(link.Hash)
+      const block = blocksByCid.get(link.Hash.toString())
+      if (!block) {
+        throw invalidPreparedCar('the archive DAG references a missing block.')
       }
-    }
+      return block
+    })
   }
+  const reachable = new Set([
+    rootCid.toString(),
+    ...fileBlocks.map(({ cid }) => cid.toString()),
+  ])
   if (reachable.size !== blocks.length) {
     throw invalidPreparedCar('the archive contains an unreachable block.')
+  }
+  const fileSize = fileBlocks.reduce(
+    (total, { bytes }) => total + bytes.byteLength,
+    0,
+  )
+  if (fileSize !== value.file.size) {
+    throw invalidPreparedCar('the archive file size is inconsistent.')
+  }
+  let imported: Awaited<ReturnType<typeof importByteStream>>
+  try {
+    imported = await importByteStream(
+      fileBlocks.map(({ bytes }) => bytes),
+      {
+        async put(cid) {
+          return cid
+        },
+      },
+      { profile: LIFEINVADER_UNIXFS_PROFILE },
+    )
+  } catch (cause) {
+    throw invalidPreparedCar(
+      'the archive could not be verified with the deterministic UnixFS profile.',
+      { cause },
+    )
+  }
+  if (!CID.decode(imported.cid.bytes).equals(rootCid)) {
+    throw invalidPreparedCar(
+      'the archive does not match the deterministic UnixFS profile.',
+    )
   }
 
   return Object.freeze({

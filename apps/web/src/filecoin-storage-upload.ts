@@ -386,6 +386,7 @@ function normalizeServiceUrl(value: unknown) {
       'the provider service URL must be credential-free HTTPS without a query or fragment.',
     )
   }
+  if (!url.pathname.endsWith('/')) url.pathname += '/'
   return url.toString()
 }
 

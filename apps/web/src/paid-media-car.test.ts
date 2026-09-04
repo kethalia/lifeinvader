@@ -1,4 +1,5 @@
 import { CarBufferReader, CarBufferWriter } from '@ipld/car'
+import * as dagPb from '@ipld/dag-pb'
 import { CID } from 'multiformats/cid'
 import { sha256 } from 'multiformats/hashes/sha2'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,6 +10,7 @@ import {
   preparePaidMediaCar,
   validatePreparedMediaCar,
 } from './paid-media-car'
+import { parseMediaCid } from './media-cid'
 
 const CONTENT = new TextEncoder().encode('hello world'.repeat(16))
 const RAW_REPEATED_HELLO_WORLD_CID =
@@ -175,6 +177,30 @@ describe('paid media CAR preparation', () => {
         ]),
       }),
     ).rejects.toThrow(/unreachable block/i)
+
+    const root = blocks.find(({ cid }) => cid.equals(prepared.rootCid))
+    if (!root) throw new Error('Expected a dag-pb root fixture.')
+    const invalidRootBytes = dagPb.encode({
+      ...dagPb.decode(root.bytes),
+      Data: undefined,
+    })
+    const invalidRoot = CID.createV1(
+      dagPb.code,
+      await sha256.digest(invalidRootBytes),
+    )
+    const invalidMediaCid = parseMediaCid(invalidRoot.toString())
+    if (!invalidMediaCid) throw new Error('Expected a valid media CID fixture.')
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: encodeCar(invalidRoot, [
+          { bytes: invalidRootBytes, cid: invalidRoot },
+          ...blocks.filter(({ cid }) => !cid.equals(prepared.rootCid)),
+        ]),
+        mediaCid: invalidMediaCid,
+        rootCid: invalidRoot,
+      }),
+    ).rejects.toThrow(/deterministic UnixFS profile/i)
   })
 
   it('rejects inconsistent roots and malformed or unbounded archives', async () => {
