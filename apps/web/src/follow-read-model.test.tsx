@@ -76,6 +76,7 @@ function stream(
     recentSignals: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -96,6 +97,7 @@ function projection(
     pagesScanned: 1n,
     phase,
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 
@@ -111,6 +113,7 @@ function reader(
     hasRelationship: vi.fn().mockReturnValue(true),
     readRelationships: vi.fn().mockReturnValue(RELATIONSHIP_PAGE),
     snapshot: projection('follows'),
+    startBlock: 0n,
     ...overrides,
   }
 }
@@ -292,6 +295,7 @@ describe('useFollowReadModel', () => {
       advance: vi
         .fn()
         .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+      startBlock: 3_456n,
     })
     const { result } = renderHook(() =>
       useFollowReadModel(connectedSession(provider), SELECTED_A, 'following', {
@@ -306,7 +310,7 @@ describe('useFollowReadModel', () => {
     act(() => result.current.advanceProjection())
     await waitFor(() => expect(result.current.state.phase).toBe('failed'))
 
-    expect(resetCache).toHaveBeenCalledWith(1n, SELECTED_A, 'following')
+    expect(resetCache).toHaveBeenCalledWith(1n, SELECTED_A, 'following', 3_456n)
     expect(result.current.state).toMatchObject({
       message: expect.stringMatching(/cache was reset.*retry/i),
       phase: 'failed',

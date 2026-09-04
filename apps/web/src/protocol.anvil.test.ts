@@ -21,6 +21,7 @@ import { synchronizePostCommentStream } from './post-comment-stream'
 import { PostReactionProjection } from './post-reaction-projection'
 import { openPostReactionProjectionRun } from './post-reaction-projection-run'
 import { synchronizePostReactionStream } from './post-reaction-stream'
+import { resolveProtocolHistoryBoundary } from './protocol-history'
 import { parseMediaCid } from './media-cid'
 import {
   createGroup,
@@ -321,6 +322,13 @@ describe('wallet transaction helpers on Anvil', () => {
     )
     await provider.request({ method: 'anvil_mine', params: ['0xc'] })
     await confirmation
+    await expect(
+      resolveProtocolHistoryBoundary(provider, LOCAL_CHAIN_ID),
+    ).resolves.toMatchObject({
+      deployment: { blockNumber: 1n },
+      kind: 'confirmed',
+      startBlock: 1n,
+    })
     const publicConversation = await synchronizeDirectMessageStream(
       provider,
       LOCAL_CHAIN_ID,

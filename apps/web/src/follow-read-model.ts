@@ -34,6 +34,7 @@ export type FollowProjectionReader = Pick<
   | 'hasRelationship'
   | 'readRelationships'
   | 'snapshot'
+  | 'startBlock'
 >
 
 export type FollowProjectionOpener = (
@@ -44,6 +45,7 @@ export type FollowCacheResetter = (
   chainId: bigint,
   account: Address,
   direction: FollowDirection,
+  startBlock: bigint,
 ) => Promise<void>
 
 export type FollowReadModelState =
@@ -155,7 +157,8 @@ const defaultCacheResetter: FollowCacheResetter = (
   chainId,
   account,
   direction,
-) => resetFollowStreamCache(chainId, account, direction)
+  startBlock,
+) => resetFollowStreamCache(chainId, account, direction, {}, startBlock)
 
 export function useFollowReadModel(
   session: WalletSession,
@@ -361,6 +364,7 @@ export function useFollowReadModel(
       })
       .catch(async (error: unknown) => {
         if (requestSequence.current !== requestId) return
+        const startBlock = run.startBlock
         run.close()
         activeRun.current = undefined
         let message = describeRpcError(
@@ -370,7 +374,7 @@ export function useFollowReadModel(
         let retryable = true
         if (isDeferredEventCacheCorruptionError(error)) {
           try {
-            await resetCache(chainId, account, direction)
+            await resetCache(chainId, account, direction, startBlock)
             if (requestSequence.current !== requestId) return
             message =
               'The corrupt local follow relationship cache was reset. Retry to rebuild it from confirmed chain events.'
