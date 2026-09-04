@@ -247,6 +247,7 @@ describe('profile projection run', () => {
       pagesScanned: 0n,
       phase: 'profiles',
       safeHead: SAFE_HEAD,
+      startBlock: PROFILE_EVENT_START_BLOCK,
     })
     expect(run.trackedAccounts).toEqual([
       getAddress(ACCOUNT_A),

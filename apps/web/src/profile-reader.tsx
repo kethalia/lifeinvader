@@ -19,6 +19,12 @@ function profileStatus(state: ProfileReadModelState) {
     return 'Reading one bounded range of confirmed public profile events…'
   }
   if (state.phase === 'catchup') {
+    if (
+      state.stream.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.safeHead
+    ) {
+      return `Lifeinvader history can begin at block ${state.stream.startBlock.toString()}, but the confirmed head is still ${state.stream.safeHead.toString()}. Wait for deployment confirmations, then check again.`
+    }
     const indexedThrough = state.stream.indexedThrough?.toString() ?? 'none'
     const reset = state.stream.cacheReset
       ? 'The disposable event cache was reset. '
@@ -27,14 +33,14 @@ function profileStatus(state: ProfileReadModelState) {
   }
   if (state.phase === 'projecting') {
     const resumed = state.resumed ? 'Authenticated saved progress; ' : ''
-    return `${resumed}local ${state.projection.phase} projection processed ${state.projection.logsProcessed.toString()} events across ${state.projection.pagesScanned.toString()} bounded pages.`
+    return `${resumed}local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()} and processed ${state.projection.logsProcessed.toString()} events across ${state.projection.pagesScanned.toString()} bounded pages.`
   }
   if (state.phase === 'complete') {
     const boundary =
       state.projection.safeHead === undefined
         ? 'the currently confirmed empty range'
         : `confirmed block ${state.projection.safeHead.toString()}`
-    return `This profile is exact through ${boundary}. ${
+    return `This profile is exact from block ${state.projection.startBlock.toString()} through ${boundary}. ${
       state.resumeSaved
         ? 'Authenticated progress is saved locally for the next delta.'
         : 'The next check may need to rebuild local projection work.'
@@ -45,7 +51,12 @@ function profileStatus(state: ProfileReadModelState) {
 
 function profileButtonLabel(state: ProfileReadModelState) {
   if (state.phase === 'synchronizing') return 'Reading profile events…'
-  if (state.phase === 'catchup') return 'Load next profile range'
+  if (state.phase === 'catchup') {
+    return state.stream.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.safeHead
+      ? 'Check profile confirmations'
+      : 'Load next profile range'
+  }
   if (state.phase === 'projecting') {
     if (state.busy) return 'Processing profile page…'
     return state.projection.phase === 'authenticate'

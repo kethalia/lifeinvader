@@ -22,7 +22,6 @@ import {
 } from './profile-projection'
 import {
   PROFILE_EVENT_PAGE_SIZE,
-  PROFILE_EVENT_START_BLOCK,
   assertIssuedProfileProjectionAnchor,
   authenticateIssuedProfileProjectionAnchor,
   type ProfileProjectionAnchor,
@@ -44,6 +43,7 @@ export type ProfileProjectionRunSnapshot = {
   pagesScanned: bigint
   phase: ProfileProjectionRunPhase
   safeHead?: bigint
+  startBlock: bigint
 }
 
 export type OpenProfileProjectionRunOptions = ProfileStreamStorageOptions & {
@@ -175,8 +175,8 @@ function sameCheckpoint(
 
 function normalizeCachePosition(
   value: unknown,
-  seed: EventCursor,
-  expectedNextBlock: bigint,
+  chainId: bigint,
+  safeHead: bigint | undefined,
 ) {
   if (!isRecord(value)) throw projectionRunError('anchor position')
   let cursor: EventCursor
@@ -185,6 +185,14 @@ function normalizeCachePosition(
   } catch {
     throw projectionRunError('anchor cursor')
   }
+  const seed = createEventCursor({
+    chainId,
+    filter: PROFILE_SET_FILTER,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock: cursor.startBlock,
+  })
+  const expectedNextBlock =
+    safeHead === undefined ? cursor.startBlock : safeHead + 1n
   if (
     !sameCursorScope(cursor, seed) ||
     cursor.nextBlock !== expectedNextBlock
@@ -218,18 +226,10 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
   if (value.safeHead !== safeHead) {
     throw projectionRunError('anchor safe head')
   }
-  const expectedNextBlock =
-    safeHead === undefined ? PROFILE_EVENT_START_BLOCK : safeHead + 1n
-  const seed = createEventCursor({
-    chainId: value.chainId,
-    filter: PROFILE_SET_FILTER,
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: PROFILE_EVENT_START_BLOCK,
-  })
   const profiles = normalizeCachePosition(
     value.profiles,
-    seed,
-    expectedNextBlock,
+    value.chainId,
+    safeHead,
   )
   if (safeHead !== undefined) {
     const checkpoint = profiles.cursor.checkpoints.at(-1)
@@ -422,7 +422,12 @@ export class ProfileProjectionRun {
       pagesScanned: this.#pagesScanned,
       phase: this.#phase,
       safeHead: this.#anchor.safeHead,
+      startBlock: this.#anchor.profiles.cursor.startBlock,
     }
+  }
+
+  get startBlock() {
+    return this.#anchor.profiles.cursor.startBlock
   }
 
   get baseline() {

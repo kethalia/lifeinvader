@@ -65,6 +65,7 @@ function stream(
     recentProfiles: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -79,6 +80,7 @@ function projection(
     phase,
     profilesRetained: phase === 'profiles' ? 0n : 1n,
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 
@@ -103,6 +105,7 @@ function run(
     getProfile: vi.fn().mockReturnValue(profile),
     resumeState: RESUME,
     snapshot,
+    startBlock: 0n,
   }
 }
 
@@ -152,6 +155,33 @@ describe('ProfileReader', () => {
     expect(synchronize).toHaveBeenCalledTimes(1)
   })
 
+  it('explains when the protocol deployment is not confirmed yet', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi.fn().mockResolvedValue({
+      ...stream(),
+      safeHead: 8n,
+      startBlock: 9n,
+    })
+    render(
+      <ProfileReader
+        resumeStore={store()}
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed profile/i }),
+    )
+
+    expect(
+      await screen.findByText(/wait for deployment confirmations/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: /check profile confirmations/i }),
+    ).toBeTruthy()
+  })
+
   it('withholds a profile until local pages and the confirmed anchor are authenticated', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const resumeStore = store()
@@ -183,7 +213,9 @@ describe('ProfileReader', () => {
     expect(await screen.findByText('Tracey')).toBeTruthy()
     expect(screen.getByText('Nothing here is private.')).toBeTruthy()
     expect(screen.getByText(CID.text)).toBeTruthy()
-    expect(screen.getByText(/exact through confirmed block 8/i)).toBeTruthy()
+    expect(
+      screen.getByText(/exact from block 0 through confirmed block 8/i),
+    ).toBeTruthy()
     expect(
       screen.getByRole('button', { name: /check for newer profile/i }),
     ).toBeTruthy()
