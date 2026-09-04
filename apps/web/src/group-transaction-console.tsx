@@ -16,6 +16,7 @@ import {
   type TransactionSubmitted,
 } from './protocol'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const FAILED_ATTEMPT_HISTORY_LIMIT = 8
 
@@ -246,9 +247,14 @@ export function GroupTransactionConsole({
   const currentAttempts = attempts.filter((attempt) =>
     contextMatchesSession(attempt, session),
   )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = currentAttempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'group-actions',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeAttempt = currentAttempts.findLast(
     (attempt) => attempt.status === 'opening' || attempt.status === 'pending',
   )

@@ -29,6 +29,7 @@ import {
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
 import type { WalletSession, WalletSessionController } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 import { PaidMediaPicker, type PaidMediaPreparer } from './paid-media-picker'
@@ -708,11 +709,17 @@ export function WalletPanel({
   const busyAction = busyOperations.findLast((operation) =>
     busyOperationMatchesSession(operation, session),
   )?.action
-  const protocolTransactionWriteLocked = activeSubmittedTransactions.some(
-    (transaction) => transaction.status !== 'failed',
+  const protocolTransactionWriteLocked =
+    (busyAction !== undefined && busyAction !== 'chain') ||
+    activeSubmittedTransactions.some(
+      (transaction) => transaction.status !== 'failed',
+    )
+  const walletWriteLocked = protocolTransactionWriteLocked || storageWriteLocked
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'wallet',
+    walletWriteLocked,
   )
-  const transactionWriteLocked =
-    protocolTransactionWriteLocked || storageWriteLocked
+  const transactionWriteLocked = walletWriteLocked || lockedByAnotherConsole
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
       <div className="wallet-panel-heading">
@@ -741,9 +748,7 @@ export function WalletPanel({
                   type="button"
                   key={wallet.id}
                   disabled={
-                    session.status === 'connecting' ||
-                    busyAction !== undefined ||
-                    transactionWriteLocked
+                    session.status === 'connecting' || busyAction !== undefined
                   }
                   onClick={() => void connect(wallet)}
                 >
@@ -934,7 +939,9 @@ export function WalletPanel({
           )}
           <FilecoinStoragePanel
             disabled={
-              busyAction !== undefined || protocolTransactionWriteLocked
+              busyAction !== undefined ||
+              protocolTransactionWriteLocked ||
+              lockedByAnotherConsole
             }
             onWriteLockChange={setStorageWriteLocked}
             prepared={preparedMedia}

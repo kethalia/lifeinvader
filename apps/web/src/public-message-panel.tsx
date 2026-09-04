@@ -24,6 +24,7 @@ import {
 } from './protocol'
 import type { PublishedDirectMessage } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const FAILED_ATTEMPT_HISTORY_LIMIT = 8
@@ -335,9 +336,14 @@ export function PublicMessagePanel({
   const currentAttempts = attempts.filter((attempt) =>
     accountChainMatchesSession(attempt, session),
   )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = currentAttempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'messages',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeProblem = problems.findLast((problem) =>
     contextMatchesSession(problem, session),
   )
@@ -785,9 +791,11 @@ export function PublicMessagePanel({
               }
               type="submit"
             >
-              {writeLocked
+              {localWriteLocked
                 ? 'Public message action pending…'
-                : 'Send public message on-chain'}
+                : lockedByAnotherConsole
+                  ? 'Another wallet action is pending…'
+                  : 'Send public message on-chain'}
             </button>
           </form>
 

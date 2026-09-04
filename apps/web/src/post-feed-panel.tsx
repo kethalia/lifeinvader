@@ -56,6 +56,7 @@ import {
 import type { PostReactionStreamSynchronizer } from './post-reaction-stream'
 import type { PublishedPost } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const COMMENT_RENDER_PAGE_SIZE = 10
 
@@ -549,9 +550,15 @@ export function PostFeedPanel({
   const activePostActionAttempts = postActionAttempts.filter((attempt) =>
     actionContextMatchesSession(attempt, session),
   )
+  const localWriteLocked = activePostActionAttempts.some(
+    (attempt) => attempt.status !== 'failed',
+  )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'feed',
+    localWriteLocked,
+  )
   const postActionsLocked =
-    session.account === undefined ||
-    activePostActionAttempts.some((attempt) => attempt.status !== 'failed')
+    session.account === undefined || localWriteLocked || lockedByAnotherConsole
 
   const runCommentReadModelStep = () => {
     if (commentModel.state.phase === 'projecting') {

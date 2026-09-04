@@ -30,6 +30,10 @@ import {
 import { WalletPanel } from './wallet-panel'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
 import type { WalletSessionController } from './wallet-session'
+import {
+  WalletWriteBoundary,
+  useWalletWriteBoundary,
+} from './wallet-write-boundary'
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
@@ -136,6 +140,10 @@ function deferred<T>() {
   })
   return { promise, reject, resolve }
 }
+function ActiveWalletWrite() {
+  useWalletWriteBoundary('feed', true)
+  return null
+}
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
@@ -179,6 +187,49 @@ describe('App', () => {
     ).toBeTruthy()
     expect(screen.getByText(/no injected wallet found/i)).toBeTruthy()
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
+  })
+  it('keeps wallet reconnection available while another write is unresolved', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const connect = vi.fn(async () => undefined)
+    const stop = announceWallet('Recovery Wallet', 'recovery-wallet', provider)
+
+    render(
+      <WalletWriteBoundary>
+        <ActiveWalletWrite />
+        <WalletPanel
+          onPostConfirmed={vi.fn()}
+          walletSession={{
+            connect,
+            refresh: vi.fn(async () => undefined),
+            session: {
+              account: ACCOUNT,
+              chainId: 1n,
+              name: 'Recovery Wallet',
+              provider,
+              status: 'connected',
+            },
+          }}
+        />
+      </WalletWriteBoundary>,
+    )
+
+    const reconnect = await screen.findByRole('button', {
+      name: /connect recovery wallet/i,
+    })
+    const body = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(body, { target: { value: 'Wait for the other receipt.' } })
+
+    expect(reconnect.hasAttribute('disabled')).toBe(false)
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    fireEvent.click(reconnect)
+    expect(connect).toHaveBeenCalledTimes(1)
+    stop()
   })
   it('routes public history through an in-memory endpoint with wallet fallback', async () => {
     const commonBlockHash = `0x${'ef'.repeat(32)}`
@@ -993,7 +1044,7 @@ describe('App', () => {
     expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
     expect(buttonDisabled(/publish on-chain/i)).toBe(true)
-    expect(buttonDisabled(/connect pending wallet/i)).toBe(true)
+    expect(buttonDisabled(/connect pending wallet/i)).toBe(false)
     fireEvent.click(
       screen.getByRole('button', { name: /check receipt again/i }),
     )

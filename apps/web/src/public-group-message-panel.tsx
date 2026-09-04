@@ -23,6 +23,7 @@ import {
 } from './protocol'
 import type { PublishedGroupMessage } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const FAILED_ATTEMPT_HISTORY_LIMIT = 8
 const MAX_UINT256 = (1n << 256n) - 1n
@@ -342,9 +343,14 @@ export function PublicGroupMessagePanel({
   const currentAttempts = attempts.filter((attempt) =>
     accountChainMatchesSession(attempt, session),
   )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = currentAttempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'group-messages',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeProblem = problems.findLast((problem) =>
     contextMatchesSelection(problem, session, selectedGroupId),
   )
@@ -759,9 +765,11 @@ export function PublicGroupMessagePanel({
               }
               type="submit"
             >
-              {writeLocked
+              {localWriteLocked
                 ? 'Group message action pending…'
-                : 'Send group message on-chain'}
+                : lockedByAnotherConsole
+                  ? 'Another wallet action is pending…'
+                  : 'Send group message on-chain'}
             </button>
           </form>
 

@@ -25,6 +25,11 @@ import {
 import type { PublishedDirectMessage } from './protocol-events'
 import { PublicMessagePanel } from './public-message-panel'
 import type { WalletSession } from './wallet-session'
+import {
+  WalletWriteBoundary,
+  useWalletWriteBoundary,
+  type WalletWriteScope,
+} from './wallet-write-boundary'
 
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const RECIPIENT = '0x0000000000000000000000000000000000000b0b'
@@ -105,6 +110,21 @@ function deferred<T>() {
     resolve = next
   })
   return { promise, resolve }
+}
+
+function WriteBoundaryProbe({
+  local = false,
+  scope,
+}: {
+  local?: boolean
+  scope: WalletWriteScope
+}) {
+  const lockedByAnother = useWalletWriteBoundary(scope, local)
+  return (
+    <output data-testid={`write-lock-${scope}`}>
+      {String(lockedByAnother)}
+    </output>
+  )
 }
 
 function fillDraft({
@@ -204,6 +224,53 @@ describe('PublicMessagePanel', () => {
     })
     expect(sendButton.hasAttribute('disabled')).toBe(false)
     expect(sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('participates in the shared unresolved wallet-write boundary', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const pending = deferred<TransactionReceipt>()
+    const sendMessage = vi.fn<typeof sendDirectMessage>(
+      async () => pending.promise,
+    )
+    const view = (walletLocked: boolean) => (
+      <WalletWriteBoundary>
+        <WriteBoundaryProbe local={walletLocked} scope="wallet" />
+        <PublicMessagePanel
+          sendMessage={sendMessage}
+          session={connectedSession(provider)}
+        />
+      </WalletWriteBoundary>
+    )
+    const { rerender } = render(view(false))
+
+    fillDraft()
+    const send = screen.getByRole('button', {
+      name: /send public message on-chain/i,
+    })
+    expect(send.hasAttribute('disabled')).toBe(false)
+
+    rerender(view(true))
+    expect(
+      screen
+        .getByRole('button', { name: /another wallet action is pending/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
+    fireEvent.click(
+      screen.getByRole('button', { name: /another wallet action is pending/i }),
+    )
+    expect(sendMessage).not.toHaveBeenCalled()
+
+    rerender(view(false))
+    fireEvent.click(
+      screen.getByRole('button', { name: /send public message on-chain/i }),
+    )
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('write-lock-wallet').textContent).toBe('true')
+
+    await act(async () => pending.resolve(RECEIPT))
+    await waitFor(() =>
+      expect(screen.getByTestId('write-lock-wallet').textContent).toBe('false'),
+    )
   })
 
   it('submits a normalized public event, preserves its hash, and clears only the confirmed draft', async () => {

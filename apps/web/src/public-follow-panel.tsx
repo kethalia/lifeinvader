@@ -21,6 +21,7 @@ import {
 } from './protocol'
 import type { FollowSet } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const RELATIONSHIP_PAGE_SIZE = 25
@@ -338,9 +339,14 @@ export function PublicFollowPanel({
   const currentAttempts = attempts.filter((attempt) =>
     contextMatchesSession(attempt, session),
   )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = currentAttempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'follows',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeAttempt = currentAttempts.findLast(
     (attempt) => attempt.status === 'opening' || attempt.status === 'pending',
   )
