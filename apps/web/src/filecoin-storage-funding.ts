@@ -572,6 +572,11 @@ function validateReadCall(
     permitDeadline,
     permitSignature,
   )
+  if (simulatedData && call.from === undefined) {
+    throw fundingError(
+      'the wallet adapter omitted the funding simulation sender.',
+    )
+  }
   const snapshot: Record<string, unknown> = { data, to }
   if (call.from !== undefined) snapshot.from = plan.account
   if (call.value !== undefined) snapshot.value = '0x0'
@@ -961,7 +966,15 @@ export async function fundFilecoinStorage(
   let submittedHash: Hash | undefined
   let sendAttempted = false
   let rejected: unknown
-  const request = async (request: ProviderRequest) => {
+  let transportClosed = false
+  const pendingRequests = new Set<Promise<unknown>>()
+  const assertTransportOpen = () => {
+    if (transportClosed) {
+      throw fundingError('the wallet adapter used a closed funding transport.')
+    }
+  }
+  const requestThroughTransport = async (request: ProviderRequest) => {
+    assertTransportOpen()
     const method = (request as { method?: unknown } | null)?.method
     if (typeof method !== 'string') {
       throw fundingError('the wallet adapter requested an invalid RPC method.')
@@ -1004,7 +1017,13 @@ export async function fundFilecoinStorage(
         options.signal,
         () => fundingError('the funding request was cancelled.'),
       )
+      assertTransportOpen()
       if (validatedSimulationData) {
+        if (result !== '0x') {
+          throw fundingError(
+            'the wallet returned an invalid funding simulation result.',
+          )
+        }
         simulatedData = validatedSimulationData
       }
       if (method === 'eth_chainId' && parseChainId(result) !== plan.chainId) {
@@ -1031,8 +1050,10 @@ export async function fundFilecoinStorage(
       permitDeadline = validatedPermit.deadline
       signatureCount += 1
       await guard.assertSubmission()
+      assertTransportOpen()
       const signature = await provider.request(validatedPermit.request)
       guard.assertUnchanged()
+      assertTransportOpen()
       permitSignature = parseHex(signature, 'permit signature', 65)
       if (permitSignature.length !== 132) {
         throw fundingError('the wallet returned an invalid permit signature.')
@@ -1073,6 +1094,7 @@ export async function fundFilecoinStorage(
       }
       transactionCount += 1
       await guard.assertSubmission()
+      assertTransportOpen()
       sendAttempted = true
       let hashValue: unknown
       try {
@@ -1088,6 +1110,7 @@ export async function fundFilecoinStorage(
       }
       options.onSubmitted?.(submittedHash)
       await guard.assertSubmission()
+      assertTransportOpen()
       return submittedHash
     }
 
@@ -1095,16 +1118,48 @@ export async function fundFilecoinStorage(
       `the wallet adapter requested forbidden RPC method ${method.slice(0, 80)}.`,
     )
   }
+  const request = (candidate: ProviderRequest) => {
+    if (transportClosed) {
+      const denied = Promise.reject(
+        fundingError('the wallet adapter used a closed funding transport.'),
+      )
+      void denied.catch(() => undefined)
+      return denied
+    }
+    const pending = requestThroughTransport(candidate)
+    pendingRequests.add(pending)
+    void pending.then(
+      () => pendingRequests.delete(pending),
+      () => pendingRequests.delete(pending),
+    )
+    return pending
+  }
+  const closeTransport = async () => {
+    transportClosed = true
+    await Promise.allSettled([...pendingRequests])
+  }
 
   try {
     let returnedHash: Hash
+    let executionResult: unknown
+    let executionError: unknown
+    let executionFailed = false
     try {
-      returnedHash = parseTransactionHash(
-        await (options.executeFunding ?? executeSynapseFunding)({
+      try {
+        executionResult = await (
+          options.executeFunding ?? executeSynapseFunding
+        )({
           plan,
           request,
-        }),
-      )
+        })
+      } catch (error) {
+        executionFailed = true
+        executionError = error
+      } finally {
+        await closeTransport()
+      }
+      if (executionFailed) throw executionError
+      returnedHash = parseTransactionHash(executionResult)
     } catch (error) {
       if (rejected) throw rejected
       if (sendAttempted && !submittedHash) {
@@ -1126,6 +1181,7 @@ export async function fundFilecoinStorage(
       receiptTimeoutMs,
     })
   } finally {
+    transportClosed = true
     guard.release()
   }
 }

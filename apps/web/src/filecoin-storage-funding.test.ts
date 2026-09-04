@@ -291,9 +291,11 @@ function fundingLogs(plan: FilecoinStorageFundingPlan) {
 }
 
 function walletProvider({
+  callResult = '0x',
   logs,
   sendError,
 }: {
+  callResult?: unknown
   logs: readonly unknown[]
   sendError?: Error
 }) {
@@ -304,7 +306,7 @@ function walletProvider({
       requests.push(request)
       if (request.method === 'eth_chainId') return '0x4cb2f'
       if (request.method === 'eth_accounts') return [ACCOUNT]
-      if (request.method === 'eth_call') return '0x'
+      if (request.method === 'eth_call') return callResult
       if (request.method === 'eth_signTypedData_v4') {
         return PERMIT_SIGNATURE
       }
@@ -674,6 +676,151 @@ describe('Filecoin storage funding transport', () => {
         }),
       }),
     ).rejects.toThrow(/did not simulate/i)
+    expect(
+      wallet.requests.filter(({ method }) => method === 'eth_sendTransaction'),
+    ).toHaveLength(0)
+  })
+
+  it('requires an empty successful result from the funding simulation', async () => {
+    const quote = storageQuote({ depositAmount: 0n, needsApproval: true })
+    const plan = planFilecoinStorageFunding(
+      quote,
+      ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID,
+    )
+    const wallet = walletProvider({
+      callResult: null,
+      logs: fundingLogs(plan),
+    })
+    const data = fundingData(plan)
+
+    await expect(
+      fundFilecoinStorage(wallet.provider, quote, {
+        ...fundingOptions(plan, async ({ request }) => {
+          await request({
+            method: 'eth_call',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+              'latest',
+            ],
+          })
+          return await request({
+            method: 'eth_sendTransaction',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+            ],
+          })
+        }),
+      }),
+    ).rejects.toThrow(/invalid funding simulation result/i)
+    expect(
+      wallet.requests.filter(({ method }) => method === 'eth_sendTransaction'),
+    ).toHaveLength(0)
+  })
+
+  it('requires the planned account as the funding simulation sender', async () => {
+    const quote = storageQuote({ depositAmount: 0n, needsApproval: true })
+    const plan = planFilecoinStorageFunding(
+      quote,
+      ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID,
+    )
+    const wallet = walletProvider({ logs: fundingLogs(plan) })
+    const data = fundingData(plan)
+
+    await expect(
+      fundFilecoinStorage(wallet.provider, quote, {
+        ...fundingOptions(plan, async ({ request }) => {
+          return await request({
+            method: 'eth_call',
+            params: [
+              {
+                data,
+                to: plan.network.contracts.filecoinPay,
+              },
+              'latest',
+            ],
+          })
+        }),
+      }),
+    ).rejects.toThrow(/omitted the funding simulation sender/i)
+    expect(
+      wallet.requests.filter(({ method }) => method === 'eth_call'),
+    ).toHaveLength(0)
+  })
+
+  it('closes and drains requests when the executor rejects', async () => {
+    const quote = storageQuote({ depositAmount: 0n, needsApproval: true })
+    const plan = planFilecoinStorageFunding(
+      quote,
+      ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID,
+    )
+    const wallet = walletProvider({ logs: fundingLogs(plan) })
+    let chainReadCount = 0
+    let releaseSubmissionCheck!: () => void
+    const heldSubmissionCheck = new Promise<void>((resolve) => {
+      releaseSubmissionCheck = resolve
+    })
+    const provider: Eip1193Provider = {
+      ...wallet.provider,
+      request: async (request) => {
+        if (request.method === 'eth_chainId') {
+          chainReadCount += 1
+          if (chainReadCount === 2) await heldSubmissionCheck
+        }
+        return await wallet.provider.request(request)
+      },
+    }
+    let rejectExecutor!: () => void
+    const executorCanReject = new Promise<void>((resolve) => {
+      rejectExecutor = resolve
+    })
+    const executorError = new Error('Executor failed.')
+    const data = fundingData(plan)
+    const funding = fundFilecoinStorage(provider, quote, {
+      ...fundingOptions(plan, async ({ request }) => {
+        await request({
+          method: 'eth_call',
+          params: [
+            {
+              data,
+              from: plan.account,
+              to: plan.network.contracts.filecoinPay,
+            },
+            'latest',
+          ],
+        })
+        void request({
+          method: 'eth_sendTransaction',
+          params: [
+            {
+              data,
+              from: plan.account,
+              to: plan.network.contracts.filecoinPay,
+            },
+          ],
+        }).catch(() => undefined)
+        await executorCanReject
+        throw executorError
+      }),
+    })
+
+    await vi.waitFor(() => expect(chainReadCount).toBe(2))
+    rejectExecutor()
+    await Promise.resolve()
+    await Promise.resolve()
+    releaseSubmissionCheck()
+
+    await expect(funding).rejects.toBe(executorError)
     expect(
       wallet.requests.filter(({ method }) => method === 'eth_sendTransaction'),
     ).toHaveLength(0)
