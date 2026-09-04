@@ -33,6 +33,7 @@ import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 import { PaidMediaPicker, type PaidMediaPreparer } from './paid-media-picker'
 import type { PreparedMediaCar } from './paid-media-car'
+import { FilecoinStoragePanel } from './filecoin-storage-panel'
 import { ProfileComposer } from './profile-composer'
 import { ProfileReader } from './profile-reader'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
@@ -222,6 +223,8 @@ export function WalletPanel({
   const [mediaPreparationBusy, setMediaPreparationBusy] = useState(false)
   const [mediaPreparationFailed, setMediaPreparationFailed] = useState(false)
   const [preparedMedia, setPreparedMedia] = useState<PreparedMediaCar>()
+  const [preparedMediaPublicationChainId, setPreparedMediaPublicationChainId] =
+    useState<bigint>()
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
   let mediaCidError: string | undefined
   try {
@@ -241,6 +244,7 @@ export function WalletPanel({
   const handlePreparedMedia = (prepared: PreparedMediaCar | undefined) => {
     composeRevision.current += 1
     setPreparedMedia(prepared)
+    setPreparedMediaPublicationChainId(prepared ? session.chainId : undefined)
     setMediaCidInput(prepared?.mediaCid.text ?? '')
   }
   const handleMediaPreparingChange = (preparing: boolean) => {
@@ -257,6 +261,7 @@ export function WalletPanel({
     setMediaPreparationBusy(false)
     setMediaPreparationFailed(false)
     setPreparedMedia(undefined)
+    setPreparedMediaPublicationChainId(undefined)
     setMediaPickerRevision((current) => current + 1)
   }
   const refreshInspection = useCallback(async () => {
@@ -870,6 +875,7 @@ export function WalletPanel({
                 onChange={(event) => {
                   composeRevision.current += 1
                   setPreparedMedia(undefined)
+                  setPreparedMediaPublicationChainId(undefined)
                   setMediaCidInput(event.target.value)
                 }}
                 placeholder="bafy… or Qm…"
@@ -918,6 +924,12 @@ export function WalletPanel({
               </div>
             </form>
           )}
+          <FilecoinStoragePanel
+            disabled={busyAction !== undefined || transactionWriteLocked}
+            prepared={preparedMedia}
+            publicationChainId={preparedMediaPublicationChainId}
+            session={session}
+          />
         </div>
         <div className="wallet-profile">
           <h3>4. Public profile</h3>
