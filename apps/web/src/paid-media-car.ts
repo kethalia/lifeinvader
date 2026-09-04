@@ -2,6 +2,7 @@ import { CarBufferWriter } from '@ipld/car'
 import { importByteStream, type WritableStorage } from 'ipfs-unixfs-importer'
 import { CID } from 'multiformats/cid'
 import { parseMediaCid, type MediaCid } from './media-cid'
+import { LIFEINVADER_UNIXFS_PROFILE } from './media-unixfs'
 
 export const MAX_PAID_MEDIA_BYTES = 32 * 1024 * 1024
 export const MIN_PAID_MEDIA_CAR_BYTES = 127
@@ -178,7 +179,7 @@ export async function preparePaidMediaCar(
   let imported: Awaited<ReturnType<typeof importByteStream>>
   try {
     imported = await importByteStream(content(), blockstore, {
-      profile: 'unixfs-v1-2025',
+      profile: LIFEINVADER_UNIXFS_PROFILE,
     })
   } catch (cause) {
     assertNotAborted(options.signal)
