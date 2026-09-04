@@ -252,10 +252,36 @@ describe('IPFS media retrieval', () => {
     const expectation = expect(retrieval).rejects.toThrow(
       /request was cancelled/i,
     )
+    const cancellation = new MessageChannel()
+    cancellation.port1.onmessage = () => controller.abort()
+    cancellation.port2.postMessage(undefined)
 
-    setTimeout(() => controller.abort(), 0)
+    try {
+      await expectation
+    } finally {
+      cancellation.port1.close()
+      cancellation.port2.close()
+    }
+  })
 
-    await expectation
+  it('does not use timer-clamped tasks for UnixFS verification yields', async () => {
+    const png = new Uint8Array(1024 * 1024 + 1)
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const prepared = await preparePaidMediaCar(mediaFile(png))
+    const timeout = vi.spyOn(globalThis, 'setTimeout')
+
+    try {
+      await retrieveIpfsMedia(
+        'https://gateway.example/ipfs/{cid}',
+        prepared.mediaCid,
+        { fetcher: vi.fn(async () => response([png])) },
+      )
+
+      expect(timeout).toHaveBeenCalledTimes(1)
+      expect(timeout).toHaveBeenCalledWith(expect.any(Function), 30_000)
+    } finally {
+      timeout.mockRestore()
+    }
   })
 
   it('refuses structured DAG media without contacting the gateway', async () => {

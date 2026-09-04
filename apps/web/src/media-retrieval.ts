@@ -184,13 +184,20 @@ async function verifyDeterministicUnixfsCid(
     const yieldToBrowser = async () => {
       signal.throwIfAborted()
       await new Promise<void>((resolve) => {
+        const channel = new MessageChannel()
+        let settled = false
         const finish = () => {
-          clearTimeout(timeout)
+          if (settled) return
+          settled = true
+          channel.port1.onmessage = null
+          channel.port1.close()
+          channel.port2.close()
           signal.removeEventListener('abort', finish)
           resolve()
         }
-        const timeout = setTimeout(finish, 0)
+        channel.port1.onmessage = finish
         signal.addEventListener('abort', finish, { once: true })
+        channel.port2.postMessage(undefined)
       })
       signal.throwIfAborted()
     }
