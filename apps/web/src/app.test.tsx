@@ -12,6 +12,7 @@ import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
 import type { DirectMessageStreamSynchronizer } from './direct-message-stream'
 import type { Eip1193Provider } from './ethereum'
+import type { FollowStreamSynchronizer } from './follow-stream'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
 import type { PostFeedSynchronizer } from './post-feed'
@@ -74,11 +75,26 @@ const synchronizeEmptyMessages = vi.fn<DirectMessageStreamSynchronizer>(
     startBlock: 0n,
   }),
 )
+const synchronizeEmptyFollows = vi.fn<FollowStreamSynchronizer>(
+  async (_provider, _chainId, account, direction) => ({
+    account,
+    cacheReset: false,
+    caughtUp: false,
+    direction,
+    head: 100n,
+    indexedThrough: 88n,
+    recentSignals: [],
+    safeHead: 88n,
+    scannedRanges: 1,
+    startBlock: 0n,
+  }),
+)
 const waitForSafePost = vi.fn(async () => undefined)
 function renderApp() {
   return render(
     <App
       synchronizeDirectMessages={synchronizeEmptyMessages}
+      synchronizeFollows={synchronizeEmptyFollows}
       synchronizePostFeed={synchronizeEmptyFeed}
       synchronizeProfile={synchronizeEmptyProfile}
       waitForPostConfirmation={waitForSafePost}
@@ -111,6 +127,7 @@ afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
   synchronizeEmptyFeed.mockClear()
+  synchronizeEmptyFollows.mockClear()
   synchronizeEmptyMessages.mockClear()
   synchronizeEmptyProfile.mockClear()
   waitForSafePost.mockClear()
@@ -239,6 +256,15 @@ describe('App', () => {
       expect(synchronizeEmptyMessages).toHaveBeenCalledTimes(1),
     )
     expect(synchronizeEmptyMessages.mock.calls[0]?.[0]).toBe(selectedProvider)
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /load confirmed follow history/i,
+      }),
+    )
+    await waitFor(() =>
+      expect(synchronizeEmptyFollows).toHaveBeenCalledTimes(1),
+    )
+    expect(synchronizeEmptyFollows.mock.calls[0]?.[0]).toBe(selectedProvider)
 
     fireEvent.click(screen.getByRole('button', { name: /use wallet RPC/i }))
     await waitFor(() => expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(3))
@@ -259,6 +285,15 @@ describe('App', () => {
       expect(synchronizeEmptyMessages).toHaveBeenCalledTimes(2),
     )
     expect(synchronizeEmptyMessages.mock.calls[1]?.[0]).toBe(provider)
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /load confirmed follow history/i,
+      }),
+    )
+    await waitFor(() =>
+      expect(synchronizeEmptyFollows).toHaveBeenCalledTimes(2),
+    )
+    expect(synchronizeEmptyFollows.mock.calls[1]?.[0]).toBe(provider)
     await expect(
       selectedProvider.request({ method: 'eth_chainId' }),
     ).rejects.toThrow(/transport was closed/i)

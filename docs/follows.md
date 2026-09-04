@@ -145,3 +145,10 @@ unfollow for another address. It keeps pending, ambiguous, unknown, reverted,
 and confirmed outcomes attached to the wallet context that created them. A
 confirmed write does not bypass the twelve-block read depth; the user must wait
 for confirmation and explicitly refresh the relevant account view.
+
+When a separate read RPC is selected, follow synchronization and final
+projection authentication use its wallet-anchored provider. Replacing or
+clearing that provider aborts in-flight work, closes any active projection, and
+hides the old transport's state. Follow and unfollow submission, ambiguous-hash
+recovery, and receipt authentication always remain on the injected wallet
+provider.

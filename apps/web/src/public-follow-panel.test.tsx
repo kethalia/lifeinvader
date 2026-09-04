@@ -18,6 +18,7 @@ import type { FollowProjectionRunSnapshot } from './follow-projection-run'
 import type {
   FollowProjectionAnchor,
   FollowStreamSnapshot,
+  FollowStreamSynchronizer,
 } from './follow-stream'
 import {
   setFollow,
@@ -196,8 +197,9 @@ describe('PublicFollowPanel', () => {
 
   it('performs one bounded read step per click and hides relationships until complete', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const synchronize = vi
-      .fn()
+      .fn<FollowStreamSynchronizer>()
       .mockResolvedValueOnce(stream())
       .mockResolvedValueOnce(stream(ANCHOR))
     const run = reader({
@@ -209,6 +211,7 @@ describe('PublicFollowPanel', () => {
     const openProjection = vi.fn().mockResolvedValue(run)
     render(
       <PublicFollowPanel
+        readProvider={readProvider}
         readModelOptions={{ openProjection, synchronize }}
         session={connectedSession(provider)}
       />,
@@ -221,6 +224,7 @@ describe('PublicFollowPanel', () => {
       await screen.findByText(/more confirmed history remains/i),
     ).toBeTruthy()
     expect(synchronize).toHaveBeenCalledTimes(1)
+    expect(synchronize.mock.calls[0]?.[0]).toBe(readProvider)
     expect(run.advance).not.toHaveBeenCalled()
     expect(screen.queryByText(/Following · 1/)).toBeNull()
 
@@ -263,6 +267,49 @@ describe('PublicFollowPanel', () => {
       after: undefined,
       limit: 25,
     })
+  })
+
+  it('aborts and hides follow state when the selected read provider changes', async () => {
+    const walletProvider = { request: vi.fn() } as Eip1193Provider
+    const firstReadProvider = { request: vi.fn() } as Eip1193Provider
+    const secondReadProvider = { request: vi.fn() } as Eip1193Provider
+    const pending = deferred<FollowStreamSnapshot>()
+    const synchronize = vi
+      .fn<FollowStreamSynchronizer>()
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValueOnce(stream())
+    const view = render(
+      <PublicFollowPanel
+        readProvider={firstReadProvider}
+        readModelOptions={{ synchronize }}
+        session={connectedSession(walletProvider)}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed follow history' }),
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(1))
+    const firstSignal = synchronize.mock.calls[0]?.[4]?.signal
+
+    view.rerender(
+      <PublicFollowPanel
+        readProvider={secondReadProvider}
+        readModelOptions={{ synchronize }}
+        session={connectedSession(walletProvider)}
+      />,
+    )
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true))
+    expect(
+      screen.getByRole('button', { name: 'Load confirmed follow history' }),
+    ).toBeTruthy()
+    await act(async () => pending.resolve(stream()))
+    expect(screen.queryByText(/more confirmed history remains/i)).toBeNull()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed follow history' }),
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
+    expect(synchronize.mock.calls[1]?.[0]).toBe(secondReadProvider)
   })
 
   it('explains when the protocol deployment is not confirmed yet', async () => {
@@ -367,6 +414,7 @@ describe('PublicFollowPanel', () => {
 
   it('submits an exact action, locks both writes, and reports its receipt', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const pending = deferred<TransactionReceipt>()
     const setFollowAction = vi.fn<typeof setFollow>(
       (_provider, _account, _chainId, _followed, _following, onSubmitted) => {
@@ -376,6 +424,7 @@ describe('PublicFollowPanel', () => {
     )
     render(
       <PublicFollowPanel
+        readProvider={readProvider}
         session={connectedSession(provider)}
         setFollowAction={setFollowAction}
       />,
@@ -395,6 +444,7 @@ describe('PublicFollowPanel', () => {
       true,
       expect.any(Function),
     )
+    expect(readProvider.request).not.toHaveBeenCalled()
     expect(
       screen.getByRole<HTMLButtonElement>('button', { name: 'Following…' })
         .disabled,

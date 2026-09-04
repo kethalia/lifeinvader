@@ -328,15 +328,15 @@ export function ReadRpcPanel({
           <p>Connect a wallet before selecting a matching read endpoint.</p>
         ) : controller.selection ? (
           <p>
-            Post, profile, and message reads use{' '}
+            Post, profile, message, and follow reads use{' '}
             <strong>{controller.selection.verification.endpointOrigin}</strong>,
             matched to wallet history at confirmed block{' '}
             {controller.selection.verification.blockNumber.toString()}.
           </p>
         ) : (
           <p>
-            Post, profile, and message reads currently use the wallet’s RPC.
-            Entering a URL sends nothing until you choose verification.
+            Post, profile, message, and follow reads currently use the wallet’s
+            RPC. Entering a URL sends nothing until you choose verification.
           </p>
         )}
         {controller.error ? <p role="alert">{controller.error}</p> : null}

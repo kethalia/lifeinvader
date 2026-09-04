@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getAddress, isAddress, type Address, type Hash } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
 import type {
@@ -273,11 +273,13 @@ function RelationshipList({
 }
 
 export function PublicFollowPanel({
+  readProvider,
   readModelOptions,
   session,
   setFollowAction = setFollow,
   waitForReceipt = waitForTransactionReceipt,
 }: {
+  readProvider?: Eip1193Provider
   readModelOptions?: UseFollowReadModelOptions
   session: WalletSession
   setFollowAction?: typeof setFollow
@@ -293,6 +295,13 @@ export function PublicFollowPanel({
   const [completions, setCompletions] = useState<FollowCompletion[]>([])
   const [problems, setProblems] = useState<FollowProblem[]>([])
   const operationSequence = useRef(0)
+  const historySession = useMemo<WalletSession>(
+    () =>
+      readProvider !== undefined && readProvider !== session.provider
+        ? { ...session, provider: readProvider }
+        : session,
+    [readProvider, session],
+  )
 
   useEffect(() => {
     if (!session.account) return
@@ -304,6 +313,8 @@ export function PublicFollowPanel({
     session.account !== undefined &&
     session.chainId !== undefined &&
     session.provider !== undefined
+  const readsSelectedRpc =
+    connected && readProvider !== undefined && readProvider !== session.provider
   const accountSelection = parseAccountInput(accountInput, 'account')
   const targetSelection = parseAccountInput(targetInput, 'follow target')
   const selfTarget =
@@ -314,7 +325,7 @@ export function PublicFollowPanel({
     ? 'An account cannot follow itself.'
     : targetSelection.error
   const readModel = useFollowReadModel(
-    session,
+    historySession,
     accountSelection.account,
     direction,
     readModelOptions,
@@ -647,7 +658,9 @@ export function PublicFollowPanel({
           <p className="follow-read-status" role="status">
             {!connected
               ? 'Connect a wallet to read through its bounded EIP-1193 RPC connection.'
-              : readStatusCopy(readModel.state, direction)}
+              : `${readStatusCopy(readModel.state, direction)} Requests use ${
+                  readsSelectedRpc ? 'the selected read RPC' : 'the wallet RPC'
+                }.`}
           </p>
           <button
             className="button-accent"
