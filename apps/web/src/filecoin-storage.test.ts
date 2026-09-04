@@ -232,12 +232,54 @@ describe('Filecoin storage deployment inspection', () => {
       inspectFilecoinStorage(malformedCall.provider),
     ).rejects.toThrow(/invalid paymentsContractAddress data/i)
 
+    const nonZeroPadding = deploymentProvider({
+      malformedCall: `0x${'01'.repeat(12)}${CALIBRATION.contracts.filecoinPay.slice(2)}`,
+    })
+    await expect(
+      inspectFilecoinStorage(nonZeroPadding.provider),
+    ).rejects.toThrow(/invalid paymentsContractAddress data/i)
+
     const changedChain = deploymentProvider({
       chainIds: [FILECOIN_CALIBRATION_CHAIN_ID, FILECOIN_MAINNET_CHAIN_ID],
     })
     await expect(inspectFilecoinStorage(changedChain.provider)).rejects.toThrow(
       /chain changed during inspection/i,
     )
+  })
+
+  it('rejects and unsubscribes after an A-to-B-to-A chain event', async () => {
+    const deployment = deploymentProvider()
+    const chainListeners = new Set<(...args: unknown[]) => void>()
+    let switched = false
+    const provider: Eip1193Provider = {
+      request: vi.fn(async (request) => {
+        if (!switched && request.method === 'eth_getCode') {
+          switched = true
+          chainListeners.forEach((listener) => listener('0x13a'))
+          chainListeners.forEach((listener) => listener('0x4cb2f'))
+        }
+        return deployment.provider.request(request)
+      }),
+      on: vi.fn((event, listener) => {
+        if (event === 'chainChanged') chainListeners.add(listener)
+      }),
+      removeListener: vi.fn((event, listener) => {
+        if (event === 'chainChanged') chainListeners.delete(listener)
+      }),
+    }
+
+    await expect(inspectFilecoinStorage(provider)).rejects.toThrow(
+      /chain changed during inspection/i,
+    )
+    expect(provider.on).toHaveBeenCalledWith(
+      'chainChanged',
+      expect.any(Function),
+    )
+    expect(provider.removeListener).toHaveBeenCalledWith(
+      'chainChanged',
+      expect.any(Function),
+    )
+    expect(chainListeners.size).toBe(0)
   })
 
   it('bounds stalled reads and honors cancellation', async () => {

@@ -1,10 +1,4 @@
-import {
-  decodeAbiParameters,
-  encodeFunctionData,
-  getAddress,
-  type Address,
-  type Hex,
-} from 'viem'
+import { encodeFunctionData, getAddress, type Address, type Hex } from 'viem'
 import { beforeDeadline, parseChainId, type Eip1193Provider } from './ethereum'
 
 export const FILECOIN_MAINNET_CHAIN_ID = 314n
@@ -221,11 +215,11 @@ function parseRpcHex(value: unknown, label: string, maximumBytes: number): Hex {
 
 function parseAddressResult(value: unknown, functionName: string): Address {
   const encoded = parseRpcHex(value, `${functionName} data`, 32)
-  if (encoded.length !== 66) {
+  if (encoded.length !== 66 || encoded.slice(2, 26) !== '0'.repeat(24)) {
     throw inspectionError(`the wallet returned invalid ${functionName} data.`)
   }
   try {
-    return getAddress(decodeAbiParameters([{ type: 'address' }], encoded)[0])
+    return getAddress(`0x${encoded.slice(26)}`)
   } catch (cause) {
     throw inspectionError(`the wallet returned invalid ${functionName} data.`, {
       cause,
@@ -250,96 +244,120 @@ export async function inspectFilecoinStorage(
   if (!validTimeout(timeoutMs)) {
     throw inspectionError('the inspection timeout is invalid.')
   }
-  const deadline = Date.now() + timeoutMs
-  const request = (method: string, params?: readonly unknown[]) =>
-    beforeDeadline(
-      () => provider.request({ method, ...(params ? { params } : {}) }),
-      deadline,
-      () => inspectionError('the wallet read timed out.'),
-      options.signal,
-      () => inspectionError('the inspection was cancelled.'),
-    )
-  const firstChainId = parseChainId(await request('eth_chainId'))
-  if (
-    options.expectedChainId !== undefined &&
-    firstChainId !== options.expectedChainId
-  ) {
-    throw inspectionError(
-      `the wallet moved from expected chain ${options.expectedChainId.toString()} to chain ${firstChainId.toString()}.`,
-    )
+  let chainChanged = false
+  const handleChainChanged = () => {
+    chainChanged = true
   }
-  const network = getFilecoinStorageNetwork(firstChainId)
-  if (!network) return { chainId: firstChainId, kind: 'unsupported-chain' }
-
-  const finish = async <T extends FilecoinStorageInspection>(result: T) => {
-    const finalChainId = parseChainId(await request('eth_chainId'))
-    if (finalChainId !== firstChainId) {
-      throw inspectionError('the wallet chain changed during inspection.')
+  const addProviderListener = provider.on?.bind(provider)
+  const removeProviderListener = provider.removeListener?.bind(provider)
+  if (addProviderListener && removeProviderListener) {
+    addProviderListener('chainChanged', handleChainChanged)
+  }
+  try {
+    const assertNoChainChange = () => {
+      if (chainChanged) {
+        throw inspectionError('the wallet chain changed during inspection.')
+      }
     }
-    return result
-  }
-  const readCode = async (address: Address) =>
-    parseRpcHex(
-      await request('eth_getCode', [address, 'latest']),
-      'contract code',
-      96 * 1024,
-    )
+    const deadline = Date.now() + timeoutMs
+    const request = async (method: string, params?: readonly unknown[]) => {
+      assertNoChainChange()
+      const result = await beforeDeadline(
+        () => provider.request({ method, ...(params ? { params } : {}) }),
+        deadline,
+        () => inspectionError('the wallet read timed out.'),
+        options.signal,
+        () => inspectionError('the inspection was cancelled.'),
+      )
+      assertNoChainChange()
+      return result
+    }
+    const firstChainId = parseChainId(await request('eth_chainId'))
+    if (
+      options.expectedChainId !== undefined &&
+      firstChainId !== options.expectedChainId
+    ) {
+      throw inspectionError(
+        `the wallet moved from expected chain ${options.expectedChainId.toString()} to chain ${firstChainId.toString()}.`,
+      )
+    }
+    const network = getFilecoinStorageNetwork(firstChainId)
+    if (!network) return { chainId: firstChainId, kind: 'unsupported-chain' }
 
-  const fwssCode = await readCode(network.contracts.fwss)
-  if (fwssCode === '0x') {
-    return finish({
-      issues: [
-        {
-          address: network.contracts.fwss,
-          contract: 'fwss',
-          kind: 'missing-code',
-        },
-      ],
-      kind: 'unavailable',
-      network,
-    })
-  }
+    const finish = async <T extends FilecoinStorageInspection>(result: T) => {
+      const finalChainId = parseChainId(await request('eth_chainId'))
+      if (finalChainId !== firstChainId) {
+        throw inspectionError('the wallet chain changed during inspection.')
+      }
+      return result
+    }
+    const readCode = async (address: Address) =>
+      parseRpcHex(
+        await request('eth_getCode', [address, 'latest']),
+        'contract code',
+        96 * 1024,
+      )
 
-  const addressIssues: FilecoinStorageIssue[] = []
-  for (const getter of FWSS_ADDRESS_GETTERS) {
-    const data = encodeFunctionData({
-      abi: FWSS_ADDRESS_ABI,
-      functionName: getter.functionName,
-    })
-    const received = parseAddressResult(
-      await request('eth_call', [
-        { data, to: network.contracts.fwss },
-        'latest',
-      ]),
-      getter.functionName,
-    )
-    const expected = network.contracts[getter.contract]
-    if (received.toLowerCase() !== expected.toLowerCase()) {
-      addressIssues.push({
-        contract: getter.contract,
-        expected,
-        kind: 'address-mismatch',
-        received,
+    const fwssCode = await readCode(network.contracts.fwss)
+    if (fwssCode === '0x') {
+      return finish({
+        issues: [
+          {
+            address: network.contracts.fwss,
+            contract: 'fwss',
+            kind: 'missing-code',
+          },
+        ],
+        kind: 'unavailable',
+        network,
       })
     }
-  }
-  if (addressIssues.length > 0) {
-    return finish({ issues: addressIssues, kind: 'unavailable', network })
-  }
 
-  const codeIssues: FilecoinStorageIssue[] = []
-  for (const [contract, address] of Object.entries(network.contracts) as [
-    FilecoinStorageContract,
-    Address,
-  ][]) {
-    if (contract === 'fwss') continue
-    if ((await readCode(address)) === '0x') {
-      codeIssues.push({ address, contract, kind: 'missing-code' })
+    const addressIssues: FilecoinStorageIssue[] = []
+    for (const getter of FWSS_ADDRESS_GETTERS) {
+      const data = encodeFunctionData({
+        abi: FWSS_ADDRESS_ABI,
+        functionName: getter.functionName,
+      })
+      const received = parseAddressResult(
+        await request('eth_call', [
+          { data, to: network.contracts.fwss },
+          'latest',
+        ]),
+        getter.functionName,
+      )
+      const expected = network.contracts[getter.contract]
+      if (received.toLowerCase() !== expected.toLowerCase()) {
+        addressIssues.push({
+          contract: getter.contract,
+          expected,
+          kind: 'address-mismatch',
+          received,
+        })
+      }
+    }
+    if (addressIssues.length > 0) {
+      return finish({ issues: addressIssues, kind: 'unavailable', network })
+    }
+
+    const codeIssues: FilecoinStorageIssue[] = []
+    for (const [contract, address] of Object.entries(network.contracts) as [
+      FilecoinStorageContract,
+      Address,
+    ][]) {
+      if (contract === 'fwss') continue
+      if ((await readCode(address)) === '0x') {
+        codeIssues.push({ address, contract, kind: 'missing-code' })
+      }
+    }
+    if (codeIssues.length > 0) {
+      return finish({ issues: codeIssues, kind: 'unavailable', network })
+    }
+
+    return finish({ kind: 'ready', network })
+  } finally {
+    if (addProviderListener && removeProviderListener) {
+      removeProviderListener('chainChanged', handleChainChanged)
     }
   }
-  if (codeIssues.length > 0) {
-    return finish({ issues: codeIssues, kind: 'unavailable', network })
-  }
-
-  return finish({ kind: 'ready', network })
 }
