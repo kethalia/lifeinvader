@@ -11,6 +11,7 @@ import {
 } from 'viem'
 import type { IndexedEventLog } from './event-indexer'
 import {
+  decodeFollowSet,
   decodeGroupMembershipSet,
   decodePublishedDirectMessage,
   decodePublishedGroup,
@@ -21,6 +22,8 @@ import {
   decodePublishedPost,
   decodePublishedRepost,
   DIRECT_MESSAGE_SENT_FILTER,
+  getFollowersFilter,
+  getFollowingFilter,
   getDirectMessageConversationFilter,
   getGroupMembershipFilter,
   getGroupMessageFilter,
@@ -36,6 +39,7 @@ import {
 import {
   COMMENT_PUBLISHED_TOPIC,
   DIRECT_MESSAGE_SENT_TOPIC,
+  FOLLOW_SET_TOPIC,
   getDirectConversationId,
   GROUP_CREATED_TOPIC,
   GROUP_MEMBERSHIP_SET_TOPIC,
@@ -168,6 +172,33 @@ function repostLog(
       options.topic ?? REPOST_PUBLISHED_TOPIC,
       padHex(toHex(postId), { size: 32 }),
       options.accountTopic ?? padHex(ACCOUNT, { size: 32 }),
+    ],
+  }
+}
+
+function followLog(
+  options: {
+    data?: Hex
+    followed?: Address
+    followedTopic?: Hex
+    follower?: Address
+    followerTopic?: Hex
+    following?: boolean
+    topic?: Hex
+    topics?: readonly Hex[]
+  } = {},
+): IndexedEventLog {
+  const followed = options.followed ?? ACCOUNT
+  const follower = options.follower ?? AUTHOR
+  const following = options.following ?? true
+  return {
+    ...postLog(),
+    data:
+      options.data ?? encodeAbiParameters(LIKE_DATA_PARAMETERS, [following]),
+    topics: options.topics ?? [
+      options.topic ?? FOLLOW_SET_TOPIC,
+      options.followerTopic ?? padHex(follower, { size: 32 }),
+      options.followedTopic ?? padHex(followed, { size: 32 }),
     ],
   }
 }
@@ -642,6 +673,89 @@ describe('RepostPublished decoding', () => {
   ])('rejects %s', (_description, log) => {
     expect(() => decodePublishedRepost(log)).toThrow(/invalid RepostPublished/i)
   })
+})
+
+describe('FollowSet decoding and scoped filters', () => {
+  it.each([true, false])(
+    'decodes a canonical following=%s signal',
+    (following) => {
+      expect(decodeFollowSet(followLog({ following }))).toEqual({
+        blockHash: keccak256(stringToHex('block')),
+        blockNumber: 12n,
+        followed: getAddress(ACCOUNT),
+        follower: getAddress(AUTHOR),
+        following,
+        logIndex: 2,
+        transactionHash: keccak256(stringToHex('transaction')),
+        transactionIndex: 1,
+      })
+    },
+  )
+
+  it.each([
+    ['another event family', followLog({ topic: REPOST_PUBLISHED_TOPIC })],
+    [
+      'the same signature from another contract',
+      { ...followLog(), address: ACCOUNT },
+    ],
+  ])('ignores %s', (_description, log) => {
+    expect(decodeFollowSet(log)).toBeUndefined()
+  })
+
+  it.each([
+    ['missing indexed topics', followLog({ topics: [FOLLOW_SET_TOPIC] })],
+    [
+      'surplus indexed topics',
+      followLog({
+        topics: [...followLog().topics, keccak256(stringToHex('surplus'))],
+      }),
+    ],
+    ['zero follower', followLog({ follower: `0x${'00'.repeat(20)}` })],
+    ['zero followed account', followLog({ followed: `0x${'00'.repeat(20)}` })],
+    ['self-follow', followLog({ followed: AUTHOR })],
+    ['missing boolean data', followLog({ data: '0x' })],
+    [
+      'surplus boolean data',
+      followLog({ data: `0x${'00'.repeat(64)}` as Hex }),
+    ],
+    [
+      'non-canonical boolean data',
+      followLog({ data: padHex(toHex(2), { size: 32 }) }),
+    ],
+    [
+      'non-canonical follower padding',
+      followLog({ followerTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    [
+      'non-canonical followed padding',
+      followLog({ followedTopic: `0x01${'00'.repeat(31)}` }),
+    ],
+    ['malformed follower topic', followLog({ followerTopic: '0x01' })],
+    ['odd-length ABI data', followLog({ data: '0x0' })],
+  ])('rejects %s', (_description, log) => {
+    expect(() => decodeFollowSet(log)).toThrow(/invalid FollowSet/i)
+  })
+
+  it('builds separate exact incoming and outgoing account filters', () => {
+    const accountTopic = padHex(getAddress(ACCOUNT), { size: 32 })
+    expect(getFollowersFilter(ACCOUNT)).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [FOLLOW_SET_TOPIC, null, accountTopic],
+    })
+    expect(getFollowingFilter(ACCOUNT)).toEqual({
+      address: PROTOCOL_ADDRESS,
+      topics: [FOLLOW_SET_TOPIC, accountTopic],
+    })
+  })
+
+  it.each([getFollowersFilter, getFollowingFilter])(
+    'rejects the zero account before building a filter',
+    (getFilter) => {
+      expect(() => getFilter(`0x${'00'.repeat(20)}`)).toThrow(
+        /follow account is invalid/i,
+      )
+    },
+  )
 })
 
 describe('DirectMessageSent decoding', () => {
