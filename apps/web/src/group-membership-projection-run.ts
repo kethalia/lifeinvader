@@ -1,4 +1,3 @@
-import type { Address } from 'viem'
 import {
   openEventCache,
   type BrowserEventCache,

@@ -4,7 +4,9 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { encodeFunctionData } from 'viem'
 import { synchronizeDirectMessageStream } from './direct-message-stream'
+import { synchronizeFollowStream } from './follow-stream'
 import { synchronizeGroupDirectory } from './group-directory'
 import { synchronizeGroupMembershipStream } from './group-membership-stream'
 import { synchronizeGroupMessageStream } from './group-message-stream'
@@ -26,6 +28,7 @@ import {
   deployProtocol,
   inspectProtocol,
   LOCAL_CHAIN_ID,
+  PROTOCOL_ADDRESS,
   publishComment,
   publishRepost,
   publishPost,
@@ -38,6 +41,18 @@ import {
 const MEDIA_CID = parseMediaCid(
   'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
 )!
+const SET_FOLLOW_ABI = [
+  {
+    inputs: [
+      { name: 'followed', type: 'address' },
+      { name: 'following', type: 'bool' },
+    ],
+    name: 'setFollow',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+] as const
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
   result?: unknown
@@ -125,7 +140,7 @@ afterAll(async () => {
   })
 })
 describe('wallet transaction helpers on Anvil', () => {
-  it('deploys v1 and verifies profile, post, reaction, direct-message, and group transactions', async () => {
+  it('deploys v1 and verifies profile, post, reaction, message, group, and follow events', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
     )
@@ -270,6 +285,34 @@ describe('wallet transaction helpers on Anvil', () => {
         provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 13n })
+    await provider.request({
+      method: 'eth_sendTransaction',
+      params: [
+        {
+          data: encodeFunctionData({
+            abi: SET_FOLLOW_ABI,
+            args: [recipient, true],
+            functionName: 'setFollow',
+          }),
+          from: account,
+          to: PROTOCOL_ADDRESS,
+        },
+      ],
+    })
+    await provider.request({
+      method: 'eth_sendTransaction',
+      params: [
+        {
+          data: encodeFunctionData({
+            abi: SET_FOLLOW_ABI,
+            args: [account, true],
+            functionName: 'setFollow',
+          }),
+          from: recipient,
+          to: PROTOCOL_ADDRESS,
+        },
+      ],
+    })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,
@@ -386,6 +429,43 @@ describe('wallet transaction helpers on Anvil', () => {
         },
       ],
     })
+    const followStorage = {
+      databaseName: 'lifeinvader-anvil-follows',
+      factory: new IDBFactory(),
+      keyRange: IDBKeyRange,
+    }
+    const publicFollowing = await synchronizeFollowStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      account,
+      'following',
+      { storage: followStorage },
+    )
+    expect(publicFollowing).toMatchObject({
+      account,
+      caughtUp: true,
+      direction: 'following',
+      recentSignals: [
+        { followed: recipient, follower: account, following: true },
+      ],
+    })
+    expect(publicFollowing.projectionAnchor).toBeDefined()
+    const publicFollowers = await synchronizeFollowStream(
+      provider,
+      LOCAL_CHAIN_ID,
+      account,
+      'followers',
+      { storage: followStorage },
+    )
+    expect(publicFollowers).toMatchObject({
+      account,
+      caughtUp: true,
+      direction: 'followers',
+      recentSignals: [
+        { followed: account, follower: recipient, following: true },
+      ],
+    })
+    expect(publicFollowers.projectionAnchor).toBeDefined()
     const feed = await synchronizePostFeed(provider, LOCAL_CHAIN_ID, {
       storage: {
         databaseName: 'lifeinvader-anvil-post-feed',

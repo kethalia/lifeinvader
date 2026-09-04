@@ -17,6 +17,8 @@ import {
   COMMENT_PUBLISHED_TOPIC,
   DIRECT_MESSAGE_SENT_EVENT_ABI,
   DIRECT_MESSAGE_SENT_TOPIC,
+  FOLLOW_SET_EVENT_ABI,
+  FOLLOW_SET_TOPIC,
   GROUP_CREATED_TOPIC,
   GROUP_MEMBERSHIP_SET_EVENT_ABI,
   GROUP_MEMBERSHIP_SET_TOPIC,
@@ -65,6 +67,7 @@ const GROUP_CREATED_BYTES_PARAMETERS = [
 ] as const
 
 const GROUP_MEMBERSHIP_DATA_PARAMETERS = [{ type: 'bool' }] as const
+const FOLLOW_DATA_PARAMETERS = [{ type: 'bool' }] as const
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MAX_UINT256 = (1n << 256n) - 1n
@@ -102,6 +105,28 @@ export const GROUP_MESSAGE_SENT_FILTER = {
   address: PROTOCOL_ADDRESS,
   topics: [GROUP_MESSAGE_SENT_TOPIC],
 } as const satisfies EventLogFilter
+
+function getFollowAccountTopic(account: Address) {
+  const normalized = getAddress(account)
+  if (normalized.toLowerCase() === ZERO_ADDRESS) {
+    throw new Error('The selected follow account is invalid.')
+  }
+  return padHex(normalized, { size: 32 })
+}
+
+export function getFollowersFilter(account: Address): EventLogFilter {
+  return {
+    address: PROTOCOL_ADDRESS,
+    topics: [FOLLOW_SET_TOPIC, null, getFollowAccountTopic(account)],
+  }
+}
+
+export function getFollowingFilter(account: Address): EventLogFilter {
+  return {
+    address: PROTOCOL_ADDRESS,
+    topics: [FOLLOW_SET_TOPIC, getFollowAccountTopic(account)],
+  }
+}
 
 function getGroupIdTopic(groupId: bigint) {
   if (groupId < 1n || groupId > MAX_UINT256) {
@@ -198,6 +223,17 @@ export type PublishedRepost = {
   transactionIndex: number
 }
 
+export type FollowSet = {
+  blockHash: Hash
+  blockNumber: bigint
+  followed: Address
+  follower: Address
+  following: boolean
+  logIndex: number
+  transactionHash: Hash
+  transactionIndex: number
+}
+
 export type ProfileSet = {
   account: Address
   avatarCid: Hex
@@ -289,6 +325,10 @@ function invalidPostLikeEvent() {
 
 function invalidRepostEvent() {
   return new Error('The chain returned an invalid RepostPublished event.')
+}
+
+function invalidFollowEvent() {
+  return new Error('The chain returned an invalid FollowSet event.')
 }
 
 function invalidProfileEvent() {
@@ -500,6 +540,55 @@ export function decodePublishedRepost(
     }
   } catch {
     throw invalidRepostEvent()
+  }
+}
+
+export function decodeFollowSet(log: IndexedEventLog): FollowSet | undefined {
+  if (
+    log.address.toLowerCase() !== PROTOCOL_ADDRESS.toLowerCase() ||
+    log.topics[0]?.toLowerCase() !== FOLLOW_SET_TOPIC.toLowerCase()
+  ) {
+    return undefined
+  }
+  if (log.topics.length !== 3) throw invalidFollowEvent()
+  try {
+    if (size(log.data) !== 32) throw invalidFollowEvent()
+    const decoded = decodeEventLog({
+      abi: FOLLOW_SET_EVENT_ABI,
+      data: log.data,
+      strict: true,
+      topics: log.topics as [Hex, ...Hex[]],
+    })
+    const { followed, follower, following } = decoded.args
+    const normalizedFollower = getAddress(follower)
+    const normalizedFollowed = getAddress(followed)
+    if (
+      normalizedFollower.toLowerCase() === ZERO_ADDRESS ||
+      normalizedFollowed.toLowerCase() === ZERO_ADDRESS ||
+      normalizedFollower.toLowerCase() === normalizedFollowed.toLowerCase() ||
+      log.data.toLowerCase() !==
+        encodeAbiParameters(FOLLOW_DATA_PARAMETERS, [
+          following,
+        ]).toLowerCase() ||
+      log.topics[1]?.toLowerCase() !==
+        padHex(normalizedFollower, { size: 32 }).toLowerCase() ||
+      log.topics[2]?.toLowerCase() !==
+        padHex(normalizedFollowed, { size: 32 }).toLowerCase()
+    ) {
+      throw invalidFollowEvent()
+    }
+    return {
+      blockHash: log.blockHash,
+      blockNumber: log.blockNumber,
+      followed: normalizedFollowed,
+      follower: normalizedFollower,
+      following,
+      logIndex: log.logIndex,
+      transactionHash: log.transactionHash,
+      transactionIndex: log.transactionIndex,
+    }
+  } catch {
+    throw invalidFollowEvent()
   }
 }
 

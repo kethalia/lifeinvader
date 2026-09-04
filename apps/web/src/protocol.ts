@@ -204,6 +204,18 @@ export const LIKE_SET_EVENT_ABI = [
     type: 'event',
   },
 ] as const
+export const FOLLOW_SET_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'follower', type: 'address' },
+      { indexed: true, name: 'followed', type: 'address' },
+      { indexed: false, name: 'following', type: 'bool' },
+    ],
+    name: 'FollowSet',
+    type: 'event',
+  },
+] as const
 export const PROFILE_SET_EVENT_ABI = [
   {
     anonymous: false,
@@ -279,6 +291,8 @@ export const REPOST_PUBLISHED_TOPIC =
   '0x48b2667530535dfe389ce140bb7872ab9a922083158958ed14099b3565381b99'
 export const LIKE_SET_TOPIC =
   '0xa6fa55005fe0b190111a9abc7df43c5e4b986d6332d5971d6fe809390bb97aa0'
+export const FOLLOW_SET_TOPIC =
+  '0xd94333e426f298545f1366b65dd950a7409194062f9d6a8c4a708c8a9c1d6b64'
 export const PROFILE_SET_TOPIC =
   '0x033f4d6cdbbae83b8a59446e605fd37762898192566e447aed006d0d815842a7'
 export const DIRECT_MESSAGE_SENT_TOPIC =
