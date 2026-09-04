@@ -57,6 +57,7 @@ function feedSnapshot(
     })),
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 

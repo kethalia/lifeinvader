@@ -81,6 +81,12 @@ function MediaCommitment({ value }: { value: Hex }) {
 }
 
 function syncStatus(snapshot: PostFeedSnapshot) {
+  if (
+    snapshot.safeHead !== undefined &&
+    snapshot.startBlock > snapshot.safeHead
+  ) {
+    return `Protocol deployment is still reaching confirmation depth. Confirmed head ${snapshot.safeHead.toString()}; post history starts at block ${snapshot.startBlock.toString()}.`
+  }
   if (snapshot.caughtUp) {
     return snapshot.safeHead === undefined
       ? 'Caught up. No block has reached the selected confirmation depth yet.'
@@ -989,7 +995,10 @@ export function PostFeedPanel({
                 ? 'Synchronizing…'
                 : snapshot?.caughtUp
                   ? 'Check for newer posts'
-                  : 'Load next block range'}
+                  : snapshot?.safeHead !== undefined &&
+                      snapshot.startBlock > snapshot.safeHead
+                    ? 'Check deployment confirmations'
+                    : 'Load next block range'}
             </button>
           ) : null}
         </div>
@@ -1371,7 +1380,10 @@ export function PostFeedPanel({
         <p className="empty-feed">
           {snapshot.caughtUp
             ? 'No confirmed posts exist on this chain yet.'
-            : 'No posts were found in this range. More confirmed history remains.'}
+            : snapshot.safeHead !== undefined &&
+                snapshot.startBlock > snapshot.safeHead
+              ? 'The protocol deployment is not confirmed deeply enough to read its posts yet.'
+              : 'No posts were found in this range. More confirmed history remains.'}
         </p>
       ) : (
         <div className="feed-placeholder" aria-busy={loading}>

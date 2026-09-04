@@ -6,7 +6,7 @@ The first chain-derived screen is the global `PostPublished` feed. It is impleme
 
 The initial UI reads through the connected wallet's EIP-1193 provider. This makes the selected chain explicit and avoids shipping a vendor endpoint or API key. Before any cache or log work, the synchronizer requires the exact Lifeinvader v1 runtime code at the predetermined address; an ABI-compatible event from conflicting bytecode is never presented as protocol history. A later transport picker can provide a separate user-selected RPC without changing the feed synchronizer.
 
-The feed cursor starts at block zero because permissionless deterministic deployment can happen at a different height on every chain. Supported-chain metadata may later provide a verified deployment block as an optimization. Until then, progress is honest and resumable rather than assuming an unverified boundary.
+Before creating a fresh feed cursor, the client sequentially discovers and authenticates the first exact-v1-code block under the bounded process in [`indexing.md`](./indexing.md). The cursor begins at that verified deployment boundary. If deployment has not reached the twelve-block safe head, it starts after the last block proven empty and reports that confirmation is pending without requesting logs. An RPC that settles by rejecting historical code reads safely falls back to block zero; malformed state and local deadlines fail closed.
 
 Every chain uses a twelve-block confirmation depth, including chain ID `31337`. A familiar chain identifier is not proof that an endpoint is the expected local Anvil instance. Local integration tests mine the confirmation blocks explicitly.
 
@@ -16,11 +16,13 @@ One feed synchronization invocation permits exactly one bounded indexer range. C
 
 Each invocation follows one compare-and-swap cycle:
 
-1. Read the chain/filter-scoped cursor and newest cached page.
-2. Run one bounded `syncEventLogs` call through the selected provider.
-3. Atomically apply additions or rollback data to IndexedDB.
-4. Read and strictly decode at most 50 newest cached posts, accepting the snapshot only if its generation, revision, and cursor still identify the commit from step 3.
-5. Bracket a fresh chain-ID/head read with exact block-hash reads of the committed endpoint, rejecting the snapshot if that checkpoint changed or no longer has the twelve-block depth. The displayed head status is derived only from this final reading.
+1. Resolve the bounded protocol-history start and retain its anchored head fingerprint.
+2. Read the chain/filter/start-scoped cursor and newest cached page.
+3. Run one bounded `syncEventLogs` call through the selected provider.
+4. Reauthenticate the discovered ancestry. A replacement discards the result and retries discovery once before any log-cache mutation.
+5. Atomically apply additions or rollback data to IndexedDB.
+6. Read and strictly decode at most 50 newest cached posts, accepting the snapshot only if its generation, revision, and cursor still identify the commit from step 5.
+7. Bracket a fresh chain-ID/head read with exact block-hash reads of the committed endpoint, rejecting the snapshot if that checkpoint changed or no longer has the twelve-block depth. The displayed head status is derived only from this final reading.
 
 Changing provider or chain aborts active synchronization and confirmation monitoring and clears the rendered snapshot before starting the new scope. A late result from an old scope cannot replace the new view. Cross-tab cache conflicts—including a change between apply and the final read—are surfaced for an explicit retry rather than hidden behind an unbounded retry loop.
 

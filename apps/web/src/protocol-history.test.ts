@@ -4,6 +4,7 @@ import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import {
   discoverProtocolHistoryBoundary,
   isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
   resolveProtocolHistoryBoundary,
 } from './protocol-history'
 import { LIFEINVADER_INIT_CODE, PROTOCOL_ADDRESS } from './protocol'
@@ -348,6 +349,53 @@ describe('protocol history discovery', () => {
       discoverProtocolHistoryBoundary(provider, 1n, { timeoutMs: 0 }),
     ).rejects.toThrow(/invalid protocol history timeout/i)
     expect(provider.request).not.toHaveBeenCalled()
+  })
+})
+
+describe('protocol history anchor authentication', () => {
+  it('brackets an exact canonical fingerprint with selected-chain reads', async () => {
+    const prepared = providerWithDeployment()
+
+    await expect(
+      protocolHistoryAnchorIsCanonical(prepared.provider, 1n, {
+        blockHash: blockHash(100n),
+        blockNumber: 100n,
+      }),
+    ).resolves.toBe(true)
+    expect(prepared.requests).toEqual([
+      { method: 'eth_chainId' },
+      {
+        method: 'eth_getBlockByNumber',
+        params: ['0x64', false],
+      },
+      { method: 'eth_chainId' },
+    ])
+  })
+
+  it('reports a replaced fingerprint without accepting another chain', async () => {
+    const replaced = providerWithDeployment({
+      onBlock: (blockNumber) => ({
+        hash: blockHash(blockNumber, 'b'),
+        number: quantity(blockNumber),
+      }),
+    })
+    await expect(
+      protocolHistoryAnchorIsCanonical(replaced.provider, 1n, {
+        blockHash: blockHash(100n, 'a'),
+        blockNumber: 100n,
+      }),
+    ).resolves.toBe(false)
+
+    let chainReads = 0
+    const changed = providerWithDeployment({
+      onChainId: () => (chainReads++ === 0 ? '0x1' : '0x2'),
+    })
+    await expect(
+      protocolHistoryAnchorIsCanonical(changed.provider, 1n, {
+        blockHash: blockHash(100n),
+        blockNumber: 100n,
+      }),
+    ).rejects.toThrow(/another wallet chain/i)
   })
 })
 
