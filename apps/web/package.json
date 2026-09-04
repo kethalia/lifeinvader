@@ -11,6 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ipld/car": "5.4.7",
+    "ipfs-unixfs-importer": "16.1.5",
     "multiformats": "14.0.5",
     "react": "19.2.8",
     "react-dom": "19.2.8",
