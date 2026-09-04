@@ -221,6 +221,13 @@ the newest 100 retained events in chronological display order and labels IPFS
 values as availability-unproven commitments; it never fetches a gateway merely
 because a CID appears in a log.
 
+When a separate read RPC is selected, directory, selected-group membership,
+projection authentication, and selected-group message reads use its
+wallet-anchored provider. Replacing or clearing that provider aborts its work,
+hides its state, and clears the provider-scoped group selection. Group creation,
+join or leave events, message submission, ambiguous-hash recovery, and every
+receipt check remain on the original injected wallet provider.
+
 The Anvil integration covers create, join, leave, send, confirmed exact-group
 message and membership readback, and discovery of the immutable group
 definition. The interface uses those same browser-native helpers without a

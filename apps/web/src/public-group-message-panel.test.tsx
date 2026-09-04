@@ -212,6 +212,7 @@ describe('PublicGroupMessagePanel', () => {
 
   it('submits the exact group payload, locks writes, and clears only its confirmed draft', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const pending = deferred<Awaited<ReturnType<typeof sendGroupMessage>>>()
     const sendMessage = vi.fn<typeof sendGroupMessage>(
       async (
@@ -228,6 +229,7 @@ describe('PublicGroupMessagePanel', () => {
     )
     render(
       <PublicGroupMessagePanel
+        readProvider={readProvider}
         selectedGroupId={GROUP_ID}
         sendMessage={sendMessage}
         session={connectedSession(provider)}
@@ -253,6 +255,7 @@ describe('PublicGroupMessagePanel', () => {
       },
       expect.any(Function),
     )
+    expect(readProvider.request).not.toHaveBeenCalled()
     expect(
       screen.getByRole<HTMLButtonElement>('button', {
         name: /group message action pending/i,
@@ -314,6 +317,7 @@ describe('PublicGroupMessagePanel', () => {
 
   it('advances one exact-group range per click and withholds partial history', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const newer = publicGroupMessage('Newer group event.', 2n, {
       mediaCid: MEDIA_CID.bytes,
       sender: OTHER_ACCOUNT,
@@ -328,6 +332,7 @@ describe('PublicGroupMessagePanel', () => {
       .mockResolvedValueOnce(snapshot([newer, older]))
     render(
       <PublicGroupMessagePanel
+        readProvider={readProvider}
         selectedGroupId={GROUP_ID}
         session={connectedSession(provider)}
         synchronize={synchronize}
@@ -358,7 +363,7 @@ describe('PublicGroupMessagePanel', () => {
     expect(synchronize).toHaveBeenCalledTimes(2)
     expect(synchronize).toHaveBeenNthCalledWith(
       2,
-      provider,
+      readProvider,
       1n,
       GROUP_ID,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -480,6 +485,53 @@ describe('PublicGroupMessagePanel', () => {
     expect(
       screen.getByRole('button', { name: /load confirmed group messages/i }),
     ).toBeTruthy()
+  })
+
+  it('aborts and hides group-message state when the read provider changes', async () => {
+    const walletProvider = { request: vi.fn() } as Eip1193Provider
+    const firstReadProvider = { request: vi.fn() } as Eip1193Provider
+    const secondReadProvider = { request: vi.fn() } as Eip1193Provider
+    const pending = deferred<GroupMessageStreamSnapshot>()
+    const synchronize = vi
+      .fn<GroupMessageStreamSynchronizer>()
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValueOnce(snapshot([]))
+    const view = render(
+      <PublicGroupMessagePanel
+        readProvider={firstReadProvider}
+        selectedGroupId={GROUP_ID}
+        session={connectedSession(walletProvider)}
+        synchronize={synchronize}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed group messages/i }),
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(1))
+    const firstSignal = synchronize.mock.calls[0]?.[3]?.signal
+
+    view.rerender(
+      <PublicGroupMessagePanel
+        readProvider={secondReadProvider}
+        selectedGroupId={GROUP_ID}
+        session={connectedSession(walletProvider)}
+        synchronize={synchronize}
+      />,
+    )
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true))
+    expect(
+      screen.getByRole('button', { name: /load confirmed group messages/i }),
+    ).toBeTruthy()
+    await act(async () =>
+      pending.resolve(snapshot([publicGroupMessage('Stale message.', 1n)])),
+    )
+    expect(screen.queryByText('Stale message.')).toBeNull()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed group messages/i }),
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
+    expect(synchronize.mock.calls[1]?.[0]).toBe(secondReadProvider)
   })
 
   it('rejects a synchronizer result for a different group', async () => {

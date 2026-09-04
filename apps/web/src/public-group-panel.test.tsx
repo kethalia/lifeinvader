@@ -202,6 +202,7 @@ describe('PublicGroupPanel', () => {
 
   it('loads one directory range per action and selects a listed group', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const groups = [
       group(GROUP_B, 'Diamond Hands Department', {
         metadataCid: CID.bytes,
@@ -214,6 +215,7 @@ describe('PublicGroupPanel', () => {
       .mockResolvedValueOnce(directory(true, groups))
     render(
       <PublicGroupPanel
+        readProvider={readProvider}
         session={connectedSession(provider)}
         synchronizeDirectory={synchronizeDirectory}
       />,
@@ -227,7 +229,7 @@ describe('PublicGroupPanel', () => {
     ).toBeTruthy()
     expect(synchronizeDirectory).toHaveBeenCalledTimes(1)
     expect(synchronizeDirectory).toHaveBeenLastCalledWith(
-      provider,
+      readProvider,
       1n,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
@@ -442,6 +444,7 @@ describe('PublicGroupPanel', () => {
 
   it('steps exact-group catch-up and local projection before listing members', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const readProvider = { request: vi.fn() } as Eip1193Provider
     const synchronizeMembership = vi
       .fn()
       .mockResolvedValueOnce(membershipStream())
@@ -483,6 +486,7 @@ describe('PublicGroupPanel', () => {
           openProjection,
           synchronize: synchronizeMembership,
         }}
+        readProvider={readProvider}
         session={connectedSession(provider)}
       />,
     )
@@ -498,7 +502,7 @@ describe('PublicGroupPanel', () => {
       await screen.findByText(/More confirmed membership history remains/i),
     ).toBeTruthy()
     expect(synchronizeMembership).toHaveBeenLastCalledWith(
-      provider,
+      readProvider,
       1n,
       GROUP_A,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -551,16 +555,23 @@ describe('PublicGroupPanel', () => {
     expect(await screen.findByTitle(ACCOUNT_A)).toBeTruthy()
   })
 
-  it('aborts and ignores a directory result from an old wallet chain', async () => {
-    const provider = { request: vi.fn() } as Eip1193Provider
+  it('aborts old directory work and clears selection when the read provider changes', async () => {
+    const walletProvider = { request: vi.fn() } as Eip1193Provider
+    const firstReadProvider = { request: vi.fn() } as Eip1193Provider
+    const secondReadProvider = { request: vi.fn() } as Eip1193Provider
     const pending = deferred<GroupDirectorySnapshot>()
     const synchronizeDirectory = vi.fn().mockReturnValue(pending.promise)
     const { rerender } = render(
       <PublicGroupPanel
-        session={connectedSession(provider)}
+        readProvider={firstReadProvider}
+        session={connectedSession(walletProvider)}
         synchronizeDirectory={synchronizeDirectory}
       />,
     )
+    fireEvent.change(screen.getByLabelText('Group ID'), {
+      target: { value: GROUP_A.toString() },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Select group' }))
     fireEvent.click(
       screen.getByRole('button', { name: 'Load confirmed public groups' }),
     )
@@ -569,11 +580,14 @@ describe('PublicGroupPanel', () => {
 
     rerender(
       <PublicGroupPanel
-        session={connectedSession(provider, 2n)}
+        readProvider={secondReadProvider}
+        session={connectedSession(walletProvider)}
         synchronizeDirectory={synchronizeDirectory}
       />,
     )
     expect(signal.aborted).toBe(true)
+    expect(screen.queryByText('Selected public group #17.')).toBeNull()
+    expect(screen.getByLabelText<HTMLInputElement>('Group ID').value).toBe('')
     await act(async () =>
       pending.resolve(directory(true, [group(GROUP_A, 'Stale group')])),
     )
@@ -598,7 +612,7 @@ describe('PublicGroupPanel', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Load confirmed public groups' }),
     )
-    expect(await screen.findByText('RPC range refused.')).toBeTruthy()
+    expect(await screen.findByText(/RPC range refused\./)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Retry public groups' }))
 
     expect(await screen.findByText('No confirmed groups found.')).toBeTruthy()

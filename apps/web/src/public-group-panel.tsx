@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react'
 import type { Address } from 'viem'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
 import { GroupTransactionConsole } from './group-transaction-console'
@@ -203,10 +210,12 @@ function GroupDirectoryList({
 
 export function PublicGroupPanel({
   membershipOptions,
+  readProvider,
   session,
   synchronizeDirectory = synchronizeGroupDirectory,
 }: {
   membershipOptions?: UseGroupMembershipReadModelOptions
+  readProvider?: Eip1193Provider
   session: WalletSession
   synchronizeDirectory?: GroupDirectorySynchronizer
 }) {
@@ -217,12 +226,26 @@ export function PublicGroupPanel({
   const directoryController = useRef<AbortController | undefined>(undefined)
   const directoryBusy = useRef(false)
   const directorySequence = useRef(0)
+  const historySession = useMemo<WalletSession>(
+    () =>
+      readProvider !== undefined && readProvider !== session.provider
+        ? { ...session, provider: readProvider }
+        : session,
+    [readProvider, session],
+  )
+  const historySessionRef = useRef(historySession)
+  historySessionRef.current = historySession
   const connected =
     session.status === 'connected' &&
     session.provider !== undefined &&
     session.chainId !== undefined
-  const provider = session.provider
-  const chainId = session.chainId
+  const readsSelectedRpc =
+    connected && readProvider !== undefined && readProvider !== session.provider
+  const readSource = readsSelectedRpc
+    ? 'the selected read RPC'
+    : 'the wallet RPC'
+  const provider = historySession.provider
+  const chainId = historySession.chainId
   const directoryState =
     connected &&
     scopedDirectory !== undefined &&
@@ -238,7 +261,7 @@ export function PublicGroupPanel({
       ? selection.groupId
       : undefined
   const membership = useGroupMembershipReadModel(
-    session,
+    historySession,
     selectedGroupId,
     membershipOptions,
   )
@@ -332,15 +355,23 @@ export function PublicGroupPanel({
       })
   }, [chainId, connected, provider, synchronizeDirectory])
 
-  const selectGroup = useCallback(
-    (groupId: bigint) => {
-      if (!connected || provider === undefined || chainId === undefined) return
-      setSelection({ chainId, groupId, provider })
-      setGroupIdInput(groupId.toString())
-      setSelectionError(undefined)
-    },
-    [chainId, connected, provider],
-  )
+  const selectGroup = useCallback((groupId: bigint) => {
+    const current = historySessionRef.current
+    if (
+      current.status !== 'connected' ||
+      current.provider === undefined ||
+      current.chainId === undefined
+    ) {
+      return
+    }
+    setSelection({
+      chainId: current.chainId,
+      groupId,
+      provider: current.provider,
+    })
+    setGroupIdInput(groupId.toString())
+    setSelectionError(undefined)
+  }, [])
 
   const submitGroupId = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -421,7 +452,7 @@ export function PublicGroupPanel({
             id="group-directory-status"
           >
             {connected
-              ? directoryStatus(directoryState)
+              ? `${directoryStatus(directoryState)} Requests use ${readSource}.`
               : 'Connect a wallet to read confirmed public groups.'}
           </p>
           <button
@@ -498,10 +529,10 @@ export function PublicGroupPanel({
             id="group-membership-status"
           >
             {connected
-              ? membershipStatus(
+              ? `${membershipStatus(
                   membership.state,
                   selectedGroupId !== undefined,
-                )
+                )} Requests use ${readSource}.`
               : 'Connect a wallet to reconstruct public membership.'}
           </p>
           <button
@@ -575,6 +606,7 @@ export function PublicGroupPanel({
           session={session}
         />
         <PublicGroupMessagePanel
+          readProvider={readProvider}
           selectedGroupId={selectedGroupId}
           session={session}
         />
