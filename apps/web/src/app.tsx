@@ -15,6 +15,12 @@ const PublicGroupPanel = lazy(() =>
   })),
 )
 
+const PublicFollowPanel = lazy(() =>
+  import('./public-follow-panel').then((module) => ({
+    default: module.PublicFollowPanel,
+  })),
+)
+
 const principles = [
   {
     number: '01',
@@ -108,6 +114,19 @@ export function App({
         />
 
         <PublicMessagePanel session={walletSession.session} />
+
+        <Suspense
+          fallback={
+            <section
+              aria-live="polite"
+              className="public-follows public-follows-loading"
+            >
+              Loading the public relationship ledger…
+            </section>
+          }
+        >
+          <PublicFollowPanel session={walletSession.session} />
+        </Suspense>
 
         <Suspense
           fallback={

@@ -110,5 +110,16 @@ for the selected follower, followed account, and boolean state. Wallet
 rejections remain retryable, while an ambiguous provider failure preserves the
 possibility that the transaction was broadcast.
 
-The visible follow UI remains a separate milestone, so these chain-derived
-relationships and write controls are not yet shown in the app.
+## Visible account browser
+
+The lazy-loaded follow panel accepts any nonzero EVM account and exposes exact
+incoming or outgoing relationships only after the stream catches up and the
+complete local projection authenticates. Each explicit click performs one
+bounded RPC range or one bounded local projection step. Completed results are
+read in address-ordered pages of at most 25 relationships.
+
+The same panel lets the connected account publish an explicit follow or
+unfollow for another address. It keeps pending, ambiguous, unknown, reverted,
+and confirmed outcomes attached to the wallet context that created them. A
+confirmed write does not bypass the twelve-block read depth; the user must wait
+for confirmation and explicitly refresh the relevant account view.
