@@ -25,7 +25,7 @@ import type { WalletSession } from './wallet-session'
 
 export type ProfileProjectionReader = Pick<
   ProfileProjectionRun,
-  'advance' | 'close' | 'getProfile' | 'resumeState' | 'snapshot'
+  'advance' | 'close' | 'getProfile' | 'resumeState' | 'snapshot' | 'startBlock'
 >
 
 export type ProfileProjectionOpener = (
@@ -84,6 +84,11 @@ const defaultProjectionOpener: ProfileProjectionOpener = (
   resume,
 ) => openProfileProjectionRun(anchor, accounts, { resume })
 
+const defaultCacheResetter: ProfileStreamCacheResetter = (
+  chainId,
+  startBlock,
+) => resetProfileStreamCache(chainId, {}, startBlock)
+
 function stateForProjection(
   projection: ProfileProjectionRunSnapshot,
   resumed: boolean,
@@ -105,7 +110,7 @@ export function useProfileReadModel(
   session: WalletSession,
   {
     openProjection = defaultProjectionOpener,
-    resetCache = resetProfileStreamCache,
+    resetCache = defaultCacheResetter,
     resumeStore = defaultResumeStore,
     synchronize = synchronizeProfileStream,
   }: UseProfileReadModelOptions = {},
@@ -395,6 +400,7 @@ export function useProfileReadModel(
       })
       .catch(async (error: unknown) => {
         if (requestSequence.current !== requestId) return
+        const startBlock = active.run.startBlock
         active.run.close()
         activeProjection.current = undefined
         let message = describeRpcError(
@@ -404,7 +410,7 @@ export function useProfileReadModel(
         let retryable = true
         if (isDeferredEventCacheCorruptionError(error)) {
           try {
-            await resetCache(chainId)
+            await resetCache(chainId, startBlock)
             if (requestSequence.current !== requestId) return
             ignoreSavedResume.current = true
             try {

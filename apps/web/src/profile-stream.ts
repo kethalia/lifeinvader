@@ -24,9 +24,17 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import {
+  isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
+  resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
 
 export const PROFILE_EVENT_PAGE_SIZE = 200
 export const PROFILE_EVENT_START_BLOCK = 0n
+const MAX_PROTOCOL_HISTORY_SYNC_RETRIES = 1
 
 export type ProfileProjectionAnchor = {
   readonly chainId: bigint
@@ -44,6 +52,7 @@ export type ProfileStreamSnapshot = {
   recentProfiles: readonly ProfileSet[]
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type ProfileStreamStorageOptions = Pick<
@@ -52,6 +61,7 @@ export type ProfileStreamStorageOptions = Pick<
 >
 
 export type SynchronizeProfileStreamOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: ProfileStreamStorageOptions
 }
@@ -62,7 +72,10 @@ export type ProfileStreamSynchronizer = (
   options?: SynchronizeProfileStreamOptions,
 ) => Promise<ProfileStreamSnapshot>
 
-export type ProfileStreamCacheResetter = (chainId: bigint) => Promise<void>
+export type ProfileStreamCacheResetter = (
+  chainId: bigint,
+  startBlock: bigint,
+) => Promise<void>
 
 type IssuedProfileProjectionAnchor = {
   chainId: bigint
@@ -347,12 +360,13 @@ function sameCursor(first: EventCursor, second: EventCursor) {
 export async function resetProfileStreamCache(
   chainId: bigint,
   storage: ProfileStreamStorageOptions = {},
+  startBlock = PROFILE_EVENT_START_BLOCK,
 ) {
   const seed = createEventCursor({
     chainId,
     filter: PROFILE_SET_FILTER,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: PROFILE_EVENT_START_BLOCK,
+    startBlock,
   })
   const cache = await openEventCache({ ...storage, filter: PROFILE_SET_FILTER })
   try {
@@ -367,12 +381,6 @@ export const synchronizeProfileStream: ProfileStreamSynchronizer = async (
   chainId,
   options = {},
 ) => {
-  const seed = createEventCursor({
-    chainId,
-    filter: PROFILE_SET_FILTER,
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: PROFILE_EVENT_START_BLOCK,
-  })
   assertActive(options.signal)
   const interruption = new AbortController()
   let contextChanged = false
@@ -406,133 +414,183 @@ export const synchronizeProfileStream: ProfileStreamSynchronizer = async (
         'Verified Lifeinvader v1 is required before this chain can provide profiles.',
       )
     }
-    const cache = await openEventCache({
-      ...options.storage,
-      filter: PROFILE_SET_FILTER,
-    })
-    try {
-      assertContextActive()
-      let before = await cache.readLatest(seed, PROFILE_EVENT_PAGE_SIZE)
-      assertContextActive()
-      let cacheReset = before.reset
+    let historyRetries = 0
+    while (true) {
+      let historyAnchor: ProtocolBlockFingerprint | undefined
+      let startBlock = PROFILE_EVENT_START_BLOCK
       try {
-        decodeProfileLogs(before.logs)
-      } catch {
+        const boundary = await (
+          options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+        )(provider, chainId, {
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+          signal: interruption.signal,
+        })
         assertContextActive()
-        await cache.clear(seed)
-        assertContextActive()
-        before = await cache.readLatest(seed, PROFILE_EVENT_PAGE_SIZE)
-        assertContextActive()
-        cacheReset = true
-      }
-      const result = await syncEventLogs(
-        provider,
-        PROFILE_SET_FILTER,
-        before.cursor,
-        { maxRanges: 1, signal: interruption.signal },
-      )
-      assertContextActive()
-      decodeProfileLogs(result.logs)
-      await cache.apply(before, result)
-      assertContextActive()
-      const after = await cache.readLatest(seed, PROFILE_EVENT_PAGE_SIZE)
-      assertContextActive()
-      if (
-        after.generation !== before.generation ||
-        after.revision !== before.revision + 1n ||
-        !sameCursor(after.cursor, result.cursor)
-      ) {
-        throw new Error(
-          'The profile cache changed after synchronization. Retry the bounded range.',
-        )
-      }
-      let recentProfiles: readonly ProfileSet[]
-      try {
-        recentProfiles = decodeProfileLogs(after.logs)
+        historyAnchor = boundary.head
+        startBlock = boundary.startBlock
       } catch (error) {
         assertContextActive()
-        await cache.clear(seed)
-        assertContextActive()
-        throw error
+        if (!isProtocolHistoryUnavailableError(error)) throw error
       }
-      const indexedThrough =
-        after.cursor.nextBlock > after.cursor.startBlock
-          ? after.cursor.nextBlock - 1n
-          : undefined
-      const finalCheckpoint = after.cursor.checkpoints.at(-1)
-      if (finalCheckpoint) {
-        await assertCanonicalCheckpoint(
-          provider,
-          finalCheckpoint,
-          interruption.signal,
-        )
-        assertContextActive()
-      }
-      const finalHead = await readSelectedHead(
-        provider,
+      const seed = createEventCursor({
         chainId,
-        interruption.signal,
-      )
-      assertContextActive()
-      if (
-        indexedThrough !== undefined &&
-        (finalHead < indexedThrough ||
-          finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
-      ) {
-        throw new Error(
-          'The wallet head moved behind the confirmed profiles. Retry after the chain stabilizes.',
-        )
-      }
-      if (finalCheckpoint) {
-        await assertCanonicalCheckpoint(
+        filter: PROFILE_SET_FILTER,
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        startBlock,
+      })
+      const cache = await openEventCache({
+        ...options.storage,
+        filter: PROFILE_SET_FILTER,
+      })
+      try {
+        assertContextActive()
+        let before = await cache.readLatest(seed, PROFILE_EVENT_PAGE_SIZE)
+        assertContextActive()
+        let cacheReset = before.reset
+        try {
+          decodeProfileLogs(before.logs)
+        } catch {
+          assertContextActive()
+          await cache.clear(seed)
+          assertContextActive()
+          before = await cache.readLatest(seed, PROFILE_EVENT_PAGE_SIZE)
+          assertContextActive()
+          cacheReset = true
+        }
+        const result = await syncEventLogs(
           provider,
-          finalCheckpoint,
+          PROFILE_SET_FILTER,
+          before.cursor,
+          { maxRanges: 1, signal: interruption.signal },
+        )
+        assertContextActive()
+        decodeProfileLogs(result.logs)
+        // The discovered head commits to the ancestry that established
+        // startBlock. Do not persist a range if that ancestry was replaced.
+        if (
+          historyAnchor &&
+          !(await protocolHistoryAnchorIsCanonical(
+            provider,
+            chainId,
+            historyAnchor,
+            { signal: interruption.signal },
+          ))
+        ) {
+          assertContextActive()
+          if (historyRetries >= MAX_PROTOCOL_HISTORY_SYNC_RETRIES) {
+            throw new Error(
+              'The protocol history anchor kept changing during profile synchronization. Retry after the chain stabilizes.',
+            )
+          }
+          historyRetries += 1
+          continue
+        }
+        assertContextActive()
+        await cache.apply(before, result)
+        assertContextActive()
+        const after = await cache.readLatest(seed, PROFILE_EVENT_PAGE_SIZE)
+        assertContextActive()
+        if (
+          after.generation !== before.generation ||
+          after.revision !== before.revision + 1n ||
+          !sameCursor(after.cursor, result.cursor)
+        ) {
+          throw new Error(
+            'The profile cache changed after synchronization. Retry the bounded range.',
+          )
+        }
+        let recentProfiles: readonly ProfileSet[]
+        try {
+          recentProfiles = decodeProfileLogs(after.logs)
+        } catch (error) {
+          assertContextActive()
+          await cache.clear(seed)
+          assertContextActive()
+          throw error
+        }
+        const indexedThrough =
+          after.cursor.nextBlock > after.cursor.startBlock
+            ? after.cursor.nextBlock - 1n
+            : undefined
+        const finalCheckpoint = after.cursor.checkpoints.at(-1)
+        if (finalCheckpoint) {
+          await assertCanonicalCheckpoint(
+            provider,
+            finalCheckpoint,
+            interruption.signal,
+          )
+          assertContextActive()
+        }
+        const finalHead = await readSelectedHead(
+          provider,
+          chainId,
           interruption.signal,
         )
         assertContextActive()
+        if (
+          indexedThrough !== undefined &&
+          (finalHead < indexedThrough ||
+            finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
+        ) {
+          throw new Error(
+            'The wallet head moved behind the confirmed profiles. Retry after the chain stabilizes.',
+          )
+        }
+        if (finalCheckpoint) {
+          await assertCanonicalCheckpoint(
+            provider,
+            finalCheckpoint,
+            interruption.signal,
+          )
+          assertContextActive()
+        }
+        await assertSelectedChain(provider, chainId, interruption.signal)
+        assertContextActive()
+        const safeHead =
+          finalHead >= POST_FEED_CONFIRMATION_DEPTH
+            ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+            : undefined
+        const deploymentStillPending =
+          safeHead !== undefined && after.cursor.startBlock > safeHead
+        const caughtUp =
+          safeHead === undefined ||
+          (!deploymentStillPending && after.cursor.nextBlock > safeHead)
+        if (
+          caughtUp &&
+          safeHead !== undefined &&
+          finalCheckpoint?.blockNumber !== safeHead
+        ) {
+          throw new Error(
+            'The profile stream did not anchor at the confirmed safe head.',
+          )
+        }
+        const position = {
+          cursor: after.cursor,
+          generation: after.generation,
+          revision: after.revision,
+        }
+        return {
+          cacheReset: cacheReset || after.reset,
+          caughtUp,
+          head: finalHead,
+          indexedThrough,
+          projectionAnchor: caughtUp
+            ? issueProjectionAnchor(
+                provider,
+                chainId,
+                position,
+                finalHead,
+                safeHead,
+              )
+            : undefined,
+          recentProfiles,
+          safeHead,
+          scannedRanges: result.scannedRanges,
+          startBlock,
+        }
+      } finally {
+        cache.close()
       }
-      await assertSelectedChain(provider, chainId, interruption.signal)
-      assertContextActive()
-      const safeHead =
-        finalHead >= POST_FEED_CONFIRMATION_DEPTH
-          ? finalHead - POST_FEED_CONFIRMATION_DEPTH
-          : undefined
-      const caughtUp =
-        safeHead === undefined || after.cursor.nextBlock > safeHead
-      if (
-        caughtUp &&
-        safeHead !== undefined &&
-        finalCheckpoint?.blockNumber !== safeHead
-      ) {
-        throw new Error(
-          'The profile stream did not anchor at the confirmed safe head.',
-        )
-      }
-      const position = {
-        cursor: after.cursor,
-        generation: after.generation,
-        revision: after.revision,
-      }
-      return {
-        cacheReset: cacheReset || after.reset,
-        caughtUp,
-        head: finalHead,
-        indexedThrough,
-        projectionAnchor: caughtUp
-          ? issueProjectionAnchor(
-              provider,
-              chainId,
-              position,
-              finalHead,
-              safeHead,
-            )
-          : undefined,
-        recentProfiles,
-        safeHead,
-        scannedRanges: result.scannedRanges,
-      }
-    } finally {
-      cache.close()
     }
   } catch (error) {
     assertContextActive()

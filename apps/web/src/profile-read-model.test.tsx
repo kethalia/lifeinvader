@@ -63,6 +63,7 @@ function stream(
     recentProfiles: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -77,6 +78,7 @@ function projection(
     phase,
     profilesRetained: phase === 'profiles' ? 0n : 1n,
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 
@@ -101,6 +103,7 @@ function projectionRun(
     resumeState: RESUME,
     snapshot: projection('profiles'),
     ...overrides,
+    startBlock: overrides.startBlock ?? 0n,
   }
 }
 
@@ -324,6 +327,7 @@ describe('useProfileReadModel', () => {
       advance: vi
         .fn()
         .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+      startBlock: 123n,
     })
     const nextRun = projectionRun()
     const openProjection = vi
@@ -345,7 +349,7 @@ describe('useProfileReadModel', () => {
     act(() => result.current.advanceProjection())
     await waitFor(() => expect(result.current.state.phase).toBe('failed'))
 
-    expect(resetCache).toHaveBeenCalledWith(1n)
+    expect(resetCache).toHaveBeenCalledWith(1n, 123n)
     expect(store.remove).toHaveBeenCalledWith(1n, ACCOUNT_A)
     expect(result.current.state).toMatchObject({
       message: expect.stringMatching(/corrupt local profile cache was reset/i),

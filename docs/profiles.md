@@ -44,6 +44,22 @@ call, strictly decodes every returned event, and commits accepted ranges to the
 reorg-aware IndexedDB event cache. Its nominal 200-event recent page is only a
 preview, never a complete profile projection.
 
+Before creating a fresh cursor, the profile stream resolves the shared bounded
+protocol-history boundary. It verifies the exact v1 runtime-code transition
+with at most 64 sequential historical code probes and carries the discovered
+head fingerprint through the log request. If that ancestry changes before
+cache mutation, the result is discarded and discovery is retried once; a
+second replacement fails closed. A confirmed deployment starts the cursor at
+its deployment block. A newer deployment starts immediately after the last
+confirmed empty block and exposes no projection until the deployment reaches
+the twelve-block safe head.
+
+An RPC that explicitly cannot serve historical state falls back to block zero.
+A local discovery timeout, malformed history response, conflicting code,
+wallet-context change, or cancellation does not take that fallback. Reused
+in-memory boundaries are reauthenticated against their exact head hash, so a
+reset local fork with the same chain ID cannot inherit a stale cursor boundary.
+
 Once the global cursor reaches a twice-checked confirmed safe head, the stream
 can issue an immutable, provider-bound projection anchor containing the exact
 cache generation, revision, and cursor. Later publication of derived state must
@@ -76,9 +92,9 @@ versioned IndexedDB resume cache keyed by chain and account. On a later check,
 an accepted tuple scans only appended events; an unreadable or rejected tuple
 is discarded and rebuilt. Failure to save this performance hint never changes
 the confirmed result. If a bounded projection finds older event-cache
-corruption, the reader clears that profile scope through the indexed reset path
-before offering a retry. Malformed primary keys outside the canonical range keep
-the fixed cleanup cap. Wallet account, chain, or provider
+corruption, the reader clears that profile's discovered-start scope through the
+indexed reset path before offering a retry. Malformed primary keys outside the
+canonical range keep the fixed cleanup cap. Wallet account, chain, or provider
 changes abort and hide work from the old context. No hosted indexer or server
 database is part of the protocol.
 
