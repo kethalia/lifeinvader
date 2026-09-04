@@ -562,6 +562,7 @@ export function FilecoinStoragePanel({
     }
     let attemptContext = context
     let submittedHash: Hash | undefined
+    let quoteRefreshCompleted = false
     let walletRequestOpened = false
     setFundingAcknowledged(false)
     setFundingState({ context, kind: 'refreshing' })
@@ -574,6 +575,7 @@ export function FilecoinStoragePanel({
           expectedChainId: context.chainId,
           signal: controller.signal,
         })
+        quoteRefreshCompleted = true
         attemptContext = { ...context, quote: freshQuote }
         if (
           controller.signal.aborted ||
@@ -638,6 +640,13 @@ export function FilecoinStoragePanel({
         )
       } catch (error) {
         if (operationId !== fundingSequence.current) return
+        if (
+          !quoteRefreshCompleted &&
+          !controller.signal.aborted &&
+          fundingContextMatchesSession(context, sessionRef.current)
+        ) {
+          setQuoteState({ kind: 'complete', quote: context.quote })
+        }
         const message =
           controller.signal.aborted && !submittedHash
             ? 'The wallet or prepared CAR changed before funding completed.'

@@ -635,6 +635,57 @@ describe('FilecoinStoragePanel', () => {
     ).toBe(true)
   })
 
+  it('restores the reviewed quote when the pre-funding refresh fails', async () => {
+    const readyQuote = {
+      ...quote,
+      depositNeeded: 0n,
+      needsServiceApproval: false,
+      ready: true,
+    }
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>()
+    quoteStorage
+      .mockResolvedValueOnce(quote)
+      .mockRejectedValueOnce(new Error('Temporary quote failure.'))
+      .mockResolvedValueOnce(quote)
+      .mockResolvedValueOnce(readyQuote)
+    const fundStorage = vi.fn<FilecoinStorageFunder>(async () => receipt)
+    await renderFundingQuote({ fundStorage, quoteStorage })
+
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /temporary quote failure/i,
+    )
+    expect(screen.getByText('0.013 USDFC')).toBeTruthy()
+    expect(
+      (
+        screen.getByRole('button', {
+          name: /refresh one-copy quote/i,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false)
+
+    const fundButton = screen.getByRole('button', {
+      name: /refresh quote and fund/i,
+    }) as HTMLButtonElement
+    expect(fundButton.disabled).toBe(true)
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(fundButton)
+
+    await waitFor(() => expect(fundStorage).toHaveBeenCalledTimes(1))
+    expect(
+      await screen.findByText(/account funding confirmed in block 42/i),
+    ).toBeTruthy()
+    await waitFor(() => expect(quoteStorage).toHaveBeenCalledTimes(4))
+  })
+
   it('distinguishes rejection from an ambiguous no-hash submission', async () => {
     const rejectedQuote = vi.fn<FilecoinStorageQuoter>(async () => quote)
     const rejectedFund = vi.fn<FilecoinStorageFunder>(async () => {
