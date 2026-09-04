@@ -282,7 +282,7 @@ describe('PostFeedPanel', () => {
       .mockResolvedValue(
         snapshot([
           post('', 1n, rawMediaCid.bytes),
-          post('DAG media needs block traversal.', 2n, mediaCid.bytes),
+          post('Prepared UnixFS media.', 2n, mediaCid.bytes),
           post('Bad attachment bytes.', 3n, '0x0102'),
         ]),
       )
@@ -300,7 +300,6 @@ describe('PostFeedPanel', () => {
     expect(screen.getAllByText(/availability is not guaranteed/i)).toHaveLength(
       2,
     )
-    expect(screen.getByText(/verifies raw blocks only/i)).toBeTruthy()
     expect(screen.getByText(/invalid media CID bytes/i)).toBeTruthy()
     expect(screen.getByText('0x0102')).toBeTruthy()
     expect(retrieveMedia).not.toHaveBeenCalled()
@@ -329,9 +328,19 @@ describe('PostFeedPanel', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Load media for post #1' }),
     )
-    expect(retrieveMedia).toHaveBeenCalledWith(
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load media for post #2' }),
+    )
+    expect(retrieveMedia).toHaveBeenNthCalledWith(
+      1,
       'https://gateway.example/ipfs/{cid}',
       rawMediaCid,
+      { signal: expect.any(AbortSignal) },
+    )
+    expect(retrieveMedia).toHaveBeenNthCalledWith(
+      2,
+      'https://gateway.example/ipfs/{cid}',
+      mediaCid,
       { signal: expect.any(AbortSignal) },
     )
   })

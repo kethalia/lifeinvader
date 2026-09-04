@@ -164,10 +164,11 @@ export function MediaViewer({
       <span>IPFS media commitment · {decoded.cid.codec}</span>
       <code>{decoded.cid.text}</code>
       <span>Address only; availability is not guaranteed.</span>
-      {decoded.cid.codec !== 'raw' ? (
+      {decoded.cid.codec !== 'raw' && decoded.cid.codec !== 'dag-pb' ? (
         <span>
-          Not fetched: this first renderer verifies raw blocks only. DAG-based
-          media needs trustless block traversal before it can be displayed.
+          Not fetched: verified display supports raw blocks and
+          Lifeinvader-prepared dag-pb files only. Structured DAG media needs a
+          separate trustless traversal.
         </span>
       ) : !gatewayTemplate ? (
         <span>Configure an opt-in gateway above to retrieve this media.</span>
@@ -190,8 +191,8 @@ export function MediaViewer({
           )}
           <p>
             Retrieved and matched {formatBytes(state.byteLength)} to the
-            on-chain raw CID as {state.mimeType}. This tab holds a temporary
-            local copy; the gateway and storage remain independent.
+            on-chain CID as {state.mimeType}. This tab holds a temporary local
+            copy; the gateway and storage remain independent.
           </p>
           <button onClick={unload} type="button">
             Unload {label}

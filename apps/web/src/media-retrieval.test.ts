@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildIpfsGatewayUrl, parseIpfsGatewayTemplate } from './ipfs-gateway'
 import { parseMediaCid } from './media-cid'
 import { MAX_RETRIEVED_MEDIA_BYTES, retrieveIpfsMedia } from './media-retrieval'
+import { preparePaidMediaCar } from './paid-media-car'
 
 const CID = parseMediaCid(
   'bafkreiexaqucef7aglg4zgvbw5mmu6tok2xyji3w37z7hqk665zfxzu6ze',
@@ -55,6 +56,22 @@ function ftyp(majorBrand: string, compatibleBrands: string[] = []) {
     bytes.set(new TextEncoder().encode(brand), 16 + index * 4)
   })
   return bytes
+}
+
+function mediaFile(bytes: Uint8Array) {
+  const snapshot = new Uint8Array(bytes)
+  return {
+    name: 'evidence.png',
+    size: snapshot.byteLength,
+    stream: () =>
+      new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+          controller.enqueue(snapshot)
+          controller.close()
+        },
+      }),
+    type: 'image/png',
+  }
 }
 
 afterEach(() => {
@@ -187,16 +204,48 @@ describe('IPFS media retrieval', () => {
     ).rejects.toThrow(/bytes do not match the on-chain raw CID/i)
   })
 
-  it('refuses DAG media without contacting the gateway', async () => {
-    const dagCid = parseMediaCid(
-      'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
+  it('reconstructs the deterministic UnixFS root before displaying dag-pb media', async () => {
+    const png = new Uint8Array(1024 * 1024 + 1)
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const prepared = await preparePaidMediaCar(mediaFile(png))
+    expect(prepared.mediaCid.codec).toBe('dag-pb')
+    expect(prepared.mediaCid.text).toBe(
+      'bafybeifciz62f3h2gqwddaxkoesbmqecgkphfwhba4tjxm6edztg3hd6hu',
+    )
+
+    const result = await retrieveIpfsMedia(
+      'https://gateway.example/ipfs/{cid}',
+      prepared.mediaCid,
+      { fetcher: vi.fn(async () => response([png])) },
+    )
+    expect(result).toMatchObject({
+      byteLength: png.byteLength,
+      kind: 'image',
+      mimeType: 'image/png',
+      verified: true,
+    })
+
+    const substituted = new Uint8Array(png)
+    substituted[substituted.byteLength - 1] = 1
+    await expect(
+      retrieveIpfsMedia(
+        'https://gateway.example/ipfs/{cid}',
+        prepared.mediaCid,
+        { fetcher: vi.fn(async () => response([substituted])) },
+      ),
+    ).rejects.toThrow(/do not reproduce the on-chain deterministic UnixFS CID/i)
+  })
+
+  it('refuses structured DAG media without contacting the gateway', async () => {
+    const structuredCid = parseMediaCid(
+      'bafyreidr22rx7ja2xkdytbupiw7e36uj6cwyd2j2zkpixdy35cv3vfzmuq',
     )!
     const fetcher = vi.fn()
     await expect(
-      retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', dagCid, {
+      retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', structuredCid, {
         fetcher,
       }),
-    ).rejects.toThrow(/supports raw CIDs only/i)
+    ).rejects.toThrow(/Lifeinvader-prepared dag-pb files only/i)
     expect(fetcher).not.toHaveBeenCalled()
   })
 
@@ -210,7 +259,7 @@ describe('IPFS media retrieval', () => {
         { ...first, bytes: second.bytes },
         { fetcher },
       ),
-    ).rejects.toThrow(/does not identify a raw block/i)
+    ).rejects.toThrow(/does not match its declared codec/i)
     expect(fetcher).not.toHaveBeenCalled()
   })
 

@@ -3,6 +3,7 @@ import { sha256 } from 'multiformats/hashes/sha2'
 import { hexToBytes } from 'viem'
 import { buildIpfsGatewayUrl } from './ipfs-gateway'
 import type { MediaCid } from './media-cid'
+import { LIFEINVADER_UNIXFS_PROFILE } from './media-unixfs'
 
 export const MAX_RETRIEVED_MEDIA_BYTES = 32 * 1024 * 1024
 export const MEDIA_RETRIEVAL_TIMEOUT_MS = 30_000
@@ -121,10 +122,10 @@ function inspectMediaType(bytes: Uint8Array): {
   )
 }
 
-function parseRawCid(cid: MediaCid) {
-  if (cid.codec !== 'raw') {
+function parseRetrievableCid(cid: MediaCid) {
+  if (cid.codec !== 'raw' && cid.codec !== 'dag-pb') {
     throw retrievalError(
-      'verified retrieval currently supports raw CIDs only; DAG-based media needs a trustless block traversal.',
+      'verified retrieval supports raw CIDs and Lifeinvader-prepared dag-pb files only.',
     )
   }
   let expected: CID
@@ -137,12 +138,14 @@ function parseRawCid(cid: MediaCid) {
   }
   if (
     expected.version !== 1 ||
-    expected.code !== 0x55 ||
+    expected.code !== (cid.codec === 'raw' ? 0x55 : 0x70) ||
     expected.multihash.code !== 0x12 ||
     expected.multihash.digest.byteLength !== 32 ||
     !expected.equals(textual)
   ) {
-    throw retrievalError('the media CID does not identify a raw block.')
+    throw retrievalError(
+      'the media CID does not match its declared codec or supported hash.',
+    )
   }
   return expected
 }
@@ -163,6 +166,46 @@ async function verifyRawCid(bytes: Uint8Array, expected: CID) {
     )
   ) {
     throw retrievalError('the gateway bytes do not match the on-chain raw CID.')
+  }
+}
+
+async function verifyDeterministicUnixfsCid(
+  bytes: Uint8Array,
+  expected: CID,
+  signal: AbortSignal,
+) {
+  signal.throwIfAborted()
+  let actual: CID
+  try {
+    const { importByteStream } = await import('ipfs-unixfs-importer')
+    signal.throwIfAborted()
+    const imported = await importByteStream(
+      (async function* () {
+        signal.throwIfAborted()
+        yield bytes
+        signal.throwIfAborted()
+      })(),
+      {
+        async put(cid) {
+          signal.throwIfAborted()
+          return cid
+        },
+      },
+      { profile: LIFEINVADER_UNIXFS_PROFILE },
+    )
+    signal.throwIfAborted()
+    actual = CID.decode(imported.cid.bytes)
+  } catch (cause) {
+    signal.throwIfAborted()
+    throw retrievalError(
+      'the response could not be reconstructed with the Lifeinvader UnixFS profile.',
+      { cause: cause instanceof Error ? cause : undefined },
+    )
+  }
+  if (!actual.equals(expected)) {
+    throw retrievalError(
+      'the gateway bytes do not reproduce the on-chain deterministic UnixFS CID.',
+    )
   }
 }
 
@@ -249,7 +292,7 @@ export const retrieveIpfsMedia: MediaRetriever = async (
   if (options.signal?.aborted) {
     throw retrievalError('the request was cancelled.')
   }
-  const expectedCid = parseRawCid(cid)
+  const expectedCid = parseRetrievableCid(cid)
 
   const controller = new AbortController()
   let timedOut = false
@@ -290,7 +333,11 @@ export const retrieveIpfsMedia: MediaRetriever = async (
       controller.abort(),
     )
     controller.signal.throwIfAborted()
-    await verifyRawCid(bytes, expectedCid)
+    if (cid.codec === 'raw') {
+      await verifyRawCid(bytes, expectedCid)
+    } else {
+      await verifyDeterministicUnixfsCid(bytes, expectedCid, controller.signal)
+    }
     controller.signal.throwIfAborted()
     const mediaType = inspectMediaType(bytes)
     return {

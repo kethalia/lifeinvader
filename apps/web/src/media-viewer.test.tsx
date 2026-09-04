@@ -8,6 +8,9 @@ const CID = parseMediaCid(
   'bafkreiexaqucef7aglg4zgvbw5mmu6tok2xyji3w37z7hqk665zfxzu6ze',
 )!
 const DAG_CID = parseMediaCid('QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C')!
+const STRUCTURED_DAG_CID = parseMediaCid(
+  'bafyreidr22rx7ja2xkdytbupiw7e36uj6cwyd2j2zkpixdy35cv3vfzmuq',
+)!
 const GATEWAY = 'https://gateway.example/ipfs/{cid}'
 
 function image(): RetrievedMedia {
@@ -97,7 +100,7 @@ describe('MediaViewer', () => {
     expect(screen.queryByRole('img')).toBeNull()
   })
 
-  it('does not send DAG media to an unverifiable path gateway', () => {
+  it('offers deterministic dag-pb media only after a click', () => {
     const retrieve = vi.fn()
     render(
       <MediaViewer
@@ -107,7 +110,28 @@ describe('MediaViewer', () => {
         value={DAG_CID.bytes}
       />,
     )
-    expect(screen.getByText(/verifies raw blocks only/i)).toBeTruthy()
+    expect(retrieve).not.toHaveBeenCalled()
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load media for post #8' }),
+    )
+    expect(retrieve).toHaveBeenCalledWith(GATEWAY, DAG_CID, {
+      signal: expect.any(AbortSignal),
+    })
+  })
+
+  it('does not send structured DAG media to a path gateway', () => {
+    const retrieve = vi.fn()
+    render(
+      <MediaViewer
+        gatewayTemplate={GATEWAY}
+        label="media for post #10"
+        retrieve={retrieve}
+        value={STRUCTURED_DAG_CID.bytes}
+      />,
+    )
+    expect(
+      screen.getByText(/structured DAG media needs a separate/i),
+    ).toBeTruthy()
     expect(screen.queryByRole('button', { name: /load media/i })).toBeNull()
     expect(retrieve).not.toHaveBeenCalled()
   })
