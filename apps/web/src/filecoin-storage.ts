@@ -14,6 +14,7 @@ export type FilecoinStorageContract =
   | 'filecoinPay'
   | 'fwss'
   | 'fwssView'
+  | 'multicall3'
   | 'pdp'
   | 'serviceProviderRegistry'
   | 'sessionKeyRegistry'
@@ -43,6 +44,7 @@ export const FILECOIN_STORAGE_NETWORKS = [
       filecoinPay: '0x23b1e018F08BB982348b15a86ee926eEBf7F4DAa',
       fwss: '0x8408502033C418E1bbC97cE9ac48E5528F371A9f',
       fwssView: '0xcf184Ab1FD8D1a563054d30Aa1fFb08136998172',
+      multicall3: '0xcA11bde05977b3631167028862bE2a173976CA11',
       pdp: '0xBADd0B92C1c71d02E7d520f64c0876538fa2557F',
       serviceProviderRegistry: '0xf55dDbf63F1b55c3F1D4FA7e339a68AB7b64A5eB',
       sessionKeyRegistry: '0x74FD50525A958aF5d484601E252271f9625231aB',
@@ -59,6 +61,7 @@ export const FILECOIN_STORAGE_NETWORKS = [
       filecoinPay: '0x09a0fDc2723fAd1A7b8e3e00eE5DF73841df55a0',
       fwss: '0x02925630df557F957f70E112bA06e50965417CA0',
       fwssView: '0x1B68d64f01bAa42014B9774605867BF4eDC0320f',
+      multicall3: '0xcA11bde05977b3631167028862bE2a173976CA11',
       pdp: '0x85e366Cf9DD2c0aE37E963d9556F5f4718d6417C',
       serviceProviderRegistry: '0x839e5c9988e4e9977d40708d0094103c0839Ac9D',
       sessionKeyRegistry: '0x518411c2062E119Aaf7A8B12A2eDf9a939347655',
@@ -77,6 +80,7 @@ export const FILECOIN_STORAGE_CONTRACT_LABELS: Readonly<
   filecoinPay: 'Filecoin Pay',
   fwss: 'warm storage',
   fwssView: 'warm-storage view',
+  multicall3: 'Multicall3',
   pdp: 'PDP verifier',
   serviceProviderRegistry: 'service-provider registry',
   sessionKeyRegistry: 'session-key registry',
@@ -85,7 +89,7 @@ export const FILECOIN_STORAGE_CONTRACT_LABELS: Readonly<
 
 type FwssAddressContract = Exclude<
   FilecoinStorageContract,
-  'endorsements' | 'fwss'
+  'endorsements' | 'fwss' | 'multicall3'
 >
 
 const FWSS_ADDRESS_ABI = [

@@ -661,17 +661,30 @@ export async function createTransactionGuard(
       accountChanged = true
     }
   }
-  provider.on?.('chainChanged', handleChainChanged)
-  provider.on?.('disconnect', handleChainChanged)
-  provider.on?.('accountsChanged', handleAccountsChanged)
+  const addProviderListener = provider.on?.bind(provider)
+  const removeProviderListener = provider.removeListener?.bind(provider)
+  if (Boolean(addProviderListener) !== Boolean(removeProviderListener)) {
+    throw new Error(
+      'The wallet provider must expose both event subscription and cleanup methods.',
+    )
+  }
+  const registeredListeners: {
+    event: string
+    listener: (...args: unknown[]) => void
+  }[] = []
   const assertUnchanged = () => {
     if (chainChanged) throw chainChangedError()
     if (accountChanged) throw accountChangedError()
   }
   const release = () => {
-    provider.removeListener?.('chainChanged', handleChainChanged)
-    provider.removeListener?.('disconnect', handleChainChanged)
-    provider.removeListener?.('accountsChanged', handleAccountsChanged)
+    if (!removeProviderListener) return
+    for (const { event, listener } of registeredListeners.splice(0)) {
+      try {
+        removeProviderListener(event, listener)
+      } catch {
+        // A nonstandard provider cleanup failure must not mask the outcome.
+      }
+    }
   }
   const assertChain = async () => {
     let currentChainId: bigint
@@ -713,6 +726,17 @@ export async function createTransactionGuard(
     assertUnchanged()
   }
   try {
+    if (addProviderListener && removeProviderListener) {
+      for (const [event, listener] of [
+        ['chainChanged', handleChainChanged],
+        ['disconnect', handleChainChanged],
+        ['accountsChanged', handleAccountsChanged],
+      ] as const) {
+        // Record first because a nonstandard provider can attach and then throw.
+        registeredListeners.push({ event, listener })
+        addProviderListener(event, listener)
+      }
+    }
     await assertSubmission()
   } catch (error) {
     release()
@@ -1193,6 +1217,7 @@ export async function waitForTransactionReceipt(
   hash: Hash,
   options: {
     assertCurrentChain?: () => Promise<void>
+    assertReceiptLogs?: (logs: unknown, receipt: TransactionReceipt) => void
     assertUnchanged?: () => void
     expectedDirectMessage?: ExpectedDirectMessage
     expectedFollow?: ExpectedFollow
@@ -1273,6 +1298,9 @@ export async function waitForTransactionReceipt(
           }
           if (!reverted && options.expectedPostAction) {
             assertExpectedPostAction(logs, options.expectedPostAction, receipt)
+          }
+          if (!reverted && options.assertReceiptLogs) {
+            options.assertReceiptLogs(logs, receipt)
           }
           if (!reverted && options.expectedProfile) {
             assertExpectedProfile(logs, options.expectedProfile, receipt)
