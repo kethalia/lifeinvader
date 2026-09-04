@@ -978,6 +978,7 @@ export async function fundFilecoinStorage(
       method === 'eth_chainId'
     ) {
       let providerRequest: ProviderRequest = { method }
+      let validatedSimulationData: Hex | undefined
       if (method === 'eth_call') {
         const validatedRead = validateReadCall(
           request,
@@ -986,9 +987,7 @@ export async function fundFilecoinStorage(
           permitSignature,
         )
         providerRequest = validatedRead.request
-        if (validatedRead.simulatedData) {
-          simulatedData = validatedRead.simulatedData
-        }
+        validatedSimulationData = validatedRead.simulatedData
       } else if (
         request.params !== undefined &&
         (!Array.isArray(request.params) || request.params.length !== 0)
@@ -1005,6 +1004,9 @@ export async function fundFilecoinStorage(
         options.signal,
         () => fundingError('the funding request was cancelled.'),
       )
+      if (validatedSimulationData) {
+        simulatedData = validatedSimulationData
+      }
       if (method === 'eth_chainId' && parseChainId(result) !== plan.chainId) {
         throw fundingError('the wallet chain changed during funding.')
       }

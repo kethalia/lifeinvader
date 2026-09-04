@@ -619,6 +619,66 @@ describe('Filecoin storage funding transport', () => {
     ).toHaveLength(0)
   })
 
+  it('does not record a simulation until its RPC call succeeds', async () => {
+    const quote = storageQuote({ depositAmount: 0n, needsApproval: true })
+    const plan = planFilecoinStorageFunding(
+      quote,
+      ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID,
+    )
+    const wallet = walletProvider({ logs: fundingLogs(plan) })
+    let rejectSimulation!: (reason: Error) => void
+    const pendingSimulation = new Promise<never>((_, reject) => {
+      rejectSimulation = reject
+    })
+    const provider: Eip1193Provider = {
+      ...wallet.provider,
+      request: async (request) => {
+        if (request.method === 'eth_call') {
+          return await pendingSimulation
+        }
+        return await wallet.provider.request(request)
+      },
+    }
+    const data = fundingData(plan)
+
+    await expect(
+      fundFilecoinStorage(provider, quote, {
+        ...fundingOptions(plan, async ({ request }) => {
+          const simulation = request({
+            method: 'eth_call',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+              'latest',
+            ],
+          })
+          try {
+            return await request({
+              method: 'eth_sendTransaction',
+              params: [
+                {
+                  data,
+                  from: plan.account,
+                  to: plan.network.contracts.filecoinPay,
+                },
+              ],
+            })
+          } finally {
+            rejectSimulation(new Error('Simulation failed.'))
+            await simulation.catch(() => undefined)
+          }
+        }),
+      }),
+    ).rejects.toThrow(/did not simulate/i)
+    expect(
+      wallet.requests.filter(({ method }) => method === 'eth_sendTransaction'),
+    ).toHaveLength(0)
+  })
+
   it('rejects a stale simulation block before forwarding the read', async () => {
     const quote = storageQuote({ depositAmount: 0n, needsApproval: true })
     const plan = planFilecoinStorageFunding(
