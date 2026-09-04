@@ -761,6 +761,251 @@ h1 span {
   color: var(--ink);
 }
 
+.public-follows {
+  padding: 5rem 0 6rem;
+  border-top: 1px solid var(--line);
+}
+
+.public-follows-loading {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.public-follows-heading {
+  display: grid;
+  margin-bottom: 3rem;
+  align-items: end;
+  gap: 3rem;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+}
+
+.public-follows-heading h2 {
+  margin: 0;
+  font-size: clamp(2.7rem, 6vw, 6.5rem);
+  letter-spacing: -0.06em;
+  line-height: 0.9;
+}
+
+.follow-public-warning {
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--ink);
+  color: white;
+  background: var(--red);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+.follow-console {
+  display: grid;
+  border-top: 1px solid var(--ink);
+  border-left: 1px solid var(--ink);
+  grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
+}
+
+.follow-console > div {
+  min-width: 0;
+  padding: 1.5rem;
+  border-right: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+
+.follow-console h3 {
+  margin: 0 0 1.5rem;
+  font-size: 1.25rem;
+  letter-spacing: -0.025em;
+}
+
+.follow-console label,
+.follow-direction legend {
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.follow-console input {
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.34);
+  font: inherit;
+}
+
+.follow-console input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.follow-console button {
+  min-height: 42px;
+  width: fit-content;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--ink);
+  color: var(--paper);
+  background: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  text-align: left;
+}
+
+.follow-console button:hover:not(:disabled),
+.follow-console button:focus-visible,
+.follow-console button[aria-pressed='true'] {
+  color: var(--ink);
+  background: var(--acid);
+}
+
+.follow-console button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.follow-help,
+.follow-read-status,
+.follow-write-disclosure,
+.follow-connection-note,
+.follow-attempt,
+.follow-completion,
+.follow-problem,
+.follow-page-error,
+.follow-list-heading,
+.follow-relationship-list,
+.follow-empty-result,
+.follow-pagination {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.follow-help {
+  min-height: 2.2rem;
+  margin: 0.5rem 0 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.follow-direction {
+  display: flex;
+  margin: 1.5rem 0 1rem;
+  padding: 0;
+  align-items: center;
+  gap: 0.6rem;
+  border: 0;
+  flex-wrap: wrap;
+}
+
+.follow-direction legend {
+  width: 100%;
+  margin-bottom: 0.25rem;
+}
+
+.follow-read-status,
+.follow-write-disclosure,
+.follow-connection-note {
+  margin: 1rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--ink);
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.follow-write-actions,
+.follow-recovery-actions,
+.follow-pagination {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.follow-list-heading {
+  display: flex;
+  margin-top: 1.5rem;
+  padding: 0.75rem 0;
+  justify-content: space-between;
+  gap: 1rem;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+
+.follow-relationship-list {
+  display: grid;
+  margin: 1rem 0;
+  padding: 0;
+  gap: 0.6rem;
+  list-style: none;
+}
+
+.follow-relationship-list li {
+  display: flex;
+  padding: 0.85rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--ink);
+}
+
+.follow-relationship-list li > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+}
+
+.follow-relationship-list code {
+  overflow-wrap: anywhere;
+}
+
+.follow-relationship-list span {
+  color: rgba(25, 24, 23, 0.68);
+}
+
+.follow-empty-result,
+.follow-page-error,
+.follow-attempt,
+.follow-completion,
+.follow-problem {
+  margin: 1rem 0 0;
+  padding: 1rem;
+  border: 1px solid currentColor;
+  overflow-wrap: anywhere;
+}
+
+.follow-page-error,
+.follow-problem,
+.follow-attempt-error {
+  color: var(--red);
+  font-weight: 800;
+}
+
+.follow-attempt {
+  background: rgba(232, 255, 0, 0.32);
+}
+
+.follow-attempt p,
+.follow-completion {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.follow-attempt-error {
+  margin-top: 0.6rem !important;
+}
+
+.follow-recovery-actions,
+.follow-pagination {
+  margin-top: 0.75rem;
+}
+
+.follow-completion {
+  background: var(--acid);
+  font-weight: 800;
+}
+
 .public-groups {
   padding: 5rem 0 6rem;
   border-top: 1px solid var(--line);
@@ -1662,6 +1907,8 @@ footer p {
   .wallet-console,
   .public-messages-heading,
   .message-console,
+  .public-follows-heading,
+  .follow-console,
   .public-groups-heading,
   .group-browser,
   .group-transaction-intro,
@@ -1711,6 +1958,11 @@ footer p {
   }
 
   .group-selector > div,
+  .follow-list-heading,
+  .follow-relationship-list li,
+  .follow-pagination,
+  .follow-write-actions,
+  .follow-recovery-actions,
   .group-list-heading,
   .group-member-list li,
   .group-member-pagination,
