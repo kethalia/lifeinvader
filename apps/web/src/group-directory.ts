@@ -335,6 +335,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       )
     }
     let historyAnchor: ProtocolBlockFingerprint | undefined
+    let historyBoundaryKind: 'confirmed' | 'pending-confirmation' | undefined
     let startBlock = GROUP_DIRECTORY_START_BLOCK
     try {
       const boundary = await (
@@ -345,6 +346,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       })
       assertContextActive()
       historyAnchor = boundary.head
+      historyBoundaryKind = boundary.kind
       startBlock = boundary.startBlock
     } catch (error) {
       assertContextActive()
@@ -458,10 +460,11 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
           ? finalHead - POST_FEED_CONFIRMATION_DEPTH
           : undefined
       const deploymentStillPending =
-        safeHead !== undefined && after.cursor.startBlock > safeHead
+        historyBoundaryKind === 'pending-confirmation' &&
+        (safeHead === undefined || after.cursor.startBlock > safeHead)
       const caughtUp =
-        safeHead === undefined ||
-        (!deploymentStillPending && after.cursor.nextBlock > safeHead)
+        !deploymentStillPending &&
+        (safeHead === undefined || after.cursor.nextBlock > safeHead)
       const confirmedNextGroupId =
         caughtUp && safeHead !== undefined
           ? await readNextGroupId(provider, safeHead, interruption.signal)

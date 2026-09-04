@@ -312,6 +312,37 @@ describe('group-directory stream synchronization', () => {
     )
   })
 
+  it('does not turn a transient history RPC failure into a genesis scan', async () => {
+    const transientError = Object.assign(new Error('rate limit exceeded'), {
+      code: -32_005,
+    })
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(20n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, block] = params as [string, string]
+          if (block === 'latest' || block === toHex(20n)) {
+            return PROTOCOL_RUNTIME_CODE
+          }
+          throw transientError
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, { storage: storage() }),
+    ).rejects.toBe(transientError)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
   it('discards one fetched range when the history anchor was replaced', async () => {
     const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
     const resolveHistoryBoundary = vi.fn(async () => historyBoundary(3_000n))
@@ -378,6 +409,53 @@ describe('group-directory stream synchronization', () => {
       safeHead: 4_988n,
       scannedRanges: 0,
       startBlock: 4_990n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
+  })
+
+  it('stays pending before the chain has a confirmed head', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error(
+            'A pre-finality directory must not read group history.',
+          )
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary: async () => ({
+          chainId: 1n,
+          codeProbes: 1,
+          head: { blockHash: blockHash(5n), blockNumber: 5n },
+          kind: 'pending-confirmation',
+          startBlock: 0n,
+        }),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 5n,
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
     })
     expect(provider.request).not.toHaveBeenCalledWith(
       expect.objectContaining({ method: 'eth_getLogs' }),

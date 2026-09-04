@@ -241,6 +241,42 @@ describe('protocol history discovery', () => {
     expect(isProtocolHistoryUnavailableError(error)).toBe(false)
   })
 
+  it('classifies only recognized archival failures as unavailable history', async () => {
+    const unavailable = providerWithDeployment({
+      onCode: (blockNumber) => {
+        if (blockNumber === 100n) return PROTOCOL_RUNTIME_CODE
+        throw new Error('missing trie node')
+      },
+    })
+    const unavailableError = await discoverProtocolHistoryBoundary(
+      unavailable.provider,
+      1n,
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+
+    expect(isProtocolHistoryUnavailableError(unavailableError)).toBe(true)
+    expect((unavailableError as Error & { cause?: unknown }).cause).toEqual(
+      new Error('missing trie node'),
+    )
+
+    const transientError = Object.assign(new Error('rate limit exceeded'), {
+      code: -32_005,
+    })
+    const transient = providerWithDeployment({
+      onCode: (blockNumber) => {
+        if (blockNumber === 100n) return PROTOCOL_RUNTIME_CODE
+        throw transientError
+      },
+    })
+
+    await expect(
+      discoverProtocolHistoryBoundary(transient.provider, 1n),
+    ).rejects.toBe(transientError)
+    expect(isProtocolHistoryUnavailableError(transientError)).toBe(false)
+  })
+
   it('brackets discovery with the selected chain and anchored head', async () => {
     let chainReads = 0
     const wrongChain = providerWithDeployment({

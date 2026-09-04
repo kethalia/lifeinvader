@@ -54,11 +54,12 @@ its deployment block. A newer deployment starts immediately after the last
 confirmed empty block and exposes no projection until the deployment reaches
 the twelve-block safe head.
 
-An RPC that explicitly cannot serve historical state falls back to block zero.
-A local discovery timeout, malformed history response, conflicting code,
-wallet-context change, or cancellation does not take that fallback. Reused
-in-memory boundaries are reauthenticated against their exact head hash, so a
-reset local fork with the same chain ID cannot inherit a stale cursor boundary.
+Only an RPC failure recognized as unavailable or pruned archival state falls
+back to block zero. A rate limit, transport failure, local discovery timeout,
+malformed history response, conflicting code, wallet-context change, or
+cancellation does not take that fallback. Reused in-memory boundaries are
+reauthenticated against their exact head hash, so a reset local fork with the
+same chain ID cannot inherit a stale cursor boundary.
 
 Once the global cursor reaches a twice-checked confirmed safe head, the stream
 can issue an immutable, provider-bound projection anchor containing the exact

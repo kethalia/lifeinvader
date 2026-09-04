@@ -14,6 +14,14 @@ const MAX_CODE_BYTES = 24_576
 export const DEFAULT_PROTOCOL_HISTORY_CODE_PROBES = 64
 export const MAX_PROTOCOL_HISTORY_CODE_PROBES = 64
 
+const HISTORICAL_STATE_UNAVAILABLE_PATTERNS = [
+  /\bmissing trie node\b/i,
+  /\b(?:historical|archive|pruned) (?:state|data|history)\b.*\b(?:unavailable|not available|unsupported|required)\b/i,
+  /\barchive node\b.*\brequired\b/i,
+  /\b(?:state|data)\b.*\b(?:for|at)\b.*\bblock\b.*\b(?:unavailable|not available|pruned)\b/i,
+  /\brequested block\b.*\b(?:pruned|too old)\b/i,
+] as const
+
 export type ProtocolBlockFingerprint = Readonly<{
   blockHash: Hash
   blockNumber: bigint
@@ -69,6 +77,23 @@ export function isProtocolHistoryUnavailableError(
   error: unknown,
 ): error is ProtocolHistoryUnavailableError {
   return error instanceof ProtocolHistoryUnavailableError
+}
+
+function isHistoricalStateUnavailableRpcError(error: unknown) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'object' &&
+          error !== null &&
+          typeof (error as { message?: unknown }).message === 'string'
+        ? (error as { message: string }).message
+        : undefined
+  return (
+    message !== undefined &&
+    HISTORICAL_STATE_UNAVAILABLE_PATTERNS.some((pattern) =>
+      pattern.test(message),
+    )
+  )
 }
 
 type DiscoveryContext = {
@@ -318,6 +343,7 @@ export async function discoverProtocolHistoryBoundary(
     } catch (error) {
       refreshContext()
       if (error instanceof ProtocolHistoryTimeoutError) throw error
+      if (!isHistoricalStateUnavailableRpcError(error)) throw error
       throw new ProtocolHistoryUnavailableError(blockNumber, error)
     }
     const code = parseCode(value)

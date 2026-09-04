@@ -67,11 +67,12 @@ rather than treated as proof that content exists.
 The global group directory scans only `GroupCreated`. After verifying the
 selected chain and exact v1 runtime, it discovers the bounded protocol-history
 boundary described in [`indexing.md`](./indexing.md) and starts a fresh cursor
-there. Only an explicit historical-state rejection falls back to genesis;
-timeouts, malformed history, code conflicts, cancellation, and context changes
-fail closed without requesting group logs. If the boundary is newer than the
-confirmed head, the directory reports confirmation pending without requesting
-logs or reading `nextGroupId()`.
+there. Only a recognized unavailable or pruned archival-state rejection falls
+back to genesis; rate limits, transport failures, timeouts, malformed history,
+code conflicts, cancellation, and context changes fail closed without
+requesting group logs. If the boundary is newer than the confirmed head, or the
+chain does not have a confirmed head yet, the directory reports confirmation
+pending without requesting logs or reading `nextGroupId()`.
 
 Each explicit invocation advances at most one bounded range, persists a
 chain-scoped reorganization-aware cursor, and returns at most the newest 100

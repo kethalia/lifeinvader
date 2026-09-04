@@ -276,6 +276,39 @@ describe('PublicGroupPanel', () => {
     expect(document.querySelector('.group-empty-result')).toBeNull()
   })
 
+  it('keeps a pre-finality directory pending without showing an empty result', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizeDirectory = vi.fn().mockResolvedValue({
+      ...directory(false, []),
+      head: 5n,
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
+    })
+    render(
+      <PublicGroupPanel
+        session={connectedSession(provider)}
+        synchronizeDirectory={synchronizeDirectory}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed public groups' }),
+    )
+
+    expect(
+      await screen.findByRole('button', { name: 'Check group confirmations' }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /history can begin at block 0.*does not have a confirmed head yet.*No group log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText('No confirmed groups found.')).toBeNull()
+    expect(document.querySelector('.group-empty-result')).toBeNull()
+  })
+
   it('accepts a valid direct group ID and rejects malformed selections', () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     render(<PublicGroupPanel session={connectedSession(provider)} />)
