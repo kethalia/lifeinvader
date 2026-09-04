@@ -386,6 +386,7 @@ describe('PublicFollowPanel', () => {
 
   it('keeps an ambiguous action locked only in its original wallet context', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
+    const replacementProvider = { request: vi.fn() } as Eip1193Provider
     const setFollowAction = vi
       .fn<typeof setFollow>()
       .mockRejectedValue(
@@ -409,7 +410,17 @@ describe('PublicFollowPanel', () => {
     ).toBe(true)
     rerender(
       <PublicFollowPanel
-        session={connectedSession(provider, ACCOUNT_B)}
+        session={connectedSession(replacementProvider)}
+        setFollowAction={setFollowAction}
+      />,
+    )
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: 'Follow on-chain' })
+        .disabled,
+    ).toBe(true)
+    rerender(
+      <PublicFollowPanel
+        session={connectedSession(replacementProvider, ACCOUNT_B)}
         setFollowAction={setFollowAction}
       />,
     )
@@ -421,8 +432,9 @@ describe('PublicFollowPanel', () => {
     ).toBe(false)
   })
 
-  it('authenticates an unknown submitted hash before completing recovery', async () => {
+  it('keeps an unknown hash locked but recovers it only with its provider', async () => {
     const provider = guardedProvider()
+    const replacementProvider = guardedProvider()
     const setFollowAction = vi.fn<typeof setFollow>(
       async (
         _provider,
@@ -439,7 +451,7 @@ describe('PublicFollowPanel', () => {
     const waitForReceipt = vi
       .fn<typeof waitForTransactionReceipt>()
       .mockResolvedValue(RECEIPT)
-    render(
+    const { rerender } = render(
       <PublicFollowPanel
         session={connectedSession(provider)}
         setFollowAction={setFollowAction}
@@ -450,6 +462,28 @@ describe('PublicFollowPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unfollow on-chain' }))
 
     expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
+    rerender(
+      <PublicFollowPanel
+        session={connectedSession(replacementProvider)}
+        setFollowAction={setFollowAction}
+        waitForReceipt={waitForReceipt}
+      />,
+    )
+    expect(screen.getByText(/new writes remain locked/i)).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: 'Check follow receipt again' }),
+    ).toBeNull()
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: 'Follow on-chain' })
+        .disabled,
+    ).toBe(true)
+    rerender(
+      <PublicFollowPanel
+        session={connectedSession(provider)}
+        setFollowAction={setFollowAction}
+        waitForReceipt={waitForReceipt}
+      />,
+    )
     fireEvent.click(
       screen.getByRole('button', { name: 'Check follow receipt again' }),
     )

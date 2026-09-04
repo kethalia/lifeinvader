@@ -72,9 +72,8 @@ function parseAccountInput(value: string, label: string) {
   return { account }
 }
 
-function sameWalletContext(first: WalletContext, second: WalletContext) {
+function sameAccountChainContext(first: WalletContext, second: WalletContext) {
   return (
-    first.provider === second.provider &&
     first.chainId === second.chainId &&
     first.account.toLowerCase() === second.account.toLowerCase()
   )
@@ -83,7 +82,6 @@ function sameWalletContext(first: WalletContext, second: WalletContext) {
 function contextMatchesSession(context: WalletContext, session: WalletSession) {
   return (
     session.status === 'connected' &&
-    context.provider === session.provider &&
     context.chainId === session.chainId &&
     context.account.toLowerCase() === session.account?.toLowerCase()
   )
@@ -158,11 +156,13 @@ function readButtonLabel(state: FollowReadModelState) {
 function FollowAttemptStatus({
   attempt,
   currentContext,
+  receiptProviderAvailable,
   onDismiss,
   onRetry,
 }: {
   attempt: FollowAttempt
   currentContext: boolean
+  receiptProviderAvailable: boolean
   onDismiss(): void
   onRetry(): void
 }) {
@@ -195,6 +195,11 @@ function FollowAttemptStatus({
         {!currentContext
           ? 'This belongs to another wallet context and does not lock the current controls.'
           : null}
+        {currentContext &&
+        !receiptProviderAvailable &&
+        attempt.status === 'unknown'
+          ? ' Reconnect the wallet provider that submitted this action to authenticate its receipt. New writes remain locked for this account and chain.'
+          : null}
       </p>
       {attempt.message ? (
         <p className="follow-attempt-error">{attempt.message}</p>
@@ -203,7 +208,7 @@ function FollowAttemptStatus({
       attempt.status === 'ambiguous' ||
       attempt.status === 'failed' ? (
         <div className="follow-recovery-actions">
-          {attempt.status === 'unknown' && currentContext ? (
+          {attempt.status === 'unknown' && receiptProviderAvailable ? (
             <button onClick={onRetry} type="button">
               Check follow receipt again
             </button>
@@ -347,12 +352,14 @@ export function PublicFollowPanel({
   ) => {
     setAttempts((current) => current.filter((attempt) => attempt.id !== id))
     setProblems((current) =>
-      current.filter((problem) => !sameWalletContext(problem.context, context)),
+      current.filter(
+        (problem) => !sameAccountChainContext(problem.context, context),
+      ),
     )
     setCompletions((current) =>
       [
         ...current.filter(
-          (completion) => !sameWalletContext(completion.context, context),
+          (completion) => !sameAccountChainContext(completion.context, context),
         ),
         { context, receipt },
       ].slice(-8),
@@ -368,18 +375,21 @@ export function PublicFollowPanel({
     const id = ++operationSequence.current
     let submittedHash: Hash | undefined
     setProblems((current) =>
-      current.filter((problem) => !sameWalletContext(problem.context, context)),
+      current.filter(
+        (problem) => !sameAccountChainContext(problem.context, context),
+      ),
     )
     setCompletions((current) =>
       current.filter(
-        (completion) => !sameWalletContext(completion.context, context),
+        (completion) => !sameAccountChainContext(completion.context, context),
       ),
     )
     setAttempts((current) =>
       retainAttempts([
         ...current.filter(
           (attempt) =>
-            attempt.status !== 'failed' || !sameWalletContext(attempt, context),
+            attempt.status !== 'failed' ||
+            !sameAccountChainContext(attempt, context),
         ),
         { ...context, id, status: 'opening' },
       ]),
@@ -479,11 +489,12 @@ export function PublicFollowPanel({
       attempt.status !== 'unknown' ||
       !hash ||
       !contextMatchesSession(attempt, session) ||
+      session.provider !== attempt.provider ||
       attempts.some(
         (candidate) =>
           candidate.id !== attempt.id &&
           candidate.status !== 'failed' &&
-          sameWalletContext(candidate, attempt),
+          sameAccountChainContext(candidate, attempt),
       )
     ) {
       return
@@ -497,11 +508,6 @@ export function PublicFollowPanel({
     )
     void (async () => {
       try {
-        if (session.provider !== attempt.provider) {
-          throw new Error(
-            'Reconnect the wallet that submitted this follow action to check its receipt.',
-          )
-        }
         const guard = await createTransactionGuard(
           attempt.provider,
           attempt.account,
@@ -766,6 +772,10 @@ export function PublicFollowPanel({
                 )
               }
               onRetry={() => retryReceipt(attempt)}
+              receiptProviderAvailable={
+                contextMatchesSession(attempt, session) &&
+                attempt.provider === session.provider
+              }
             />
           ))}
           {activeCompletion ? (
