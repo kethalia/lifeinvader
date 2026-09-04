@@ -352,6 +352,49 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       assertContextActive()
       if (!isProtocolHistoryUnavailableError(error)) throw error
     }
+    if (historyBoundaryKind === 'pending-confirmation') {
+      if (
+        !historyAnchor ||
+        !(await protocolHistoryAnchorIsCanonical(
+          provider,
+          chainId,
+          historyAnchor,
+          { signal: interruption.signal },
+        ))
+      ) {
+        assertContextActive()
+        throw new Error(
+          'The protocol history anchor changed during group-directory synchronization. Retry after the chain stabilizes.',
+        )
+      }
+      assertContextActive()
+      const finalHead = await readSelectedHead(
+        provider,
+        chainId,
+        interruption.signal,
+      )
+      assertContextActive()
+      if (finalHead < historyAnchor.blockNumber) {
+        throw new Error(
+          'The wallet head moved behind the group-directory history anchor.',
+        )
+      }
+      await assertSelectedChain(provider, chainId, interruption.signal)
+      assertContextActive()
+      return {
+        cacheReset: false,
+        caughtUp: false,
+        groups: [],
+        head: finalHead,
+        indexedThrough: undefined,
+        safeHead:
+          finalHead >= POST_FEED_CONFIRMATION_DEPTH
+            ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+            : undefined,
+        scannedRanges: 0,
+        startBlock,
+      }
+    }
     const seed = createEventCursor({
       chainId,
       filter: GROUP_CREATED_FILTER,
@@ -459,12 +502,8 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
         finalHead >= POST_FEED_CONFIRMATION_DEPTH
           ? finalHead - POST_FEED_CONFIRMATION_DEPTH
           : undefined
-      const deploymentStillPending =
-        historyBoundaryKind === 'pending-confirmation' &&
-        (safeHead === undefined || after.cursor.startBlock > safeHead)
       const caughtUp =
-        !deploymentStillPending &&
-        (safeHead === undefined || after.cursor.nextBlock > safeHead)
+        safeHead === undefined || after.cursor.nextBlock > safeHead
       const confirmedNextGroupId =
         caughtUp && safeHead !== undefined
           ? await readNextGroupId(provider, safeHead, interruption.signal)

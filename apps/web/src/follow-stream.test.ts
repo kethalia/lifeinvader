@@ -493,14 +493,14 @@ describe('follow stream synchronization', () => {
       caughtUp: true,
       indexedThrough: 20n,
       projectionAnchor: {
-        follows: { cursor: { startBlock: 9n } },
+        follows: { cursor: { startBlock: 14n } },
       },
       recentSignals: [{ blockNumber: 14n, following: true }],
       safeHead: 20n,
       scannedRanges: 1,
-      startBlock: 9n,
+      startBlock: 14n,
     })
-    expect(logQueries).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
+    expect(logQueries).toEqual([{ fromBlock: '0xe', toBlock: '0x14' }])
   })
 
   it('returns public follow and unfollow signals newest first', async () => {

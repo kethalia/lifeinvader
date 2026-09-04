@@ -19,6 +19,8 @@ const HISTORICAL_STATE_UNAVAILABLE_PATTERNS = [
   /\b(?:historical|archive|pruned) (?:state|data|history)\b.*\b(?:unavailable|not available|unsupported|required)\b/i,
   /\barchive node\b.*\brequired\b/i,
   /\b(?:state|data)\b.*\b(?:for|at)\b.*\bblock\b.*\b(?:unavailable|not available|pruned)\b/i,
+  /\b(?:state|data)\b.*\b(?:unavailable|not available|pruned)\b.*\b(?:for|at)\b.*\bblock\b/i,
+  /\bno (?:state|data)\b.*\bavailable\b.*\b(?:for|at)\b.*\bblock\b/i,
   /\brequested block\b.*\b(?:pruned|too old)\b/i,
 ] as const
 
@@ -548,10 +550,11 @@ export async function resolveProtocolHistoryBoundary(
   const cached = providerCache?.get(key)
   if (cached) {
     if (
-      await protocolHistoryAnchorIsCanonical(provider, chainId, cached.head, {
+      cached.kind === 'confirmed' &&
+      (await protocolHistoryAnchorIsCanonical(provider, chainId, cached.head, {
         signal: options.signal,
         timeoutMs,
-      })
+      }))
     ) {
       return cached
     }
@@ -566,6 +569,8 @@ export async function resolveProtocolHistoryBoundary(
     currentProviderCache = new Map()
     resolvedBoundaries.set(provider, currentProviderCache)
   }
-  currentProviderCache.set(key, boundary)
+  if (boundary.kind === 'confirmed') {
+    currentProviderCache.set(key, boundary)
+  }
   return boundary
 }

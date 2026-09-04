@@ -511,14 +511,14 @@ describe('profile stream synchronization', () => {
       caughtUp: true,
       indexedThrough: 20n,
       projectionAnchor: {
-        profiles: { cursor: { startBlock: 9n } },
+        profiles: { cursor: { startBlock: 14n } },
       },
       recentProfiles: [{ blockNumber: 14n, displayName: 'Tracey' }],
       safeHead: 20n,
       scannedRanges: 1,
-      startBlock: 9n,
+      startBlock: 14n,
     })
-    expect(logQueries).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
+    expect(logQueries).toEqual([{ fromBlock: '0xe', toBlock: '0x14' }])
   })
 
   it('issues immutable anchors bound to an authenticated provider context', async () => {

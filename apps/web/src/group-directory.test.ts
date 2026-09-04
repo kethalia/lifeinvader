@@ -418,6 +418,58 @@ describe('group-directory stream synchronization', () => {
     )
   })
 
+  it('stays pending when the safe head only reaches confirmed emptiness', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(21n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error(
+            'Confirmed emptiness is not a confirmed deployment boundary.',
+          )
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary: async () => ({
+          chainId: 1n,
+          codeProbes: 4,
+          confirmedThrough: {
+            blockHash: blockHash(8n),
+            blockNumber: 8n,
+          },
+          head: { blockHash: blockHash(20n), blockNumber: 20n },
+          kind: 'pending-confirmation',
+          preceding: { blockHash: blockHash(8n), blockNumber: 8n },
+          startBlock: 9n,
+        }),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 21n,
+      indexedThrough: undefined,
+      safeHead: 9n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
+  })
+
   it('stays pending before the chain has a confirmed head', async () => {
     const provider: Eip1193Provider = {
       request: vi.fn(async ({ method, params }) => {

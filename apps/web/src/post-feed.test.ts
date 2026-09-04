@@ -229,9 +229,9 @@ describe('post feed synchronization', () => {
       posts: [{ body: 'Confirmed after waiting.', postId: 1n }],
       safeHead: 20n,
       scannedRanges: 1,
-      startBlock: 9n,
+      startBlock: 14n,
     })
-    expect(logRanges).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
+    expect(logRanges).toEqual([{ fromBlock: '0xe', toBlock: '0x14' }])
   })
 
   it('rediscovers a replaced history anchor before mutating the event cache', async () => {

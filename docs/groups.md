@@ -72,7 +72,11 @@ back to genesis; rate limits, transport failures, timeouts, malformed history,
 code conflicts, cancellation, and context changes fail closed without
 requesting group logs. If the boundary is newer than the confirmed head, or the
 chain does not have a confirmed head yet, the directory reports confirmation
-pending without requesting logs or reading `nextGroupId()`.
+pending without requesting logs or reading `nextGroupId()`. Each explicit
+confirmation check rediscovers a pending boundary; the directory cannot clear
+that state merely because the safe head reached the first block after earlier
+confirmed emptiness. It proceeds only once the deployment block itself is
+confirmed.
 
 Each explicit invocation advances at most one bounded range, persists a
 chain-scoped reorganization-aware cursor, and returns at most the newest 100

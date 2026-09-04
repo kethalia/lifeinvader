@@ -242,24 +242,31 @@ describe('protocol history discovery', () => {
   })
 
   it('classifies only recognized archival failures as unavailable history', async () => {
-    const unavailable = providerWithDeployment({
-      onCode: (blockNumber) => {
-        if (blockNumber === 100n) return PROTOCOL_RUNTIME_CODE
-        throw new Error('missing trie node')
-      },
-    })
-    const unavailableError = await discoverProtocolHistoryBoundary(
-      unavailable.provider,
-      1n,
-    ).then(
-      () => undefined,
-      (error: unknown) => error,
-    )
+    for (const message of [
+      'missing trie node',
+      'state not available for block 0x123',
+      'No state available for block 0x123',
+    ]) {
+      const archivalError = new Error(message)
+      const unavailable = providerWithDeployment({
+        onCode: (blockNumber) => {
+          if (blockNumber === 100n) return PROTOCOL_RUNTIME_CODE
+          throw archivalError
+        },
+      })
+      const unavailableError = await discoverProtocolHistoryBoundary(
+        unavailable.provider,
+        1n,
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
 
-    expect(isProtocolHistoryUnavailableError(unavailableError)).toBe(true)
-    expect((unavailableError as Error & { cause?: unknown }).cause).toEqual(
-      new Error('missing trie node'),
-    )
+      expect(isProtocolHistoryUnavailableError(unavailableError)).toBe(true)
+      expect((unavailableError as Error & { cause?: unknown }).cause).toBe(
+        archivalError,
+      )
+    }
 
     const transientError = Object.assign(new Error('rate limit exceeded'), {
       code: -32_005,
@@ -485,5 +492,39 @@ describe('resolved protocol history boundaries', () => {
     expect(
       prepared.requests.filter(({ method }) => method === 'eth_getCode').length,
     ).toBeGreaterThan(codeRequests)
+  })
+
+  it('rediscovers pending boundaries until the deployment is confirmed', async () => {
+    let head = 20n
+    const prepared = providerWithDeployment({
+      deploymentBlock: 14n,
+      onHead: () => quantity(head),
+    })
+
+    const first = await resolveProtocolHistoryBoundary(prepared.provider, 1n)
+    expect(first).toMatchObject({
+      head: { blockNumber: 20n },
+      kind: 'pending-confirmation',
+      startBlock: 9n,
+    })
+
+    head = 21n
+    const second = await resolveProtocolHistoryBoundary(prepared.provider, 1n)
+    expect(second).not.toBe(first)
+    expect(second).toMatchObject({
+      head: { blockNumber: 21n },
+      kind: 'pending-confirmation',
+      startBlock: 10n,
+    })
+
+    head = 26n
+    await expect(
+      resolveProtocolHistoryBoundary(prepared.provider, 1n),
+    ).resolves.toMatchObject({
+      deployment: { blockNumber: 14n },
+      head: { blockNumber: 26n },
+      kind: 'confirmed',
+      startBlock: 14n,
+    })
   })
 })
