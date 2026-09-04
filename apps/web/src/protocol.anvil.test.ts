@@ -4,7 +4,6 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { encodeFunctionData } from 'viem'
 import { synchronizeDirectMessageStream } from './direct-message-stream'
 import { synchronizeFollowStream } from './follow-stream'
 import { synchronizeGroupDirectory } from './group-directory'
@@ -28,31 +27,19 @@ import {
   deployProtocol,
   inspectProtocol,
   LOCAL_CHAIN_ID,
-  PROTOCOL_ADDRESS,
   publishComment,
   publishRepost,
   publishPost,
   sendDirectMessage,
   sendGroupMessage,
   setGroupMembership,
+  setFollow,
   setProfile,
   setPostLike,
 } from './protocol'
 const MEDIA_CID = parseMediaCid(
   'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
 )!
-const SET_FOLLOW_ABI = [
-  {
-    inputs: [
-      { name: 'followed', type: 'address' },
-      { name: 'following', type: 'bool' },
-    ],
-    name: 'setFollow',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-] as const
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
   result?: unknown
@@ -100,6 +87,17 @@ function makeHttpProvider(url: string): Eip1193Provider {
         throw error
       }
       return payload.result
+    },
+  }
+}
+function withSelectedAccount(
+  source: Eip1193Provider,
+  account: string,
+): Eip1193Provider {
+  return {
+    request(request) {
+      if (request.method === 'eth_accounts') return Promise.resolve([account])
+      return source.request(request)
     },
   }
 }
@@ -285,34 +283,29 @@ describe('wallet transaction helpers on Anvil', () => {
         provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 13n })
-    await provider.request({
-      method: 'eth_sendTransaction',
-      params: [
-        {
-          data: encodeFunctionData({
-            abi: SET_FOLLOW_ABI,
-            args: [recipient, true],
-            functionName: 'setFollow',
-          }),
-          from: account,
-          to: PROTOCOL_ADDRESS,
-        },
-      ],
-    })
-    await provider.request({
-      method: 'eth_sendTransaction',
-      params: [
-        {
-          data: encodeFunctionData({
-            abi: SET_FOLLOW_ABI,
-            args: [account, true],
-            functionName: 'setFollow',
-          }),
-          from: recipient,
-          to: PROTOCOL_ADDRESS,
-        },
-      ],
-    })
+    await expect(
+      setFollow(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        recipient,
+        true,
+        undefined,
+        provider,
+      ),
+    ).resolves.toMatchObject({ blockNumber: 14n })
+    const recipientWallet = withSelectedAccount(provider, recipient)
+    await expect(
+      setFollow(
+        recipientWallet,
+        recipient,
+        LOCAL_CHAIN_ID,
+        account,
+        true,
+        undefined,
+        provider,
+      ),
+    ).resolves.toMatchObject({ blockNumber: 15n })
     const confirmation = waitForPostFeedConfirmation(
       provider,
       LOCAL_CHAIN_ID,

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { encodeAbiParameters, padHex, toHex, type Address } from 'viem'
+import {
+  encodeAbiParameters,
+  encodeFunctionData,
+  getAddress,
+  padHex,
+  toHex,
+  type Address,
+} from 'viem'
 import {
   parseAccounts,
   parseChainId,
@@ -8,6 +15,7 @@ import {
 } from './ethereum'
 import {
   assertExpectedDirectMessage,
+  assertExpectedFollow,
   assertExpectedGroupCreated,
   assertExpectedGroupMembership,
   assertExpectedGroupMessage,
@@ -20,6 +28,7 @@ import {
   DIRECT_MESSAGE_SENT_TOPIC,
   FACTORY_ADDRESS,
   FACTORY_CODE_HASH,
+  FOLLOW_SET_TOPIC,
   getDirectConversationId,
   getPostBodyByteLength,
   GROUP_CREATED_TOPIC,
@@ -43,6 +52,7 @@ import {
   sendDirectMessage,
   sendGroupMessage,
   setGroupMembership,
+  setFollow,
   setPostLike,
   setProfile,
   switchToLocalChain,
@@ -340,6 +350,39 @@ describe('protocol transactions', () => {
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
   })
+  it('rejects invalid follow accounts before opening the wallet', async () => {
+    const request = vi.fn()
+    const provider = providerFrom(request)
+
+    await expect(
+      setFollow(provider, '0x1234' as Address, 1n, RECIPIENT, true),
+    ).rejects.toThrow(/follower account is invalid/i)
+    await expect(
+      setFollow(
+        provider,
+        '0x0000000000000000000000000000000000000000',
+        1n,
+        RECIPIENT,
+        true,
+      ),
+    ).rejects.toThrow(/follower account must be nonzero/i)
+    await expect(
+      setFollow(provider, ACCOUNT, 1n, '0x1234' as Address, true),
+    ).rejects.toThrow(/followed account is invalid/i)
+    await expect(
+      setFollow(
+        provider,
+        ACCOUNT,
+        1n,
+        '0x0000000000000000000000000000000000000000',
+        true,
+      ),
+    ).rejects.toThrow(/followed account must be nonzero/i)
+    await expect(
+      setFollow(provider, ACCOUNT, 1n, getAddress(ACCOUNT), true),
+    ).rejects.toThrow(/cannot follow itself/i)
+    expect(request).not.toHaveBeenCalled()
+  })
   it('requires an exact public direct-message event and accepts its assigned ID', () => {
     const receipt = {
       blockHash: BLOCK_HASH,
@@ -567,6 +610,125 @@ describe('protocol transactions', () => {
         receipt,
       ),
     ).toThrow(/expected group-message event/i)
+  })
+  it('requires the exact follow pair and state in its receipt', () => {
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const followLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: encodeAbiParameters([{ type: 'bool' }], [true]),
+      topics: [
+        FOLLOW_SET_TOPIC,
+        padHex(ACCOUNT, { size: 32 }),
+        padHex(RECIPIENT, { size: 32 }),
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
+    const expected = {
+      followed: RECIPIENT,
+      follower: ACCOUNT,
+      following: true,
+    }
+
+    expect(() =>
+      assertExpectedFollow([followLog], expected, receipt),
+    ).not.toThrow()
+    for (const invalidLog of [
+      {
+        ...followLog,
+        data: encodeAbiParameters([{ type: 'bool' }], [false]),
+      },
+      {
+        ...followLog,
+        topics: [
+          FOLLOW_SET_TOPIC,
+          padHex(RECIPIENT, { size: 32 }),
+          padHex(ACCOUNT, { size: 32 }),
+        ],
+      },
+      { ...followLog, blockHash: OTHER_BLOCK_HASH },
+      { ...followLog, transactionHash: OTHER_BLOCK_HASH },
+    ]) {
+      expect(() =>
+        assertExpectedFollow([invalidLog], expected, receipt),
+      ).toThrow(/expected follow event/i)
+    }
+  })
+  it('submits exact follow calldata and confirms its canonical event', async () => {
+    const onSubmitted = vi.fn()
+    const followLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: encodeAbiParameters([{ type: 'bool' }], [false]),
+      topics: [
+        FOLLOW_SET_TOPIC,
+        padHex(ACCOUNT, { size: 32 }),
+        padHex(RECIPIENT, { size: 32 }),
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
+    const request = vi.fn(async ({ method }: ProviderRequest) => {
+      if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_accounts') return [ACCOUNT]
+      if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+      if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+      if (method === 'eth_getTransactionReceipt') {
+        return {
+          blockHash: BLOCK_HASH,
+          blockNumber: '0x2a',
+          logs: [followLog],
+          status: '0x1',
+          transactionHash: TRANSACTION_HASH,
+        }
+      }
+      if (method === 'eth_getBlockByNumber') {
+        return { hash: BLOCK_HASH, number: '0x2a' }
+      }
+      throw new Error(`Unexpected method: ${method}`)
+    })
+    const provider = providerFrom(request)
+
+    await expect(
+      setFollow(provider, ACCOUNT, 1n, RECIPIENT, false, onSubmitted),
+    ).resolves.toEqual({
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    })
+    expect(onSubmitted).toHaveBeenCalledOnce()
+    expect(onSubmitted).toHaveBeenCalledWith(TRANSACTION_HASH)
+    expect(request).toHaveBeenCalledWith({
+      method: 'eth_sendTransaction',
+      params: [
+        {
+          chainId: '0x1',
+          data: encodeFunctionData({
+            abi: [
+              {
+                inputs: [
+                  { name: 'followed', type: 'address' },
+                  { name: 'following', type: 'bool' },
+                ],
+                name: 'setFollow',
+                outputs: [],
+                stateMutability: 'nonpayable',
+                type: 'function',
+              },
+            ],
+            args: [getAddress(RECIPIENT), false],
+            functionName: 'setFollow',
+          }),
+          from: getAddress(ACCOUNT),
+          to: PROTOCOL_ADDRESS,
+        },
+      ],
+    })
   })
   it('requires the exact complete profile snapshot in its receipt', () => {
     const profileReceipt = {
