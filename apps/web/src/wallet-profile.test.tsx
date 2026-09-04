@@ -74,6 +74,7 @@ afterEach(() => {
 describe('wallet profile publisher', () => {
   it('requires a separate acknowledgment for an empty clear snapshot', async () => {
     const provider = inspectionProvider()
+    const readProvider = { request: vi.fn() }
     const setProfileAction = vi.fn<typeof setProfile>(async () => ({
       blockHash: RECEIPT_BLOCK_HASH,
       blockNumber: 42n,
@@ -82,6 +83,7 @@ describe('wallet profile publisher', () => {
     render(
       <WalletPanel
         onPostConfirmed={vi.fn()}
+        readProvider={readProvider}
         setProfileAction={setProfileAction}
         walletSession={controller(provider)}
       />,
@@ -108,6 +110,7 @@ describe('wallet profile publisher', () => {
       { avatarCid: '0x', bio: '', displayName: '' },
       expect.any(Function),
     )
+    expect(readProvider.request).not.toHaveBeenCalled()
   })
 
   it('validates and submits one complete public profile snapshot', async () => {

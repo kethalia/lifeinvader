@@ -5,6 +5,7 @@ import type {
   IncludedPost,
   PostFeedConfirmationWaiter,
 } from './post-feed-confirmation'
+import type { ProfileStreamSynchronizer } from './profile-stream'
 import { PublicMessagePanel } from './public-message-panel'
 import { ReadRpcPanel, useReadRpcSelection } from './read-rpc-panel'
 import { WalletPanel } from './wallet-panel'
@@ -48,9 +49,11 @@ const networkFacts = [
 
 export function App({
   synchronizePostFeed,
+  synchronizeProfile,
   waitForPostConfirmation,
 }: {
   synchronizePostFeed?: PostFeedSynchronizer
+  synchronizeProfile?: ProfileStreamSynchronizer
   waitForPostConfirmation?: PostFeedConfirmationWaiter
 } = {}) {
   const walletSession = useWalletSession()
@@ -112,6 +115,8 @@ export function App({
 
         <WalletPanel
           onPostConfirmed={setIncludedPost}
+          readProvider={readRpc.selection?.provider}
+          synchronizeProfile={synchronizeProfile}
           walletSession={walletSession}
         />
 
