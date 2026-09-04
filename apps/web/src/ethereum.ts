@@ -5,8 +5,21 @@ export type ProviderRequest = {
 }
 export interface Eip1193Provider {
   request(args: ProviderRequest): Promise<unknown>
+  requestWithSignal?(
+    args: ProviderRequest,
+    signal: AbortSignal,
+  ): Promise<unknown>
   on?(event: string, listener: (...args: unknown[]) => void): void
   removeListener?(event: string, listener: (...args: unknown[]) => void): void
+}
+export function requestProvider(
+  provider: Eip1193Provider,
+  request: ProviderRequest,
+  signal?: AbortSignal,
+) {
+  return signal && provider.requestWithSignal
+    ? provider.requestWithSignal(request, signal)
+    : provider.request(request)
 }
 export const WALLET_READ_TIMEOUT_MS = 15_000
 export async function beforeDeadline<T>(
@@ -40,6 +53,36 @@ export async function beforeDeadline<T>(
   } finally {
     clearTimeout(timeout)
     if (handleAbort) signal?.removeEventListener('abort', handleAbort)
+  }
+}
+export async function requestProviderBeforeDeadline(
+  provider: Eip1193Provider,
+  request: ProviderRequest,
+  deadline: number,
+  timeoutError: () => Error,
+  signal?: AbortSignal,
+  cancellationError: () => Error = () => new Error('Operation was cancelled.'),
+) {
+  const controller = new AbortController()
+  let relayAbort: (() => void) | undefined
+  try {
+    return await beforeDeadline(
+      () => {
+        if (signal) {
+          relayAbort = () => controller.abort(signal.reason)
+          signal.addEventListener('abort', relayAbort, { once: true })
+          if (signal.aborted) controller.abort(signal.reason)
+        }
+        return requestProvider(provider, request, controller.signal)
+      },
+      deadline,
+      timeoutError,
+      signal,
+      cancellationError,
+    )
+  } finally {
+    controller.abort()
+    if (relayAbort) signal?.removeEventListener('abort', relayAbort)
   }
 }
 export function isEip1193Provider(value: unknown): value is Eip1193Provider {

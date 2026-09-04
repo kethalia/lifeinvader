@@ -19,6 +19,7 @@ import {
   parseAccounts,
   parseChainId,
   parseTransactionHash,
+  requestProviderBeforeDeadline,
   WALLET_READ_TIMEOUT_MS,
   type Eip1193Provider,
   type ProviderRequest,
@@ -454,12 +455,11 @@ async function getCode(
   blockTag = 'latest',
   signal?: AbortSignal,
 ): Promise<Hex> {
-  const request = () =>
-    provider.request({ method: 'eth_getCode', params: [address, blockTag] })
   const timeout = () => new Error('Contract code inspection timed out.')
   return parseCode(
-    await beforeDeadline(
-      request,
+    await requestProviderBeforeDeadline(
+      provider,
+      { method: 'eth_getCode', params: [address, blockTag] },
       deadline,
       timeout,
       signal,

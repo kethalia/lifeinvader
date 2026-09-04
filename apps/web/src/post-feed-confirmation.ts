@@ -1,5 +1,6 @@
 import {
   parseChainId,
+  requestProviderBeforeDeadline,
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
@@ -132,36 +133,17 @@ async function requestBeforeDeadline(
   deadline: number,
   signal: AbortSignal,
 ) {
-  if (signal.aborted) throw cancelledError()
-  const remainingMs = deadline - Date.now()
-  if (remainingMs <= 0) {
-    throw new Error(
-      'Post confirmation monitoring timed out. Check the feed again.',
-    )
-  }
-  let handleAbort: (() => void) | undefined
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  const aborted = new Promise<never>((_resolve, reject) => {
-    handleAbort = () => reject(cancelledError())
-    signal.addEventListener('abort', handleAbort, { once: true })
-  })
-  const timedOut = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(
-      () =>
-        reject(
-          new Error(
-            'Post confirmation monitoring timed out. Check the feed again.',
-          ),
-        ),
-      remainingMs,
-    )
-  })
-  try {
-    return await Promise.race([provider.request(request), timedOut, aborted])
-  } finally {
-    clearTimeout(timeout)
-    if (handleAbort) signal.removeEventListener('abort', handleAbort)
-  }
+  return requestProviderBeforeDeadline(
+    provider,
+    request,
+    deadline,
+    () =>
+      new Error(
+        'Post confirmation monitoring timed out. Check the feed again.',
+      ),
+    signal,
+    cancelledError,
+  )
 }
 
 function wait(milliseconds: number, signal: AbortSignal) {

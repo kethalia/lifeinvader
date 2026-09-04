@@ -42,6 +42,15 @@ import {
 const MEDIA_CID = parseMediaCid(
   'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C',
 )!
+const HTTP_READ_METHODS = new Set([
+  'eth_blockNumber',
+  'eth_call',
+  'eth_chainId',
+  'eth_getBlockByNumber',
+  'eth_getCode',
+  'eth_getLogs',
+  'eth_getTransactionReceipt',
+])
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
   result?: unknown
@@ -49,7 +58,9 @@ type JsonRpcResponse = {
 let anvil: ChildProcess | undefined
 let provider: Eip1193Provider
 let readProvider: HttpRpcProvider
+let routedProvider: Eip1193Provider
 let stderr = ''
+const walletRequestMethods: string[] = []
 async function reservePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer()
@@ -69,6 +80,7 @@ function makeHttpProvider(url: string): Eip1193Provider {
   let requestId = 0
   return {
     async request({ method, params }: ProviderRequest) {
+      walletRequestMethods.push(method)
       const response = await fetch(url, {
         body: JSON.stringify({
           id: ++requestId,
@@ -90,6 +102,18 @@ function makeHttpProvider(url: string): Eip1193Provider {
         throw error
       }
       return payload.result
+    },
+  }
+}
+function withHttpReads(
+  walletProvider: Eip1193Provider,
+  httpProvider: HttpRpcProvider,
+): Eip1193Provider {
+  return {
+    request(request) {
+      return HTTP_READ_METHODS.has(request.method)
+        ? httpProvider.request(request)
+        : walletProvider.request(request)
     },
   }
 }
@@ -124,6 +148,7 @@ beforeAll(async () => {
   const rpcUrl = `http://127.0.0.1:${port}`
   provider = makeHttpProvider(rpcUrl)
   readProvider = createHttpRpcProvider(rpcUrl)
+  routedProvider = withHttpReads(provider, readProvider)
   anvil = spawn(
     'anvil',
     ['--host', '127.0.0.1', '--port', String(port), '--chain-id', '31337'],
@@ -158,11 +183,11 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
     })
     await expect(
       deployProtocol(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 1n })
     await expect(inspectProtocol(readProvider)).resolves.toEqual({
@@ -170,7 +195,7 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
     })
     await expect(
       setProfile(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         {
@@ -179,96 +204,96 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
           displayName: 'Tracey',
         },
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 2n })
     const postReceipt = await publishPost(
-      provider,
+      routedProvider,
       account,
       LOCAL_CHAIN_ID,
       { body: '', mediaCid: MEDIA_CID.bytes },
       undefined,
-      readProvider,
+      provider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 3n })
     await expect(
       publishComment(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         1n,
         { body: 'Nothing here is private.', mediaCid: '0x' },
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 4n })
     await expect(
       setPostLike(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         1n,
         true,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 5n })
     await expect(
       setPostLike(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         1n,
         false,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 6n })
     await expect(
       publishRepost(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         1n,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 7n })
     const directMessageReceipt = await sendDirectMessage(
-      provider,
+      routedProvider,
       account,
       LOCAL_CHAIN_ID,
       recipient,
       { body: 'This message is permanently public.', mediaCid: '0x' },
       undefined,
-      readProvider,
+      provider,
     )
     expect(directMessageReceipt).toMatchObject({
       blockNumber: 8n,
       messageId: 1n,
     })
     const groupReceipt = await createGroup(
-      provider,
+      routedProvider,
       account,
       LOCAL_CHAIN_ID,
       { metadataCid: MEDIA_CID.bytes, name: 'Bagholders Anonymous' },
       undefined,
-      readProvider,
+      provider,
     )
     expect(groupReceipt).toMatchObject({ blockNumber: 9n, groupId: 1n })
     await expect(
       setGroupMembership(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         groupReceipt.groupId,
         true,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 10n })
     const groupMessageReceipt = await sendGroupMessage(
-      provider,
+      routedProvider,
       account,
       LOCAL_CHAIN_ID,
       groupReceipt.groupId,
@@ -277,7 +302,7 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
         mediaCid: MEDIA_CID.bytes,
       },
       undefined,
-      readProvider,
+      provider,
     )
     expect(groupMessageReceipt).toMatchObject({
       blockNumber: 11n,
@@ -285,37 +310,37 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
     })
     await expect(
       setGroupMembership(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         groupReceipt.groupId,
         false,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 12n })
     await expect(
       setProfile(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         { avatarCid: '0x', bio: '', displayName: '' },
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 13n })
     await expect(
       setFollow(
-        provider,
+        routedProvider,
         account,
         LOCAL_CHAIN_ID,
         recipient,
         true,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 14n })
-    const recipientWallet = withSelectedAccount(provider, recipient)
+    const recipientWallet = withSelectedAccount(routedProvider, recipient)
     await expect(
       setFollow(
         recipientWallet,
@@ -324,7 +349,7 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
         account,
         true,
         undefined,
-        readProvider,
+        provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 15n })
     const confirmation = waitForPostFeedConfirmation(
@@ -592,5 +617,14 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
       likedByAccount: false,
       repostCount: 1n,
     })
+    for (const readMethod of [
+      'eth_call',
+      'eth_getCode',
+      'eth_getLogs',
+      'eth_getTransactionReceipt',
+    ]) {
+      expect(walletRequestMethods).not.toContain(readMethod)
+    }
+    expect(walletRequestMethods).toContain('eth_sendTransaction')
   })
 })

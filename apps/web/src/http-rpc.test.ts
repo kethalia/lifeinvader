@@ -72,7 +72,7 @@ describe('bounded HTTP RPC provider', () => {
   it('sends an isolated JSON-RPC POST and returns only its matching result', async () => {
     const fetcher = vi.fn(
       async (_input: RequestInfo | URL, init?: RequestInit) =>
-        rpcResponse(init, { result: '0x123' }),
+        rpcResponse(init, { result: '0x123' }, { contentLength: '00042' }),
     )
     const provider = createHttpRpcProvider('https://rpc.example/v1', {
       fetcher,
@@ -107,6 +107,30 @@ describe('bounded HTTP RPC provider', () => {
       jsonrpc: '2.0',
       method: 'eth_getBlockByNumber',
       params: ['0x123', false],
+    })
+    provider.close()
+  })
+
+  it('snapshots an allowed method before encoding an accessor-backed request', async () => {
+    let reads = 0
+    const request = Object.defineProperty({}, 'method', {
+      get() {
+        reads += 1
+        return reads === 1 ? 'eth_chainId' : 'eth_sendTransaction'
+      },
+    })
+    const fetcher = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) =>
+        rpcResponse(init, { result: '0x1' }),
+    )
+    const provider = createHttpRpcProvider('https://rpc.example', { fetcher })
+
+    await expect(provider.request(request as { method: string })).resolves.toBe(
+      '0x1',
+    )
+    expect(reads).toBe(1)
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
+      method: 'eth_chainId',
     })
     provider.close()
   })
@@ -349,6 +373,81 @@ describe('bounded HTTP RPC provider', () => {
 
     await expectation
     expect(requestSignal?.aborted).toBe(true)
+    provider.close()
+  })
+
+  it('does not start already-expired queued requests during abort cleanup', async () => {
+    vi.useFakeTimers()
+    const fetcher = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          )
+        }),
+    )
+    const provider = createHttpRpcProvider('https://rpc.example', {
+      fetcher,
+      maxConcurrentRequests: 1,
+      maxOutstandingRequests: 3,
+      timeoutMs: 25,
+    })
+    const requests = [
+      provider.request({ method: 'eth_chainId' }),
+      provider.request({ method: 'eth_blockNumber' }),
+      provider.request({ method: 'eth_getLogs', params: [{}] }),
+    ]
+    const expectations = requests.map((request) =>
+      expect(request).rejects.toThrow(/request timed out/i),
+    )
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    await Promise.all(expectations)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    provider.close()
+  })
+
+  it('propagates caller cancellation into active and queued requests', async () => {
+    let requestSignal: AbortSignal | undefined
+    const fetcher = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          requestSignal = init?.signal ?? undefined
+          requestSignal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          )
+        }),
+    )
+    const provider = createHttpRpcProvider('https://rpc.example', {
+      fetcher,
+      maxConcurrentRequests: 1,
+      maxOutstandingRequests: 2,
+    })
+    const activeController = new AbortController()
+    const queuedController = new AbortController()
+    const active = provider.requestWithSignal!(
+      { method: 'eth_chainId' },
+      activeController.signal,
+    )
+    const queued = provider.requestWithSignal!(
+      { method: 'eth_blockNumber' },
+      queuedController.signal,
+    )
+    const activeExpectation = expect(active).rejects.toThrow(/cancelled/i)
+    const queuedExpectation = expect(queued).rejects.toThrow(/cancelled/i)
+
+    queuedController.abort()
+    activeController.abort()
+
+    await queuedExpectation
+    await activeExpectation
+    expect(requestSignal?.aborted).toBe(true)
+    expect(fetcher).toHaveBeenCalledTimes(1)
     provider.close()
   })
 

@@ -7,7 +7,11 @@ import {
   type Hash,
   type Hex,
 } from 'viem'
-import { type Eip1193Provider, type ProviderRequest } from './ethereum'
+import {
+  requestProviderBeforeDeadline,
+  type Eip1193Provider,
+  type ProviderRequest,
+} from './ethereum'
 
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 const MAX_CHECKPOINTS = 64
@@ -97,32 +101,14 @@ async function requestBeforeDeadline(
   deadline: number,
   signal?: AbortSignal,
 ) {
-  const remainingMs = deadline - Date.now()
-  if (remainingMs <= 0) throw new Error('Event synchronization timed out.')
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  let handleAbort: (() => void) | undefined
-  const timedOut = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(
-      () => reject(new Error('Event synchronization timed out.')),
-      remainingMs,
-    )
-  })
-  const aborted = signal
-    ? new Promise<never>((_resolve, reject) => {
-        handleAbort = () => reject(cancelledError())
-        signal.addEventListener('abort', handleAbort, { once: true })
-      })
-    : undefined
-  try {
-    if (signal?.aborted) throw cancelledError()
-    const pending = provider.request(request)
-    return await Promise.race(
-      aborted ? [pending, timedOut, aborted] : [pending, timedOut],
-    )
-  } finally {
-    clearTimeout(timeout)
-    if (handleAbort) signal?.removeEventListener('abort', handleAbort)
-  }
+  return requestProviderBeforeDeadline(
+    provider,
+    request,
+    deadline,
+    () => new Error('Event synchronization timed out.'),
+    signal,
+    cancelledError,
+  )
 }
 function invalidRpc(field: string) {
   return new Error(`The RPC returned an invalid ${field}.`)

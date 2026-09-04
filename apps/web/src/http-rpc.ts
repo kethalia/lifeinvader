@@ -37,10 +37,13 @@ export type HttpRpcProviderOptions = {
 type PendingRequest = {
   body: string
   controller?: AbortController
+  deadline: number
+  handleAbort?: () => void
   id: number
   reject(error: unknown): void
   resolve(value: unknown): void
   settled: boolean
+  signal?: AbortSignal
   timeout?: ReturnType<typeof setTimeout>
 }
 
@@ -113,15 +116,12 @@ function positiveInteger(
 }
 
 function encodeRequest(request: ProviderRequest, id: number) {
-  if (!READ_METHODS.has(request.method)) {
-    throw new Error(
-      `HTTP RPC transport refuses non-read method ${request.method || '(empty)'}.`,
-    )
+  const method = request.method
+  const params = request.params
+  if (typeof method !== 'string' || !READ_METHODS.has(method)) {
+    throw new Error('HTTP RPC transport refuses non-read method.')
   }
-  if (
-    request.params !== undefined &&
-    (typeof request.params !== 'object' || request.params === null)
-  ) {
+  if (params !== undefined && (typeof params !== 'object' || params === null)) {
     throw new Error('HTTP RPC request parameters are invalid.')
   }
 
@@ -130,8 +130,8 @@ function encodeRequest(request: ProviderRequest, id: number) {
     body = JSON.stringify({
       id,
       jsonrpc: '2.0',
-      method: request.method,
-      ...(request.params === undefined ? {} : { params: request.params }),
+      method,
+      ...(params === undefined ? {} : { params }),
     })
   } catch (cause) {
     throw rpcFailure('the request could not be encoded.', { cause })
@@ -145,7 +145,7 @@ function encodeRequest(request: ProviderRequest, id: number) {
 function readContentLength(response: Response, maximumBytes: number) {
   const value = response.headers.get('content-length')
   if (value === null) return
-  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+  if (!/^[0-9]+$/.test(value)) {
     throw rpcFailure('the server returned an invalid content length.')
   }
   if (BigInt(value) > BigInt(maximumBytes)) {
@@ -284,8 +284,30 @@ export function createHttpRpcProvider(
     if (pending.settled) return
     pending.settled = true
     clearTimeout(pending.timeout)
+    if (pending.handleAbort) {
+      pending.signal?.removeEventListener('abort', pending.handleAbort)
+    }
     if ('error' in outcome) pending.reject(outcome.error)
     else pending.resolve(outcome.value)
+  }
+
+  const removeQueued = (pending: PendingRequest) => {
+    const index = queued.indexOf(pending)
+    if (index >= 0) queued.splice(index, 1)
+  }
+
+  const interrupt = (
+    pending: PendingRequest,
+    error: Error,
+    reason?: unknown,
+  ) => {
+    if (pending.settled) return
+    pending.controller?.abort(reason)
+    settle(pending, { error })
+    if (!running.has(pending)) {
+      removeQueued(pending)
+      pump()
+    }
   }
 
   const pump = () => {
@@ -293,6 +315,10 @@ export function createHttpRpcProvider(
       const pending = queued.shift()
       if (!pending) return
       if (pending.settled) continue
+      if (Date.now() >= pending.deadline) {
+        settle(pending, { error: new Error('HTTP RPC request timed out.') })
+        continue
+      }
       active += 1
       running.add(pending)
       const controller = new AbortController()
@@ -360,6 +386,63 @@ export function createHttpRpcProvider(
     }
   }
 
+  const schedule = (request: ProviderRequest, signal?: AbortSignal) => {
+    if (signal?.aborted) {
+      return Promise.reject(new Error('HTTP RPC request was cancelled.'))
+    }
+    if (closed) {
+      return Promise.reject(new Error('The HTTP RPC transport was closed.'))
+    }
+    const id = nextId
+    nextId += 1
+    let body: string
+    try {
+      body = encodeRequest(request, id)
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    if (queued.length + running.size >= maxOutstandingRequests) {
+      return Promise.reject(
+        new Error(
+          'The HTTP RPC transport is busy. Wait for a bounded request to finish.',
+        ),
+      )
+    }
+    const deadline = Date.now() + timeoutMs
+    return new Promise<unknown>((resolve, reject) => {
+      const pending: PendingRequest = {
+        body,
+        deadline,
+        id,
+        reject,
+        resolve,
+        settled: false,
+        signal,
+      }
+      pending.timeout = setTimeout(
+        () =>
+          interrupt(
+            pending,
+            new Error('HTTP RPC request timed out.'),
+            'deadline',
+          ),
+        Math.max(0, deadline - Date.now()),
+      )
+      queued.push(pending)
+      if (signal) {
+        pending.handleAbort = () =>
+          interrupt(
+            pending,
+            new Error('HTTP RPC request was cancelled.'),
+            signal.reason,
+          )
+        signal.addEventListener('abort', pending.handleAbort, { once: true })
+        if (signal.aborted) pending.handleAbort()
+      }
+      pump()
+    })
+  }
+
   const provider: HttpRpcProvider = {
     close() {
       if (closed) return
@@ -375,47 +458,10 @@ export function createHttpRpcProvider(
     },
     endpoint,
     request(request) {
-      if (closed) {
-        return Promise.reject(new Error('The HTTP RPC transport was closed.'))
-      }
-      const id = nextId
-      nextId += 1
-      let body: string
-      try {
-        body = encodeRequest(request, id)
-      } catch (error) {
-        return Promise.reject(error)
-      }
-      if (queued.length + running.size >= maxOutstandingRequests) {
-        return Promise.reject(
-          new Error(
-            'The HTTP RPC transport is busy. Wait for a bounded request to finish.',
-          ),
-        )
-      }
-      return new Promise<unknown>((resolve, reject) => {
-        const pending: PendingRequest = {
-          body,
-          id,
-          reject,
-          resolve,
-          settled: false,
-        }
-        pending.timeout = setTimeout(() => {
-          if (pending.settled) return
-          pending.controller?.abort()
-          settle(pending, {
-            error: new Error('HTTP RPC request timed out.'),
-          })
-          if (!running.has(pending)) {
-            const index = queued.indexOf(pending)
-            if (index >= 0) queued.splice(index, 1)
-            pump()
-          }
-        }, timeoutMs)
-        queued.push(pending)
-        pump()
-      })
+      return schedule(request)
+    },
+    requestWithSignal(request, signal) {
+      return schedule(request, signal)
     },
   }
 

@@ -20,8 +20,8 @@ import {
 } from './protocol-events'
 import { inspectProtocol } from './protocol'
 import {
-  beforeDeadline,
   parseChainId,
+  requestProviderBeforeDeadline,
   WALLET_READ_TIMEOUT_MS,
   type Eip1193Provider,
   type ProviderRequest,
@@ -189,23 +189,16 @@ async function requestInContext(
   request: ProviderRequest,
   signal: AbortSignal,
 ) {
+  const value = await requestProviderBeforeDeadline(
+    provider,
+    request,
+    Date.now() + WALLET_READ_TIMEOUT_MS,
+    () => new Error('Follow context read timed out.'),
+    signal,
+    cancelledError,
+  )
   if (signal.aborted) throw cancelledError()
-  let handleAbort: (() => void) | undefined
-  const interrupted = new Promise<never>((_resolve, reject) => {
-    handleAbort = () => reject(cancelledError())
-    signal.addEventListener('abort', handleAbort, { once: true })
-  })
-  try {
-    const value = await beforeDeadline(
-      () => Promise.race([provider.request(request), interrupted]),
-      Date.now() + WALLET_READ_TIMEOUT_MS,
-      () => new Error('Follow context read timed out.'),
-    )
-    if (signal.aborted) throw cancelledError()
-    return value
-  } finally {
-    if (handleAbort) signal.removeEventListener('abort', handleAbort)
-  }
+  return value
 }
 
 async function authenticateCacheInContext(
