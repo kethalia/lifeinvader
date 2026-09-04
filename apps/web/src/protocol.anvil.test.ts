@@ -14,6 +14,7 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import { createHttpRpcProvider, type HttpRpcProvider } from './http-rpc'
 import { synchronizePostFeed } from './post-feed'
 import { waitForPostFeedConfirmation } from './post-feed-confirmation'
 import { openPostCommentProjectionRun } from './post-comment-projection-run'
@@ -47,6 +48,7 @@ type JsonRpcResponse = {
 }
 let anvil: ChildProcess | undefined
 let provider: Eip1193Provider
+let readProvider: HttpRpcProvider
 let stderr = ''
 async function reservePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -119,7 +121,9 @@ async function waitForAnvil() {
 }
 beforeAll(async () => {
   const port = await reservePort()
-  provider = makeHttpProvider(`http://127.0.0.1:${port}`)
+  const rpcUrl = `http://127.0.0.1:${port}`
+  provider = makeHttpProvider(rpcUrl)
+  readProvider = createHttpRpcProvider(rpcUrl)
   anvil = spawn(
     'anvil',
     ['--host', '127.0.0.1', '--port', String(port), '--chain-id', '31337'],
@@ -131,6 +135,7 @@ beforeAll(async () => {
   await waitForAnvil()
 }, 10_000)
 afterAll(async () => {
+  readProvider.close()
   if (!anvil || anvil.exitCode !== null) return
   await new Promise<void>((resolve) => {
     anvil?.once('exit', () => resolve())
@@ -138,7 +143,7 @@ afterAll(async () => {
     setTimeout(resolve, 2_000)
   })
 })
-describe('wallet transaction helpers on Anvil', () => {
+describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
   it('deploys v1 and verifies profile, post, reaction, message, group, and follow events', async () => {
     const accounts = parseAccounts(
       await provider.request({ method: 'eth_accounts' }),
@@ -148,13 +153,21 @@ describe('wallet transaction helpers on Anvil', () => {
     expect(account).toBeDefined()
     expect(recipient).toBeDefined()
     if (!account || !recipient) return
-    await expect(inspectProtocol(provider)).resolves.toEqual({
+    await expect(inspectProtocol(readProvider)).resolves.toEqual({
       kind: 'deployable',
     })
     await expect(
-      deployProtocol(provider, account, LOCAL_CHAIN_ID, undefined, provider),
+      deployProtocol(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        undefined,
+        readProvider,
+      ),
     ).resolves.toMatchObject({ blockNumber: 1n })
-    await expect(inspectProtocol(provider)).resolves.toEqual({ kind: 'ready' })
+    await expect(inspectProtocol(readProvider)).resolves.toEqual({
+      kind: 'ready',
+    })
     await expect(
       setProfile(
         provider,
@@ -166,7 +179,7 @@ describe('wallet transaction helpers on Anvil', () => {
           displayName: 'Tracey',
         },
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 2n })
     const postReceipt = await publishPost(
@@ -175,7 +188,7 @@ describe('wallet transaction helpers on Anvil', () => {
       LOCAL_CHAIN_ID,
       { body: '', mediaCid: MEDIA_CID.bytes },
       undefined,
-      provider,
+      readProvider,
     )
     expect(postReceipt).toMatchObject({ blockNumber: 3n })
     await expect(
@@ -186,7 +199,7 @@ describe('wallet transaction helpers on Anvil', () => {
         1n,
         { body: 'Nothing here is private.', mediaCid: '0x' },
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 4n })
     await expect(
@@ -197,7 +210,7 @@ describe('wallet transaction helpers on Anvil', () => {
         1n,
         true,
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 5n })
     await expect(
@@ -208,11 +221,18 @@ describe('wallet transaction helpers on Anvil', () => {
         1n,
         false,
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 6n })
     await expect(
-      publishRepost(provider, account, LOCAL_CHAIN_ID, 1n, undefined, provider),
+      publishRepost(
+        provider,
+        account,
+        LOCAL_CHAIN_ID,
+        1n,
+        undefined,
+        readProvider,
+      ),
     ).resolves.toMatchObject({ blockNumber: 7n })
     const directMessageReceipt = await sendDirectMessage(
       provider,
@@ -221,7 +241,7 @@ describe('wallet transaction helpers on Anvil', () => {
       recipient,
       { body: 'This message is permanently public.', mediaCid: '0x' },
       undefined,
-      provider,
+      readProvider,
     )
     expect(directMessageReceipt).toMatchObject({
       blockNumber: 8n,
@@ -233,7 +253,7 @@ describe('wallet transaction helpers on Anvil', () => {
       LOCAL_CHAIN_ID,
       { metadataCid: MEDIA_CID.bytes, name: 'Bagholders Anonymous' },
       undefined,
-      provider,
+      readProvider,
     )
     expect(groupReceipt).toMatchObject({ blockNumber: 9n, groupId: 1n })
     await expect(
@@ -244,7 +264,7 @@ describe('wallet transaction helpers on Anvil', () => {
         groupReceipt.groupId,
         true,
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 10n })
     const groupMessageReceipt = await sendGroupMessage(
@@ -257,7 +277,7 @@ describe('wallet transaction helpers on Anvil', () => {
         mediaCid: MEDIA_CID.bytes,
       },
       undefined,
-      provider,
+      readProvider,
     )
     expect(groupMessageReceipt).toMatchObject({
       blockNumber: 11n,
@@ -271,7 +291,7 @@ describe('wallet transaction helpers on Anvil', () => {
         groupReceipt.groupId,
         false,
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 12n })
     await expect(
@@ -281,7 +301,7 @@ describe('wallet transaction helpers on Anvil', () => {
         LOCAL_CHAIN_ID,
         { avatarCid: '0x', bio: '', displayName: '' },
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 13n })
     await expect(
@@ -292,7 +312,7 @@ describe('wallet transaction helpers on Anvil', () => {
         recipient,
         true,
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 14n })
     const recipientWallet = withSelectedAccount(provider, recipient)
@@ -304,11 +324,11 @@ describe('wallet transaction helpers on Anvil', () => {
         account,
         true,
         undefined,
-        provider,
+        readProvider,
       ),
     ).resolves.toMatchObject({ blockNumber: 15n })
     const confirmation = waitForPostFeedConfirmation(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       {
         ...postReceipt,
@@ -323,14 +343,14 @@ describe('wallet transaction helpers on Anvil', () => {
     await provider.request({ method: 'anvil_mine', params: ['0xc'] })
     await confirmation
     await expect(
-      resolveProtocolHistoryBoundary(provider, LOCAL_CHAIN_ID),
+      resolveProtocolHistoryBoundary(readProvider, LOCAL_CHAIN_ID),
     ).resolves.toMatchObject({
       deployment: { blockNumber: 1n },
       kind: 'confirmed',
       startBlock: 1n,
     })
     const publicConversation = await synchronizeDirectMessageStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       account,
       recipient,
@@ -355,7 +375,7 @@ describe('wallet transaction helpers on Anvil', () => {
       ],
     })
     const groupDirectory = await synchronizeGroupDirectory(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       {
         storage: {
@@ -377,7 +397,7 @@ describe('wallet transaction helpers on Anvil', () => {
       ],
     })
     const publicMembership = await synchronizeGroupMembershipStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       groupReceipt.groupId,
       {
@@ -406,7 +426,7 @@ describe('wallet transaction helpers on Anvil', () => {
     })
     expect(publicMembership.projectionAnchor).toBeDefined()
     const publicGroup = await synchronizeGroupMessageStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       groupReceipt.groupId,
       {
@@ -436,7 +456,7 @@ describe('wallet transaction helpers on Anvil', () => {
       keyRange: IDBKeyRange,
     }
     const publicFollowing = await synchronizeFollowStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       account,
       'following',
@@ -452,7 +472,7 @@ describe('wallet transaction helpers on Anvil', () => {
     })
     expect(publicFollowing.projectionAnchor).toBeDefined()
     const publicFollowers = await synchronizeFollowStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       account,
       'followers',
@@ -467,7 +487,7 @@ describe('wallet transaction helpers on Anvil', () => {
       ],
     })
     expect(publicFollowers.projectionAnchor).toBeDefined()
-    const feed = await synchronizePostFeed(provider, LOCAL_CHAIN_ID, {
+    const feed = await synchronizePostFeed(readProvider, LOCAL_CHAIN_ID, {
       storage: {
         databaseName: 'lifeinvader-anvil-post-feed',
         factory: new IDBFactory(),
@@ -489,7 +509,7 @@ describe('wallet transaction helpers on Anvil', () => {
       keyRange: IDBKeyRange,
     }
     const comments = await synchronizePostCommentStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       { storage: commentStorage },
     )
@@ -532,7 +552,7 @@ describe('wallet transaction helpers on Anvil', () => {
       keyRange: IDBKeyRange,
     }
     const reactions = await synchronizePostReactionStream(
-      provider,
+      readProvider,
       LOCAL_CHAIN_ID,
       { storage: reactionStorage },
     )

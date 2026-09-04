@@ -5,7 +5,11 @@ Lifeinvader derives every view from EVM logs without a hosted indexer. The brows
 1. A transport-independent synchronization engine reads bounded canonical ranges.
 2. A [disposable on-device cache](./cache.md) applies the engine's additions and rollback instructions atomically.
 
-The first layer is implemented in `apps/web/src/event-indexer.ts`. It accepts any EIP-1193-shaped read transport, so a later UI can use a user-selected HTTP RPC without coupling reads to an injected wallet.
+The first layer is implemented in `apps/web/src/event-indexer.ts`. It accepts any EIP-1193-shaped read transport, so reads do not need to remain coupled to an injected wallet.
+
+`apps/web/src/http-rpc.ts` provides the bounded browser transport for a later user-selected endpoint UI. Constructing it performs no request and persists nothing. It accepts HTTPS endpoints plus explicit HTTP loopback URLs for local Anvil work, omits ambient credentials and referrers, rejects redirects, and refuses every wallet or signing method before touching the network. Its allowlist is limited to the seven chain-read methods used by Lifeinvader.
+
+One transport permits at most four active requests and 32 active-or-queued requests. Every request has one 15-second deadline, a 64 MiB response ceiling, and no automatic retry. Responses are streamed only up to that ceiling, decoded as strict UTF-8 JSON, and accepted only when the JSON-RPC version and numeric request identifier match and exactly one of `result` or `error` is present. Closing a transport aborts active fetches and rejects queued work. The current interface still reads through the wallet; a later bounded slice will verify a selected endpoint against the wallet chain before routing readers to it.
 
 ## Cursor identity
 
