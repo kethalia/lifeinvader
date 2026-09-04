@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Address, Hash, Hex } from 'viem'
 import {
   synchronizeGroupMessageStream,
@@ -262,12 +262,14 @@ function GroupMessageList({
 }
 
 export function PublicGroupMessagePanel({
+  readProvider,
   selectedGroupId,
   sendMessage = sendGroupMessage,
   session,
   synchronize = synchronizeGroupMessageStream,
   waitForReceipt = waitForTransactionReceipt,
 }: {
+  readProvider?: Eip1193Provider
   selectedGroupId?: bigint
   sendMessage?: typeof sendGroupMessage
   session: WalletSession
@@ -288,15 +290,26 @@ export function PublicGroupMessagePanel({
   const operationSequence = useRef(0)
   const readSequence = useRef(0)
   const selectedGroupIdRef = useRef(selectedGroupId)
-  const sessionRef = useRef(session)
+  const historySession = useMemo<WalletSession>(
+    () =>
+      readProvider !== undefined && readProvider !== session.provider
+        ? { ...session, provider: readProvider }
+        : session,
+    [readProvider, session],
+  )
+  const historySessionRef = useRef(historySession)
+  const walletSessionRef = useRef(session)
   selectedGroupIdRef.current = selectedGroupId
-  sessionRef.current = session
+  historySessionRef.current = historySession
+  walletSessionRef.current = session
 
   const connected =
     session.status === 'connected' &&
     session.account !== undefined &&
     session.chainId !== undefined &&
     session.provider !== undefined
+  const readsSelectedRpc =
+    connected && readProvider !== undefined && readProvider !== session.provider
   const selected = validGroupId(selectedGroupId)
 
   useEffect(() => {
@@ -309,7 +322,12 @@ export function PublicGroupMessagePanel({
       activeRead.current?.abort()
       activeRead.current = undefined
     }
-  }, [session.chainId, session.provider, session.status, selectedGroupId])
+  }, [
+    historySession.chainId,
+    historySession.provider,
+    historySession.status,
+    selectedGroupId,
+  ])
 
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
   let mediaCidError: string | undefined
@@ -335,14 +353,18 @@ export function PublicGroupMessagePanel({
   )
   const displayedReadState =
     readState.phase === 'idle' ||
-    readContextMatchesSelection(readState.context, session, selectedGroupId)
+    readContextMatchesSelection(
+      readState.context,
+      historySession,
+      selectedGroupId,
+    )
       ? readState
       : ({ phase: 'idle' } as const)
 
   const clearExactDraft = (context: GroupMessageContext) => {
     if (
       context.composeRevision !== composeRevision.current ||
-      !contextMatchesSession(context, sessionRef.current) ||
+      !contextMatchesSession(context, walletSessionRef.current) ||
       selectedGroupIdRef.current !== context.groupId
     ) {
       return
@@ -558,8 +580,8 @@ export function PublicGroupMessagePanel({
   }
 
   const runReadStep = () => {
-    const chainId = session.chainId
-    const provider = session.provider
+    const chainId = historySession.chainId
+    const provider = historySession.provider
     if (
       session.status !== 'connected' ||
       chainId === undefined ||
@@ -588,7 +610,7 @@ export function PublicGroupMessagePanel({
           requestId !== readSequence.current ||
           !readContextMatchesSelection(
             context,
-            sessionRef.current,
+            historySessionRef.current,
             selectedGroupIdRef.current,
           )
         ) {
@@ -611,7 +633,7 @@ export function PublicGroupMessagePanel({
           requestId !== readSequence.current ||
           !readContextMatchesSelection(
             context,
-            sessionRef.current,
+            historySessionRef.current,
             selectedGroupIdRef.current,
           )
         ) {
@@ -862,10 +884,11 @@ export function PublicGroupMessagePanel({
         >
           <h4>Reconstruct this public group channel</h4>
           <p className="message-history-scope">
-            The browser asks the wallet RPC only for the selected group, one
-            bounded confirmed range per click from the verified protocol history
-            boundary. No chat server, membership gate, or global message scan is
-            used.
+            The browser asks{' '}
+            {readsSelectedRpc ? 'the selected read RPC' : 'the wallet RPC'} only
+            for the selected group, one bounded confirmed range per click from
+            the verified protocol history boundary. No chat server, membership
+            gate, or global message scan is used.
           </p>
           <p
             aria-live="polite"
