@@ -40,8 +40,9 @@ const WalletWriteBoundaryContext =
 
 /**
  * Coordinate transaction-producing consoles without centralizing their local
- * recovery state. Each mounted scope reports only its own unresolved write;
- * consumers receive a lock only when another scope is unresolved.
+ * recovery state. Each mounted scope reports its own unresolved writes across
+ * every retained wallet context; consumers receive a lock only when another
+ * scope is unresolved.
  */
 export function WalletWriteBoundary({
   children,
@@ -66,8 +67,8 @@ export function WalletWriteBoundary({
 }
 
 /**
- * Report one console's local unresolved state and return whether another
- * console currently owns the shared wallet-write boundary.
+ * Report one console's context-independent unresolved state and return whether
+ * another console currently owns the shared wallet-write boundary.
  */
 export function useWalletWriteBoundary(
   scope: WalletWriteScope,

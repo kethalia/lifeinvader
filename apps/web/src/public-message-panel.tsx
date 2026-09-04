@@ -333,10 +333,7 @@ export function PublicMessagePanel({
   }
   const bodyBytes = getPostBodyByteLength(body)
   const emptyPayload = bodyBytes === 0 && parsedMediaCid === undefined
-  const currentAttempts = attempts.filter((attempt) =>
-    accountChainMatchesSession(attempt, session),
-  )
-  const localWriteLocked = currentAttempts.some(
+  const localWriteLocked = attempts.some(
     (attempt) => attempt.status !== 'failed',
   )
   const lockedByAnotherConsole = useWalletWriteBoundary(
@@ -849,7 +846,9 @@ export function PublicMessagePanel({
                   ) : null}
                   . {statusCopy}{' '}
                   {!currentAccountChain
-                    ? 'This belongs to another account or chain and does not lock the current composer.'
+                    ? unresolved
+                      ? 'This belongs to another account or chain and keeps every wallet write locked until it is resolved or dismissed.'
+                      : 'This failed action belongs to another account or chain and does not lock new writes.'
                     : !currentProvider && unresolved
                       ? `Reconnect ${attempt.walletName} for provider-specific recovery. This unresolved action still locks this account and chain.`
                       : !currentProvider

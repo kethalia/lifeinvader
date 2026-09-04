@@ -577,7 +577,7 @@ describe('App', () => {
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     stop()
   })
-  it('scopes concurrent busy writes to their original wallet context', async () => {
+  it('keeps a busy write locked across wallet context changes', async () => {
     let chainId = '0x1'
     let submissions = 0
     const firstSubmission = deferred<string>()
@@ -627,17 +627,20 @@ describe('App', () => {
     const chainBPublish = await screen.findByRole('button', {
       name: /publish on-chain/i,
     })
-    expect(chainBPublish.hasAttribute('disabled')).toBe(false)
-    fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
+    expect(chainBPublish.hasAttribute('disabled')).toBe(true)
     fireEvent.click(chainBPublish)
-    await waitFor(() => expect(submissions).toBe(2))
-    expect(buttonDisabled(/^publishing…$/i)).toBe(true)
+    expect(submissions).toBe(1)
 
     await act(async () => {
       firstSubmission.reject(rejection)
       await Promise.resolve()
       await Promise.resolve()
     })
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
+
+    fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    await waitFor(() => expect(submissions).toBe(2))
     expect(buttonDisabled(/^publishing…$/i)).toBe(true)
 
     await act(async () => {
@@ -859,7 +862,7 @@ describe('App', () => {
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     expect((restoredMediaInput as HTMLInputElement).disabled).toBe(false)
   })
-  it('preserves an unknown post while another chain starts a write', async () => {
+  it('keeps an unknown post locked across chains until it is dismissed', async () => {
     let chainId = '0x1'
     let submissions = 0
     const listeners = new Map<string, Set<(value: unknown) => void>>()
@@ -909,15 +912,13 @@ describe('App', () => {
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
     await act(async () => emitChain('0x2'))
     expect(
-      await screen.findByText(/another wallet context.*current console/i),
+      await screen.findByText(
+        /another wallet context.*keeps every wallet write locked/i,
+      ),
     ).toBeTruthy()
-    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
-
-    fireEvent.change(textarea, { target: { value: 'Rejected on chain B.' } })
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
-    expect((await screen.findByRole('alert')).textContent).toMatch(
-      /request was rejected/i,
-    )
+    expect(submissions).toBe(1)
 
     await act(async () => emitChain('0x1'))
     expect(
@@ -925,6 +926,17 @@ describe('App', () => {
     ).toBeTruthy()
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
     expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked this hash/i }),
+    )
+    await act(async () => emitChain('0x2'))
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
+    fireEvent.change(textarea, { target: { value: 'Rejected on chain B.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /request was rejected/i,
+    )
     stop()
   })
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {

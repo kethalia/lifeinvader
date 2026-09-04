@@ -173,7 +173,9 @@ function TransactionStatus({
         )}
         {statusCopy}{' '}
         {!currentContext
-          ? 'This belongs to another wallet context and does not lock the current console.'
+          ? transaction.status === 'failed'
+            ? 'This failed action belongs to another wallet context and does not lock new writes.'
+            : 'This belongs to another wallet context and keeps every wallet write locked until it is resolved or dismissed.'
           : null}
       </span>
       {transaction.status === 'unknown' ||
@@ -703,17 +705,12 @@ export function WalletPanel({
   const activeResult = results.findLast((result) =>
     transactionContextMatchesSession(result, session),
   )
-  const activeSubmittedTransactions = submittedTransactions.filter(
-    (transaction) => transactionContextMatchesSession(transaction, session),
-  )
   const busyAction = busyOperations.findLast((operation) =>
     busyOperationMatchesSession(operation, session),
   )?.action
   const protocolTransactionWriteLocked =
-    (busyAction !== undefined && busyAction !== 'chain') ||
-    activeSubmittedTransactions.some(
-      (transaction) => transaction.status !== 'failed',
-    )
+    busyOperations.some((operation) => operation.action !== 'chain') ||
+    submittedTransactions.some((transaction) => transaction.status !== 'failed')
   const walletWriteLocked = protocolTransactionWriteLocked || storageWriteLocked
   const lockedByAnotherConsole = useWalletWriteBoundary(
     'wallet',

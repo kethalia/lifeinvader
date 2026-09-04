@@ -1041,7 +1041,7 @@ describe('PostFeedPanel', () => {
     )
   })
 
-  it('retains delayed old-chain recovery without locking the new chain', async () => {
+  it('retains delayed old-chain recovery and locks the new chain', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const delayedAction = deferred<TransactionReceipt>()
     let reportSubmitted: TransactionSubmitted | undefined
@@ -1085,7 +1085,8 @@ describe('PostFeedPanel', () => {
       screen
         .getByRole('button', { name: /record like for post 1/i })
         .hasAttribute('disabled'),
-    ).toBe(false)
+    ).toBe(true)
+    expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
 
     await act(async () =>
       delayedAction.resolve({
@@ -1099,9 +1100,14 @@ describe('PostFeedPanel', () => {
         screen.queryByText(/belongs to another wallet context/i),
       ).toBeNull(),
     )
+    expect(
+      screen
+        .getByRole('button', { name: /record like for post 1/i })
+        .hasAttribute('disabled'),
+    ).toBe(false)
   })
 
-  it('clears the published context draft without clearing a new-chain draft', async () => {
+  it('locks new-chain comments until the old action resolves', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const delayedComment = deferred<TransactionReceipt>()
     const publishCommentAction = vi
@@ -1150,13 +1156,10 @@ describe('PostFeedPanel', () => {
       />,
     )
     await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
-    fireEvent.click(
-      screen.getByRole('button', { name: /write comment for post 1/i }),
-    )
-    const newDraft = screen.getByRole('textbox', {
-      name: /permanent public comment/i,
+    const chainTwoComment = screen.getByRole('button', {
+      name: /write comment for post 1/i,
     })
-    fireEvent.change(newDraft, { target: { value: 'New-chain draft.' } })
+    expect(chainTwoComment.hasAttribute('disabled')).toBe(true)
 
     await act(async () =>
       delayedComment.resolve({
@@ -1165,6 +1168,14 @@ describe('PostFeedPanel', () => {
         hash: TRANSACTION_HASH,
       }),
     )
+    await waitFor(() =>
+      expect(chainTwoComment.hasAttribute('disabled')).toBe(false),
+    )
+    fireEvent.click(chainTwoComment)
+    const newDraft = screen.getByRole('textbox', {
+      name: /permanent public comment/i,
+    })
+    fireEvent.change(newDraft, { target: { value: 'New-chain draft.' } })
     expect(
       (
         screen.getByRole('textbox', {

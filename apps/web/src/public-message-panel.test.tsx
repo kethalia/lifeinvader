@@ -232,12 +232,12 @@ describe('PublicMessagePanel', () => {
     const sendMessage = vi.fn<typeof sendDirectMessage>(
       async () => pending.promise,
     )
-    const view = (walletLocked: boolean) => (
+    const view = (walletLocked: boolean, chainId = 1n) => (
       <WalletWriteBoundary>
         <WriteBoundaryProbe local={walletLocked} scope="wallet" />
         <PublicMessagePanel
           sendMessage={sendMessage}
-          session={connectedSession(provider)}
+          session={connectedSession(provider, chainId)}
         />
       </WalletWriteBoundary>
     )
@@ -266,6 +266,14 @@ describe('PublicMessagePanel', () => {
     )
     await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1))
     expect(screen.getByTestId('write-lock-wallet').textContent).toBe('true')
+
+    rerender(view(false, 2n))
+    expect(screen.getByTestId('write-lock-wallet').textContent).toBe('true')
+    expect(
+      screen
+        .getByRole('button', { name: /public message action pending/i })
+        .hasAttribute('disabled'),
+    ).toBe(true)
 
     await act(async () => pending.resolve(RECEIPT))
     await waitFor(() =>
@@ -337,7 +345,7 @@ describe('PublicMessagePanel', () => {
     ).toHaveProperty('checked', false)
   })
 
-  it('does not let an old-chain completion clear a newer wallet-context draft', async () => {
+  it('locks a new chain until the old write resolves and preserves later drafts', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pendingReceipt = deferred<TransactionReceipt>()
     const sendMessage = vi.fn<typeof sendDirectMessage>(
@@ -362,9 +370,11 @@ describe('PublicMessagePanel', () => {
       />,
     )
     const body = screen.getByLabelText(/public message$/i)
-    expect(body.hasAttribute('disabled')).toBe(false)
-    fireEvent.change(body, { target: { value: 'New-chain draft.' } })
+    expect(body.hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
     await act(async () => pendingReceipt.resolve(RECEIPT))
+    await waitFor(() => expect(body.hasAttribute('disabled')).toBe(false))
+    fireEvent.change(body, { target: { value: 'New-chain draft.' } })
 
     expect(body).toHaveProperty('value', 'New-chain draft.')
     expect(screen.queryByText(/was included in block 42/i)).toBeNull()
@@ -458,7 +468,7 @@ describe('PublicMessagePanel', () => {
     ).toBeNull()
   })
 
-  it('retains every unresolved attempt across more than eight wallet contexts', async () => {
+  it('retains one unresolved lock across more than eight wallet contexts', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pendingForever = new Promise<TransactionReceipt>(() => undefined)
     const sendMessage = vi.fn<typeof sendDirectMessage>(
@@ -471,22 +481,24 @@ describe('PublicMessagePanel', () => {
       />,
     )
     fillDraft()
+    fireEvent.click(
+      screen.getByRole('button', { name: /send public message on-chain/i }),
+    )
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1))
 
-    for (let chainId = 1n; chainId <= 9n; chainId += 1n) {
-      if (chainId !== 1n) {
-        rerender(
-          <PublicMessagePanel
-            sendMessage={sendMessage}
-            session={connectedSession(provider, chainId)}
-          />,
-        )
-      }
-      fireEvent.click(
-        screen.getByRole('button', { name: /send public message on-chain/i }),
+    for (let chainId = 2n; chainId <= 10n; chainId += 1n) {
+      rerender(
+        <PublicMessagePanel
+          sendMessage={sendMessage}
+          session={connectedSession(provider, chainId)}
+        />,
       )
-      await waitFor(() =>
-        expect(sendMessage).toHaveBeenCalledTimes(Number(chainId)),
-      )
+      expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
+      expect(
+        screen
+          .getByRole('button', { name: /public message action pending/i })
+          .hasAttribute('disabled'),
+      ).toBe(true)
     }
 
     rerender(
@@ -495,7 +507,7 @@ describe('PublicMessagePanel', () => {
         session={connectedSession(provider)}
       />,
     )
-    expect(screen.getAllByText(/approve or reject/i)).toHaveLength(9)
+    expect(screen.getAllByText(/approve or reject/i)).toHaveLength(1)
     expect(
       screen
         .getByRole('button', { name: /public message action pending/i })

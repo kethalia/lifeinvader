@@ -547,10 +547,7 @@ export function PostFeedPanel({
   const activePostActionProblem = postActionProblems.findLast((problem) =>
     actionContextMatchesSession(problem, session),
   )
-  const activePostActionAttempts = postActionAttempts.filter((attempt) =>
-    actionContextMatchesSession(attempt, session),
-  )
-  const localWriteLocked = activePostActionAttempts.some(
+  const localWriteLocked = postActionAttempts.some(
     (attempt) => attempt.status !== 'failed',
   )
   const lockedByAnotherConsole = useWalletWriteBoundary(
@@ -1231,7 +1228,9 @@ export function PostFeedPanel({
                       ? 'The wallet returned no hash, but may have broadcast it. Check wallet activity before trying again.'
                       : 'Its final status is unknown. Check this hash before trying again.'}{' '}
               {!currentContext
-                ? 'This belongs to another wallet context and does not lock the current feed.'
+                ? transaction.status === 'failed'
+                  ? 'This failed action belongs to another wallet context and does not lock new writes.'
+                  : 'This belongs to another wallet context and keeps every wallet write locked until it is resolved or dismissed.'
                 : null}
             </span>
             {transaction.status === 'unknown' ||

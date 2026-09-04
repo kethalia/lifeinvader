@@ -278,7 +278,7 @@ describe('PublicGroupMessagePanel', () => {
     ).toHaveProperty('checked', false)
   })
 
-  it('does not clear a draft after its selected group or wallet context changes', async () => {
+  it('locks a new group context until the old write resolves', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const pending = deferred<Awaited<ReturnType<typeof sendGroupMessage>>>()
     const sendMessage = vi.fn<typeof sendGroupMessage>(
@@ -305,11 +305,13 @@ describe('PublicGroupMessagePanel', () => {
       />,
     )
     const body = screen.getByLabelText(/public group message/i)
-    expect(body.hasAttribute('disabled')).toBe(false)
+    expect(body.hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
+    await act(async () => pending.resolve(RECEIPT))
+    await waitFor(() => expect(body.hasAttribute('disabled')).toBe(false))
     fireEvent.change(body, {
       target: { value: 'New account and group draft.' },
     })
-    await act(async () => pending.resolve(RECEIPT))
 
     expect(body).toHaveProperty('value', 'New account and group draft.')
     expect(screen.queryByText(/public group message #7/i)).toBeNull()

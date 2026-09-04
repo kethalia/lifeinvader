@@ -463,7 +463,7 @@ describe('PublicFollowPanel', () => {
     ).toBe(false)
   })
 
-  it('keeps an ambiguous action locked only in its original wallet context', async () => {
+  it('keeps an ambiguous action locked across wallet contexts', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const replacementProvider = { request: vi.fn() } as Eip1193Provider
     const setFollowAction = vi
@@ -499,12 +499,20 @@ describe('PublicFollowPanel', () => {
     ).toBe(true)
     rerender(
       <PublicFollowPanel
-        session={connectedSession(replacementProvider, ACCOUNT_B)}
+        session={connectedSession(replacementProvider, ACCOUNT_C)}
         setFollowAction={setFollowAction}
       />,
     )
-    setTarget(ACCOUNT_C)
     expect(screen.getByText(/belongs to another wallet context/i)).toBeTruthy()
+    expect(screen.getByText(/keeps every wallet write locked/i)).toBeTruthy()
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: 'Follow on-chain' })
+        .disabled,
+    ).toBe(true)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked my wallet/i }),
+    )
     expect(
       screen.getByRole<HTMLButtonElement>('button', { name: 'Follow on-chain' })
         .disabled,

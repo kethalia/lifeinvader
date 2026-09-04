@@ -205,7 +205,9 @@ function FollowAttemptStatus({
         ) : null}
         . {statusCopy}{' '}
         {!currentContext
-          ? 'This belongs to another wallet context and does not lock the current controls.'
+          ? attempt.status === 'failed'
+            ? 'This failed action belongs to another wallet context and does not lock new writes.'
+            : 'This belongs to another wallet context and keeps every wallet write locked until it is resolved or dismissed.'
           : null}
         {currentContext &&
         !receiptProviderAvailable &&
@@ -339,7 +341,7 @@ export function PublicFollowPanel({
   const currentAttempts = attempts.filter((attempt) =>
     contextMatchesSession(attempt, session),
   )
-  const localWriteLocked = currentAttempts.some(
+  const localWriteLocked = attempts.some(
     (attempt) => attempt.status !== 'failed',
   )
   const lockedByAnotherConsole = useWalletWriteBoundary(
