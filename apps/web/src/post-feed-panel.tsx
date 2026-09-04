@@ -147,23 +147,34 @@ function commentStatus(state: PostCommentReadModelState) {
     return 'Reading one bounded comment range and authenticating the visible post feed if it catches up…'
   }
   if (state.phase === 'catchup') {
+    if (
+      state.stream.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.safeHead
+    ) {
+      return `Lifeinvader history can begin at block ${state.stream.startBlock.toString()}, but the confirmed head is still ${state.stream.safeHead.toString()}. Wait for deployment confirmations, then check comments again.`
+    }
     const indexedThrough = state.stream.indexedThrough?.toString() ?? 'none'
     return `More confirmed comment history remains. Indexed through block ${indexedThrough} of confirmed head ${state.stream.safeHead?.toString() ?? 'unknown'}.`
   }
   if (state.phase === 'projecting') {
-    return `Local ${state.projection.phase} projection: ${state.projection.logsProcessed.toString()} events across ${state.projection.pagesScanned.toString()} bounded pages; ${state.projection.commentsRetained.toString()} visible comments retained.`
+    return `Local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()}: ${state.projection.logsProcessed.toString()} events across ${state.projection.pagesScanned.toString()} bounded pages; ${state.projection.commentsRetained.toString()} visible comments retained.`
   }
   if (state.phase === 'complete') {
     return state.projection.safeHead === undefined
-      ? 'Comment histories are exact for the currently confirmed empty range.'
-      : `Comment histories are exact through confirmed block ${state.projection.safeHead.toString()}.`
+      ? `Comment histories are exact from block ${state.projection.startBlock.toString()} for the currently confirmed empty range.`
+      : `Comment histories are exact from block ${state.projection.startBlock.toString()} through confirmed block ${state.projection.safeHead.toString()}.`
   }
   return state.message
 }
 
 function commentButtonLabel(state: PostCommentReadModelState) {
   if (state.phase === 'synchronizing') return 'Reading comments…'
-  if (state.phase === 'catchup') return 'Load next comment range'
+  if (state.phase === 'catchup') {
+    return state.stream.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.safeHead
+      ? 'Check comment confirmations'
+      : 'Load next comment range'
+  }
   if (state.phase === 'projecting') {
     return state.busy
       ? 'Processing comment page…'

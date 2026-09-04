@@ -18,7 +18,6 @@ import {
 } from './post-comment-projection'
 import {
   POST_COMMENT_EVENT_PAGE_SIZE,
-  POST_COMMENT_EVENT_START_BLOCK,
   assertIssuedPostCommentProjectionAnchor,
   authenticateIssuedPostCommentProjectionAnchor,
   type PostCommentProjectionAnchor,
@@ -40,6 +39,7 @@ export type PostCommentProjectionRunSnapshot = {
   pagesScanned: bigint
   phase: PostCommentProjectionRunPhase
   safeHead?: bigint
+  startBlock: bigint
 }
 
 export type OpenPostCommentProjectionRunOptions =
@@ -132,8 +132,8 @@ function sameCachePosition(
 
 function normalizeCachePosition(
   value: unknown,
-  seed: EventCursor,
-  expectedNextBlock: bigint,
+  chainId: bigint,
+  safeHead: bigint | undefined,
 ) {
   if (!isRecord(value)) throw projectionRunError('anchor position')
   let cursor: EventCursor
@@ -142,6 +142,14 @@ function normalizeCachePosition(
   } catch {
     throw projectionRunError('anchor cursor')
   }
+  const seed = createEventCursor({
+    chainId,
+    filter: PUBLISHED_COMMENT_FILTER,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock: cursor.startBlock,
+  })
+  const expectedNextBlock =
+    safeHead === undefined ? cursor.startBlock : safeHead + 1n
   if (
     !sameCursorScope(cursor, seed) ||
     cursor.nextBlock !== expectedNextBlock
@@ -175,18 +183,10 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
   if (value.safeHead !== safeHead) {
     throw projectionRunError('anchor safe head')
   }
-  const expectedNextBlock =
-    safeHead === undefined ? POST_COMMENT_EVENT_START_BLOCK : safeHead + 1n
-  const seed = createEventCursor({
-    chainId: value.chainId,
-    filter: PUBLISHED_COMMENT_FILTER,
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: POST_COMMENT_EVENT_START_BLOCK,
-  })
   const comments = normalizeCachePosition(
     value.comments,
-    seed,
-    expectedNextBlock,
+    value.chainId,
+    safeHead,
   )
   if (safeHead !== undefined) {
     const checkpoint = comments.cursor.checkpoints.at(-1)
@@ -285,6 +285,7 @@ export class PostCommentProjectionRun {
       pagesScanned: this.#pagesScanned,
       phase: this.#phase,
       safeHead: this.#anchor.safeHead,
+      startBlock: this.#anchor.comments.cursor.startBlock,
     }
   }
 

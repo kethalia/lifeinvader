@@ -24,9 +24,17 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import {
+  isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
+  resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
 
 export const POST_COMMENT_EVENT_PAGE_SIZE = 200
 export const POST_COMMENT_EVENT_START_BLOCK = 0n
+const MAX_PROTOCOL_HISTORY_SYNC_RETRIES = 1
 
 export type PostCommentProjectionAnchor = {
   readonly chainId: bigint
@@ -44,6 +52,7 @@ export type PostCommentStreamSnapshot = {
   recentComments: readonly PublishedComment[]
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type PostCommentStreamStorageOptions = Pick<
@@ -52,6 +61,7 @@ export type PostCommentStreamStorageOptions = Pick<
 >
 
 export type SynchronizePostCommentStreamOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: PostCommentStreamStorageOptions
 }
@@ -343,12 +353,6 @@ function sameCursor(first: EventCursor, second: EventCursor) {
 
 export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
   async (provider, chainId, options = {}) => {
-    const seed = createEventCursor({
-      chainId,
-      filter: PUBLISHED_COMMENT_FILTER,
-      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-      startBlock: POST_COMMENT_EVENT_START_BLOCK,
-    })
     assertActive(options.signal)
     const interruption = new AbortController()
     let contextChanged = false
@@ -384,133 +388,189 @@ export const synchronizePostCommentStream: PostCommentStreamSynchronizer =
           'Verified Lifeinvader v1 is required before this chain can provide post comments.',
         )
       }
-      const cache = await openEventCache({
-        ...options.storage,
-        filter: PUBLISHED_COMMENT_FILTER,
-      })
-      try {
-        assertContextActive()
-        let before = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
-        assertContextActive()
-        let cacheReset = before.reset
+      let historyRetries = 0
+      while (true) {
+        let historyAnchor: ProtocolBlockFingerprint | undefined
+        let startBlock = POST_COMMENT_EVENT_START_BLOCK
         try {
-          decodeCommentLogs(before.logs)
-        } catch {
+          const boundary = await (
+            options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+          )(provider, chainId, {
+            finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+            signal: interruption.signal,
+          })
           assertContextActive()
-          await cache.clear(seed)
-          assertContextActive()
-          before = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
-          assertContextActive()
-          cacheReset = true
-        }
-        const result = await syncEventLogs(
-          provider,
-          PUBLISHED_COMMENT_FILTER,
-          before.cursor,
-          { maxRanges: 1, signal: interruption.signal },
-        )
-        assertContextActive()
-        decodeCommentLogs(result.logs)
-        await cache.apply(before, result)
-        assertContextActive()
-        const after = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
-        assertContextActive()
-        if (
-          after.generation !== before.generation ||
-          after.revision !== before.revision + 1n ||
-          !sameCursor(after.cursor, result.cursor)
-        ) {
-          throw new Error(
-            'The post comment cache changed after synchronization. Retry the bounded range.',
-          )
-        }
-        let recentComments: readonly PublishedComment[]
-        try {
-          recentComments = decodeCommentLogs(after.logs)
+          historyAnchor = boundary.head
+          startBlock = boundary.startBlock
         } catch (error) {
           assertContextActive()
-          await cache.clear(seed)
-          assertContextActive()
-          throw error
+          if (!isProtocolHistoryUnavailableError(error)) throw error
         }
-        const indexedThrough =
-          after.cursor.nextBlock > after.cursor.startBlock
-            ? after.cursor.nextBlock - 1n
-            : undefined
-        const finalCheckpoint = after.cursor.checkpoints.at(-1)
-        if (finalCheckpoint) {
-          await assertCanonicalCheckpoint(
-            provider,
-            finalCheckpoint,
-            interruption.signal,
-          )
-          assertContextActive()
-        }
-        const finalHead = await readSelectedHead(
-          provider,
+        const seed = createEventCursor({
           chainId,
-          interruption.signal,
-        )
-        assertContextActive()
-        if (
-          indexedThrough !== undefined &&
-          (finalHead < indexedThrough ||
-            finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
-        ) {
-          throw new Error(
-            'The wallet head moved behind the confirmed post comments. Retry after the chain stabilizes.',
+          filter: PUBLISHED_COMMENT_FILTER,
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+          startBlock,
+        })
+        const cache = await openEventCache({
+          ...options.storage,
+          filter: PUBLISHED_COMMENT_FILTER,
+        })
+        try {
+          assertContextActive()
+          let before = await cache.readLatest(
+            seed,
+            POST_COMMENT_EVENT_PAGE_SIZE,
           )
-        }
-        if (finalCheckpoint) {
-          await assertCanonicalCheckpoint(
+          assertContextActive()
+          let cacheReset = before.reset
+          try {
+            decodeCommentLogs(before.logs)
+          } catch {
+            assertContextActive()
+            await cache.clear(seed)
+            assertContextActive()
+            before = await cache.readLatest(seed, POST_COMMENT_EVENT_PAGE_SIZE)
+            assertContextActive()
+            cacheReset = true
+          }
+          const result = await syncEventLogs(
             provider,
-            finalCheckpoint,
+            PUBLISHED_COMMENT_FILTER,
+            before.cursor,
+            { maxRanges: 1, signal: interruption.signal },
+          )
+          assertContextActive()
+          decodeCommentLogs(result.logs)
+          // The discovered head commits to the ancestry that established
+          // startBlock. Do not persist a range if that ancestry was replaced.
+          if (
+            historyAnchor &&
+            !(await protocolHistoryAnchorIsCanonical(
+              provider,
+              chainId,
+              historyAnchor,
+              { signal: interruption.signal },
+            ))
+          ) {
+            assertContextActive()
+            if (historyRetries >= MAX_PROTOCOL_HISTORY_SYNC_RETRIES) {
+              throw new Error(
+                'The protocol history anchor kept changing during post comment synchronization. Retry after the chain stabilizes.',
+              )
+            }
+            historyRetries += 1
+            continue
+          }
+          assertContextActive()
+          await cache.apply(before, result)
+          assertContextActive()
+          const after = await cache.readLatest(
+            seed,
+            POST_COMMENT_EVENT_PAGE_SIZE,
+          )
+          assertContextActive()
+          if (
+            after.generation !== before.generation ||
+            after.revision !== before.revision + 1n ||
+            !sameCursor(after.cursor, result.cursor)
+          ) {
+            throw new Error(
+              'The post comment cache changed after synchronization. Retry the bounded range.',
+            )
+          }
+          let recentComments: readonly PublishedComment[]
+          try {
+            recentComments = decodeCommentLogs(after.logs)
+          } catch (error) {
+            assertContextActive()
+            await cache.clear(seed)
+            assertContextActive()
+            throw error
+          }
+          const indexedThrough =
+            after.cursor.nextBlock > after.cursor.startBlock
+              ? after.cursor.nextBlock - 1n
+              : undefined
+          const finalCheckpoint = after.cursor.checkpoints.at(-1)
+          if (finalCheckpoint) {
+            await assertCanonicalCheckpoint(
+              provider,
+              finalCheckpoint,
+              interruption.signal,
+            )
+            assertContextActive()
+          }
+          const finalHead = await readSelectedHead(
+            provider,
+            chainId,
             interruption.signal,
           )
           assertContextActive()
+          if (
+            indexedThrough !== undefined &&
+            (finalHead < indexedThrough ||
+              finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
+          ) {
+            throw new Error(
+              'The wallet head moved behind the confirmed post comments. Retry after the chain stabilizes.',
+            )
+          }
+          if (finalCheckpoint) {
+            await assertCanonicalCheckpoint(
+              provider,
+              finalCheckpoint,
+              interruption.signal,
+            )
+            assertContextActive()
+          }
+          await assertSelectedChain(provider, chainId, interruption.signal)
+          assertContextActive()
+          const safeHead =
+            finalHead >= POST_FEED_CONFIRMATION_DEPTH
+              ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+              : undefined
+          const deploymentStillPending =
+            safeHead !== undefined && after.cursor.startBlock > safeHead
+          const caughtUp =
+            safeHead === undefined ||
+            (!deploymentStillPending && after.cursor.nextBlock > safeHead)
+          if (
+            caughtUp &&
+            safeHead !== undefined &&
+            finalCheckpoint?.blockNumber !== safeHead
+          ) {
+            throw new Error(
+              'The post comment stream did not anchor at the confirmed safe head.',
+            )
+          }
+          const position = {
+            cursor: after.cursor,
+            generation: after.generation,
+            revision: after.revision,
+          }
+          return {
+            cacheReset: cacheReset || after.reset,
+            caughtUp,
+            head: finalHead,
+            indexedThrough,
+            projectionAnchor: caughtUp
+              ? issueProjectionAnchor(
+                  provider,
+                  chainId,
+                  position,
+                  finalHead,
+                  safeHead,
+                )
+              : undefined,
+            recentComments,
+            safeHead,
+            scannedRanges: result.scannedRanges,
+            startBlock,
+          }
+        } finally {
+          cache.close()
         }
-        await assertSelectedChain(provider, chainId, interruption.signal)
-        assertContextActive()
-        const safeHead =
-          finalHead >= POST_FEED_CONFIRMATION_DEPTH
-            ? finalHead - POST_FEED_CONFIRMATION_DEPTH
-            : undefined
-        const caughtUp =
-          safeHead === undefined || after.cursor.nextBlock > safeHead
-        if (
-          caughtUp &&
-          safeHead !== undefined &&
-          finalCheckpoint?.blockNumber !== safeHead
-        ) {
-          throw new Error(
-            'The post comment stream did not anchor at the confirmed safe head.',
-          )
-        }
-        const position = {
-          cursor: after.cursor,
-          generation: after.generation,
-          revision: after.revision,
-        }
-        return {
-          cacheReset: cacheReset || after.reset,
-          caughtUp,
-          head: finalHead,
-          indexedThrough,
-          projectionAnchor: caughtUp
-            ? issueProjectionAnchor(
-                provider,
-                chainId,
-                position,
-                finalHead,
-                safeHead,
-              )
-            : undefined,
-          recentComments,
-          safeHead,
-          scannedRanges: result.scannedRanges,
-        }
-      } finally {
-        cache.close()
       }
     } catch (error) {
       assertContextActive()

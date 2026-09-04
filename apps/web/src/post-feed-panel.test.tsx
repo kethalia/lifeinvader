@@ -146,6 +146,7 @@ function commentStream(
     recentComments: [],
     safeHead: 18n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -179,6 +180,7 @@ function commentProjection(
     pagesScanned: complete ? 2n : 1n,
     phase,
     safeHead: 18n,
+    startBlock: 0n,
   }
 }
 
@@ -474,7 +476,7 @@ describe('PostFeedPanel', () => {
     ).toBeTruthy()
     expect(
       screen.getByText(
-        /comment histories are exact through confirmed block 18/i,
+        /comment histories are exact from block 0 through confirmed block 18/i,
       ),
     ).toBeTruthy()
     expect(screen.getByText('Public comment 1.')).toBeTruthy()
@@ -517,6 +519,35 @@ describe('PostFeedPanel', () => {
     })
     expect(screen.getByText('Public comment 1.')).toBeTruthy()
     expect(run.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('explains when comment history starts after the confirmed head', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizePostComments = vi.fn().mockResolvedValue({
+      ...commentStream(),
+      indexedThrough: undefined,
+      safeHead: 8n,
+      startBlock: 9n,
+    })
+    render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={vi.fn().mockResolvedValue(snapshot([post('First post.')]))}
+        synchronizePostComments={synchronizePostComments}
+      />,
+    )
+
+    expect(await screen.findByText('First post.')).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /load comment histories/i }),
+    )
+
+    expect(
+      await screen.findByText(/wait for deployment confirmations/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: /check comment confirmations/i }),
+    ).toBeTruthy()
   })
 
   it('submits explicit like, unlike, and repost events for a confirmed post', async () => {
