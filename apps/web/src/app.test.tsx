@@ -484,7 +484,12 @@ describe('App', () => {
       },
     }
     const preparation = deferred<PreparedMediaCar>()
-    const prepareMediaAction = vi.fn(() => preparation.promise)
+    let rejectPreparation = false
+    const prepareMediaAction = vi.fn(() =>
+      rejectPreparation
+        ? Promise.reject(new Error('Cannot prepare media: unreadable file.'))
+        : preparation.promise,
+    )
     const publishPostAction = vi.fn<typeof publishPost>(async () => ({
       blockHash: RECEIPT_BLOCK_HASH as TransactionReceipt['blockHash'],
       blockNumber: 42n,
@@ -537,6 +542,21 @@ describe('App', () => {
     expect((textarea as HTMLTextAreaElement).value).toBe('')
     expect((mediaInput as HTMLInputElement).value).toBe('')
     expect(screen.queryByText(/is prepared locally/i)).toBeNull()
+
+    fireEvent.change(textarea, { target: { value: 'Do not publish me yet.' } })
+    rejectPreparation = true
+    fireEvent.change(screen.getByLabelText(/prepare a local image/i), {
+      target: { files: [new File(['bad'], 'bad.gif')] },
+    })
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /unreadable file/i,
+    )
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    expect((mediaInput as HTMLInputElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: /clear media error/i }))
+    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
+    expect((mediaInput as HTMLInputElement).disabled).toBe(false)
   })
   it('preserves an unknown post while another chain starts a write', async () => {
     let chainId = '0x1'

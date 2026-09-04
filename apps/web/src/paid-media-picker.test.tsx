@@ -176,9 +176,11 @@ describe('PaidMediaPicker', () => {
     const prepareMedia = vi.fn<PaidMediaPreparer>(async () => {
       throw new Error('Cannot prepare media: unsupported bytes.')
     })
+    const onPreparationErrorChange = vi.fn()
     render(
       <PaidMediaPicker
         onPrepared={vi.fn()}
+        onPreparationErrorChange={onPreparationErrorChange}
         onPreparingChange={vi.fn()}
         prepareMedia={prepareMedia}
       />,
@@ -190,8 +192,14 @@ describe('PaidMediaPicker', () => {
     expect((await screen.findByRole('alert')).textContent).toMatch(
       /unsupported bytes/i,
     )
+    expect(onPreparationErrorChange.mock.calls).toEqual([[false], [true]])
     fireEvent.click(screen.getByRole('button', { name: /clear media error/i }))
     expect(screen.queryByRole('alert')).toBeNull()
+    expect(onPreparationErrorChange.mock.calls).toEqual([
+      [false],
+      [true],
+      [false],
+    ])
   })
 
   it('aborts and releases an in-flight preparation when it unmounts', async () => {

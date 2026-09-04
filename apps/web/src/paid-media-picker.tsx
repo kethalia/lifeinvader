@@ -32,16 +32,20 @@ function describePreparationError(error: unknown) {
     : 'The selected media could not be prepared.'
 }
 
+function ignorePreparationErrorChange() {}
+
 export function PaidMediaPicker({
   disabled = false,
   initialPrepared,
   onPrepared,
+  onPreparationErrorChange = ignorePreparationErrorChange,
   onPreparingChange,
   prepareMedia = prepareMediaInBrowser,
 }: {
   disabled?: boolean
   initialPrepared?: PreparedMediaCar
   onPrepared(prepared: PreparedMediaCar | undefined): void
+  onPreparationErrorChange?(failed: boolean): void
   onPreparingChange(preparing: boolean): void
   prepareMedia?: PaidMediaPreparer
 }) {
@@ -49,6 +53,8 @@ export function PaidMediaPicker({
   const helpId = `${inputId}-help`
   const inputRef = useRef<HTMLInputElement>(null)
   const activeController = useRef<AbortController | undefined>(undefined)
+  const hasPreparationError = useRef(false)
+  const onPreparationErrorChangeRef = useRef(onPreparationErrorChange)
   const onPreparingChangeRef = useRef(onPreparingChange)
   const operationSequence = useRef(0)
   const [state, setState] = useState<PreparationState>(() =>
@@ -58,8 +64,9 @@ export function PaidMediaPicker({
   )
 
   useEffect(() => {
+    onPreparationErrorChangeRef.current = onPreparationErrorChange
     onPreparingChangeRef.current = onPreparingChange
-  }, [onPreparingChange])
+  }, [onPreparationErrorChange, onPreparingChange])
 
   useEffect(() => {
     return () => {
@@ -70,6 +77,8 @@ export function PaidMediaPicker({
       )
       activeController.current = undefined
       if (wasPreparing) onPreparingChangeRef.current(false)
+      if (hasPreparationError.current)
+        onPreparationErrorChangeRef.current(false)
     }
   }, [])
 
@@ -79,8 +88,10 @@ export function PaidMediaPicker({
       new DOMException('Media preparation was cancelled.', 'AbortError'),
     )
     activeController.current = undefined
+    hasPreparationError.current = false
     if (inputRef.current) inputRef.current.value = ''
     setState({ kind: 'idle' })
+    onPreparationErrorChange(false)
     onPreparingChange(false)
     onPrepared(undefined)
   }
@@ -91,6 +102,8 @@ export function PaidMediaPicker({
     activeController.current?.abort(
       new DOMException('A newer media file was selected.', 'AbortError'),
     )
+    hasPreparationError.current = false
+    onPreparationErrorChange(false)
     onPrepared(undefined)
 
     if (!file) {
@@ -140,6 +153,8 @@ export function PaidMediaPicker({
         )
           return
         setState({ kind: 'error', message: describePreparationError(error) })
+        hasPreparationError.current = true
+        onPreparationErrorChange(true)
       } finally {
         if (operationId === operationSequence.current) {
           activeController.current = undefined

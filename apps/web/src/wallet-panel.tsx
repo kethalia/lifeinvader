@@ -220,6 +220,7 @@ export function WalletPanel({
   const [mediaCidInput, setMediaCidInput] = useState('')
   const [mediaPickerRevision, setMediaPickerRevision] = useState(0)
   const [mediaPreparationBusy, setMediaPreparationBusy] = useState(false)
+  const [mediaPreparationFailed, setMediaPreparationFailed] = useState(false)
   const [preparedMedia, setPreparedMedia] = useState<PreparedMediaCar>()
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
   let mediaCidError: string | undefined
@@ -231,6 +232,7 @@ export function WalletPanel({
   }
   const composeRevision = useRef(0)
   const mediaPreparationBusyRef = useRef(false)
+  const mediaPreparationFailedRef = useRef(false)
   const inspectionSequence = useRef(0)
   const operationSequence = useRef(0)
   const sessionRef = useRef(session)
@@ -245,9 +247,15 @@ export function WalletPanel({
     mediaPreparationBusyRef.current = preparing
     setMediaPreparationBusy(preparing)
   }
+  const handleMediaPreparationErrorChange = (failed: boolean) => {
+    mediaPreparationFailedRef.current = failed
+    setMediaPreparationFailed(failed)
+  }
   const clearPreparedMedia = () => {
     mediaPreparationBusyRef.current = false
+    mediaPreparationFailedRef.current = false
     setMediaPreparationBusy(false)
+    setMediaPreparationFailed(false)
     setPreparedMedia(undefined)
     setMediaPickerRevision((current) => current + 1)
   }
@@ -496,6 +504,7 @@ export function WalletPanel({
       !account ||
       chainId === undefined ||
       mediaPreparationBusyRef.current ||
+      mediaPreparationFailedRef.current ||
       mediaCidError !== undefined
     )
       return
@@ -840,6 +849,7 @@ export function WalletPanel({
                 disabled={busyAction !== undefined || transactionWriteLocked}
                 initialPrepared={preparedMedia}
                 onPrepared={handlePreparedMedia}
+                onPreparationErrorChange={handleMediaPreparationErrorChange}
                 onPreparingChange={handleMediaPreparingChange}
                 {...(prepareMediaAction
                   ? { prepareMedia: prepareMediaAction }
@@ -853,7 +863,8 @@ export function WalletPanel({
                 disabled={
                   busyAction === 'post' ||
                   transactionWriteLocked ||
-                  mediaPreparationBusy
+                  mediaPreparationBusy ||
+                  mediaPreparationFailed
                 }
                 maxLength={MAX_MEDIA_CID_TEXT_LENGTH}
                 onChange={(event) => {
@@ -896,6 +907,7 @@ export function WalletPanel({
                     busyAction !== undefined ||
                     transactionWriteLocked ||
                     mediaPreparationBusy ||
+                    mediaPreparationFailed ||
                     (bodyBytes === 0 && parsedMediaCid === undefined) ||
                     mediaCidError !== undefined ||
                     bodyBytes > MAX_POST_BODY_BYTES
