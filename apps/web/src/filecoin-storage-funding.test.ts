@@ -434,6 +434,9 @@ describe('Filecoin storage funding plans', () => {
         maxLockupPeriod: LOCKUP_PERIOD,
         network: CALIBRATION,
       })
+      expect(Object.isFrozen(plan)).toBe(true)
+      expect(Object.isFrozen(plan.network)).toBe(true)
+      expect(Object.isFrozen(plan.network.contracts)).toBe(true)
     },
   )
 
@@ -781,6 +784,131 @@ describe('Filecoin storage funding transport', () => {
     expect(
       wallet.requests.filter(({ method }) => method === 'eth_call'),
     ).toHaveLength(0)
+  })
+
+  it('snapshots permit parameters before asynchronous wallet checks', async () => {
+    const quote = storageQuote()
+    const plan = planFilecoinStorageFunding(
+      quote,
+      ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID,
+    )
+    const wallet = walletProvider({ logs: fundingLogs(plan) })
+    const deadline = BigInt(Math.floor(Date.now() / 1_000)) + 3_600n
+    const typedData = permit(plan, deadline)
+
+    await expect(
+      fundFilecoinStorage(wallet.provider, quote, {
+        ...fundingOptions(plan, async ({ request }) => {
+          const candidate: ProviderRequest = {
+            method: 'eth_signTypedData_v4',
+            params: [plan.account, typedData],
+          }
+          const signature = request(candidate)
+          candidate.method = 'personal_sign'
+          candidate.params = [OTHER_ACCOUNT, 'mutated after validation']
+          await signature
+
+          const data = fundingData(plan, deadline)
+          await request({
+            method: 'eth_call',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+              'latest',
+            ],
+          })
+          return await request({
+            method: 'eth_sendTransaction',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+            ],
+          })
+        }),
+      }),
+    ).resolves.toMatchObject({ hash: TRANSACTION_HASH })
+    expect(
+      wallet.requests.filter(({ method }) => method === 'eth_signTypedData_v4'),
+    ).toEqual([
+      {
+        method: 'eth_signTypedData_v4',
+        params: [plan.account, typedData],
+      },
+    ])
+    expect(
+      wallet.requests.some(({ method }) => method === 'personal_sign'),
+    ).toBe(false)
+  })
+
+  it('snapshots validated transaction fields and injects the exact chain', async () => {
+    const quote = storageQuote({ depositAmount: 0n, needsApproval: true })
+    const plan = planFilecoinStorageFunding(
+      quote,
+      ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID,
+    )
+    const wallet = walletProvider({ logs: fundingLogs(plan) })
+    const data = fundingData(plan)
+
+    await expect(
+      fundFilecoinStorage(wallet.provider, quote, {
+        ...fundingOptions(plan, async ({ request }) => {
+          await request({
+            method: 'eth_call',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+              'latest',
+            ],
+          })
+          const candidate: ProviderRequest = {
+            method: 'eth_sendTransaction',
+            params: [
+              {
+                data,
+                from: plan.account,
+                to: plan.network.contracts.filecoinPay,
+              },
+            ],
+          }
+          const submitted = request(candidate)
+          candidate.params = [
+            {
+              data: '0x',
+              from: OTHER_ACCOUNT,
+              to: OTHER_ACCOUNT,
+              value: '0x1',
+            },
+          ]
+          return await submitted
+        }),
+      }),
+    ).resolves.toMatchObject({ hash: TRANSACTION_HASH })
+    expect(
+      wallet.requests.filter(({ method }) => method === 'eth_sendTransaction'),
+    ).toEqual([
+      {
+        method: 'eth_sendTransaction',
+        params: [
+          {
+            chainId: '0x4cb2f',
+            data,
+            from: plan.account,
+            to: plan.network.contracts.filecoinPay,
+          },
+        ],
+      },
+    ])
   })
 
   it('caps dependency reads and never forwards the over-budget call', async () => {

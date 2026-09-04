@@ -663,6 +663,11 @@ export async function createTransactionGuard(
   }
   const addProviderListener = provider.on?.bind(provider)
   const removeProviderListener = provider.removeListener?.bind(provider)
+  if (Boolean(addProviderListener) !== Boolean(removeProviderListener)) {
+    throw new Error(
+      'The wallet provider must expose both event subscription and cleanup methods.',
+    )
+  }
   const registeredListeners: {
     event: string
     listener: (...args: unknown[]) => void

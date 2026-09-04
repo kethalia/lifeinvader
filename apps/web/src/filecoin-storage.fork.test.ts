@@ -1,10 +1,17 @@
 // @vitest-environment node
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
-import { getAddress, type Address } from 'viem'
+import {
+  decodeFunctionResult,
+  encodeFunctionData,
+  getAddress,
+  type Address,
+  type Hex,
+} from 'viem'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import {
   FILECOIN_CALIBRATION_CHAIN_ID,
+  FILECOIN_STORAGE_NETWORKS,
   inspectFilecoinStorage,
 } from './filecoin-storage'
 import { fundFilecoinStorage } from './filecoin-storage-funding'
@@ -18,6 +25,35 @@ const UNUSED_QUOTE_ACCOUNT = getAddress(
 const FUNDED_ANVIL_ACCOUNT = getAddress(
   '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
 )
+const CALIBRATION_USDFC = FILECOIN_STORAGE_NETWORKS[1].contracts.usdfc
+const FIXTURE_USDFC_AMOUNT = 1_000_000_000_000_000_000n
+
+const USDFC_FIXTURE_ABI = [
+  {
+    inputs: [],
+    name: 'borrowerOperationsAddress',
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'account', type: 'address' }],
+    name: 'balanceOf',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { name: 'account', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    name: 'mint',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+] as const
 
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
@@ -42,6 +78,94 @@ async function rpc(
     throw new Error(payload.error.message ?? 'Local fork RPC request failed.')
   }
   return payload.result
+}
+
+async function readUsdfcBalance(url: string, account: Address) {
+  const result = await rpc(url, 'eth_call', [
+    {
+      data: encodeFunctionData({
+        abi: USDFC_FIXTURE_ABI,
+        functionName: 'balanceOf',
+        args: [account],
+      }),
+      to: CALIBRATION_USDFC,
+    },
+    'latest',
+  ])
+  if (typeof result !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(result)) {
+    throw new Error('Local fork RPC returned an invalid USDFC balance.')
+  }
+  return decodeFunctionResult({
+    abi: USDFC_FIXTURE_ABI,
+    data: result as Hex,
+    functionName: 'balanceOf',
+  })
+}
+
+async function seedUsdfc(url: string, account: Address, amount: bigint) {
+  const borrowerResult = await rpc(url, 'eth_call', [
+    {
+      data: encodeFunctionData({
+        abi: USDFC_FIXTURE_ABI,
+        functionName: 'borrowerOperationsAddress',
+      }),
+      to: CALIBRATION_USDFC,
+    },
+    'latest',
+  ])
+  if (
+    typeof borrowerResult !== 'string' ||
+    !/^0x(?:[0-9a-f]{2})*$/i.test(borrowerResult)
+  ) {
+    throw new Error('Local fork RPC returned invalid USDFC authority data.')
+  }
+  const borrowerOperations = getAddress(
+    decodeFunctionResult({
+      abi: USDFC_FIXTURE_ABI,
+      data: borrowerResult as Hex,
+      functionName: 'borrowerOperationsAddress',
+    }),
+  )
+  const balanceBefore = await readUsdfcBalance(url, account)
+  await rpc(url, 'anvil_impersonateAccount', [borrowerOperations])
+  try {
+    await rpc(url, 'anvil_setBalance', [
+      borrowerOperations,
+      '0x56bc75e2d63100000',
+    ])
+    const hash = await rpc(url, 'eth_sendTransaction', [
+      {
+        chainId: `0x${FILECOIN_CALIBRATION_CHAIN_ID.toString(16)}`,
+        data: encodeFunctionData({
+          abi: USDFC_FIXTURE_ABI,
+          functionName: 'mint',
+          args: [account, amount],
+        }),
+        from: borrowerOperations,
+        to: CALIBRATION_USDFC,
+      },
+    ])
+    if (typeof hash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(hash)) {
+      throw new Error('Local fork RPC did not return the fixture mint hash.')
+    }
+    await rpc(url, 'evm_mine')
+    const receipt = await rpc(url, 'eth_getTransactionReceipt', [hash])
+    if (
+      typeof receipt !== 'object' ||
+      receipt === null ||
+      !('status' in receipt) ||
+      receipt.status !== '0x1'
+    ) {
+      throw new Error('Local fork RPC did not confirm the fixture mint.')
+    }
+  } finally {
+    await rpc(url, 'anvil_stopImpersonatingAccount', [borrowerOperations])
+  }
+  const balanceAfter = await readUsdfcBalance(url, account)
+  if (balanceAfter !== balanceBefore + amount) {
+    throw new Error('Local fork RPC did not seed the expected USDFC balance.')
+  }
+  return balanceAfter
 }
 
 function httpProvider(
@@ -150,12 +274,18 @@ describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
     const methods: string[] = []
     const provider = httpProvider(forkRpcUrl, methods, FUNDED_ANVIL_ACCOUNT)
     try {
+      const walletBalance = await seedUsdfc(
+        forkRpcUrl,
+        FUNDED_ANVIL_ACCOUNT,
+        FIXTURE_USDFC_AMOUNT,
+      )
       const quote = await quoteFilecoinStorage(provider, 273, {
         expectedAccount: FUNDED_ANVIL_ACCOUNT,
         expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
       })
       expect(quote.ready).toBe(false)
       expect(quote.depositNeeded > 0n || quote.needsServiceApproval).toBe(true)
+      expect(walletBalance).toBeGreaterThanOrEqual(quote.depositNeeded)
       const submitted: string[] = []
 
       const receipt = await fundFilecoinStorage(provider, quote, {

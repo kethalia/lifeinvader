@@ -1101,6 +1101,23 @@ describe('protocol transactions', () => {
   })
 })
 describe('transaction chain binding', () => {
+  it.each(['subscription', 'cleanup'] as const)(
+    'rejects a provider with only the event %s method',
+    async (availableMethod) => {
+      const request = vi.fn(async () => {
+        throw new Error('Wallet reads must not start.')
+      })
+      const provider: Eip1193Provider = { request }
+      if (availableMethod === 'subscription') provider.on = vi.fn()
+      else provider.removeListener = vi.fn()
+
+      await expect(
+        createTransactionGuard(provider, ACCOUNT, 1n),
+      ).rejects.toThrow(/both event subscription and cleanup methods/i)
+      expect(request).not.toHaveBeenCalled()
+    },
+  )
+
   it('cleans listeners recorded before a nonstandard provider throws', async () => {
     const removed: string[] = []
     const request = vi.fn(async () => {

@@ -248,15 +248,18 @@ export function planFilecoinStorageFunding(
         ? 'deposit-and-approve'
         : 'deposit'
       : 'approve'
-  return {
+  return Object.freeze({
     account,
     chainId: expectedChainId,
     depositAmount,
     includesApproval,
     kind,
     maxLockupPeriod,
-    network,
-  }
+    network: Object.freeze({
+      ...network,
+      contracts: Object.freeze({ ...network.contracts }),
+    }),
+  })
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
@@ -329,7 +332,21 @@ function validateTransactionEnvelope(
   ) {
     throw fundingError('the wallet adapter selected an unexpected chain.')
   }
-  return parseHex(transaction.data, 'transaction data', 4_096)
+  const data = parseHex(transaction.data, 'transaction data', 4_096)
+  return {
+    data,
+    request: {
+      method: 'eth_sendTransaction',
+      params: [
+        {
+          chainId: `0x${plan.chainId.toString(16)}`,
+          data,
+          from: plan.account,
+          to: plan.network.contracts.filecoinPay,
+        },
+      ],
+    } satisfies ProviderRequest,
+  }
 }
 
 function validateFundingCalldata(
@@ -451,7 +468,7 @@ function exactTypedFields(
 function validatePermit(
   request: ProviderRequest,
   plan: FilecoinStorageFundingPlan,
-): bigint {
+): { deadline: bigint; request: ProviderRequest } {
   const params = requestParams(request, 'permit')
   if (params.length !== 2) {
     throw fundingError('the wallet adapter produced invalid permit parameters.')
@@ -509,7 +526,13 @@ function validatePermit(
   if (deadline < now || deadline > now + 7_200n) {
     throw fundingError('the permit deadline is outside the allowed window.')
   }
-  return deadline
+  return {
+    deadline,
+    request: {
+      method: 'eth_signTypedData_v4',
+      params: [signer, params[1] as string],
+    },
+  }
 }
 
 function validateReadCall(
@@ -542,7 +565,23 @@ function validateReadCall(
   if (params[1] !== undefined && params[1] !== 'latest') {
     throw fundingError('the wallet adapter selected a stale read block.')
   }
-  return validatePinnedRead(to, data, plan, permitDeadline, permitSignature)
+  const simulatedData = validatePinnedRead(
+    to,
+    data,
+    plan,
+    permitDeadline,
+    permitSignature,
+  )
+  const snapshot: Record<string, unknown> = { data, to }
+  if (call.from !== undefined) snapshot.from = plan.account
+  if (call.value !== undefined) snapshot.value = '0x0'
+  return {
+    request: {
+      method: 'eth_call',
+      params: [snapshot, 'latest'],
+    } satisfies ProviderRequest,
+    simulatedData,
+  }
 }
 
 function validatePinnedRead(
@@ -938,14 +977,18 @@ export async function fundFilecoinStorage(
       method === 'eth_call' ||
       method === 'eth_chainId'
     ) {
+      let providerRequest: ProviderRequest = { method }
       if (method === 'eth_call') {
-        const candidate = validateReadCall(
+        const validatedRead = validateReadCall(
           request,
           plan,
           permitDeadline,
           permitSignature,
         )
-        if (candidate) simulatedData = candidate
+        providerRequest = validatedRead.request
+        if (validatedRead.simulatedData) {
+          simulatedData = validatedRead.simulatedData
+        }
       } else if (
         request.params !== undefined &&
         (!Array.isArray(request.params) || request.params.length !== 0)
@@ -956,7 +999,7 @@ export async function fundFilecoinStorage(
       }
       const result = await requestProviderBeforeDeadline(
         provider,
-        request,
+        providerRequest,
         Date.now() + readTimeoutMs,
         () => fundingError('a wallet read timed out.'),
         options.signal,
@@ -982,10 +1025,11 @@ export async function fundFilecoinStorage(
           'the wallet adapter requested an unexpected signature.',
         )
       }
-      permitDeadline = validatePermit(request, plan)
+      const validatedPermit = validatePermit(request, plan)
+      permitDeadline = validatedPermit.deadline
       signatureCount += 1
       await guard.assertSubmission()
-      const signature = await provider.request(request)
+      const signature = await provider.request(validatedPermit.request)
       guard.assertUnchanged()
       permitSignature = parseHex(signature, 'permit signature', 65)
       if (permitSignature.length !== 132) {
@@ -1014,7 +1058,8 @@ export async function fundFilecoinStorage(
           'the wallet adapter produced invalid transaction parameters.',
         )
       }
-      const data = validateTransactionEnvelope(params[0], plan)
+      const validatedTransaction = validateTransactionEnvelope(params[0], plan)
+      const { data } = validatedTransaction
       validateFundingCalldata(data, plan, permitDeadline, permitSignature)
       if (
         !simulatedData ||
@@ -1029,7 +1074,7 @@ export async function fundFilecoinStorage(
       sendAttempted = true
       let hashValue: unknown
       try {
-        hashValue = await provider.request(request)
+        hashValue = await provider.request(validatedTransaction.request)
       } catch (error) {
         if (getRpcErrorCode(error) === 4001) rejected = error
         throw error
