@@ -20,9 +20,17 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
+import {
+  isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
+  resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
 
 const POST_FEED_PAGE_SIZE = 50
 const POST_FEED_START_BLOCK = 0n
+const MAX_PROTOCOL_HISTORY_SYNC_RETRIES = 1
 
 export type PostFeedSnapshot = {
   cacheReset: boolean
@@ -32,6 +40,7 @@ export type PostFeedSnapshot = {
   posts: readonly PublishedPost[]
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type PostFeedStorageOptions = Pick<
@@ -40,6 +49,7 @@ export type PostFeedStorageOptions = Pick<
 >
 
 export type SynchronizePostFeedOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: PostFeedStorageOptions
 }
@@ -184,12 +194,6 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
   chainId,
   options = {},
 ) => {
-  const seed = createEventCursor({
-    chainId,
-    filter: PUBLISHED_POST_FILTER,
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: POST_FEED_START_BLOCK,
-  })
   assertActive(options.signal)
   const interruption = new AbortController()
   let contextChanged = false
@@ -219,102 +223,153 @@ export const synchronizePostFeed: PostFeedSynchronizer = async (
         'Verified Lifeinvader v1 is required before this chain can provide a feed.',
       )
     }
-    const cache = await openEventCache({
-      ...options.storage,
-      filter: PUBLISHED_POST_FILTER,
-    })
-    try {
-      assertContextActive()
-      let before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
-      let cacheReset = before.reset
+    let historyRetries = 0
+    while (true) {
+      let historyAnchor: ProtocolBlockFingerprint | undefined
+      let startBlock = POST_FEED_START_BLOCK
       try {
-        decodePostLogs(before.logs)
-      } catch {
-        await cache.clear(seed)
-        before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
-        cacheReset = true
-      }
-      const result = await syncEventLogs(
-        provider,
-        PUBLISHED_POST_FILTER,
-        before.cursor,
-        {
-          maxRanges: 1,
+        const boundary = await (
+          options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+        )(provider, chainId, {
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
           signal: interruption.signal,
-        },
-      )
-      assertContextActive()
-      decodePostLogs(result.logs)
-      await cache.apply(before, result)
-      assertContextActive()
-      const after = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
-      if (
-        after.generation !== before.generation ||
-        after.revision !== before.revision + 1n ||
-        !sameCursor(after.cursor, result.cursor)
-      ) {
-        throw new Error(
-          'The post feed cache changed after synchronization. Retry the bounded range.',
-        )
-      }
-      let posts: readonly PublishedPost[]
-      try {
-        posts = decodePostLogs(after.logs)
+        })
+        assertContextActive()
+        historyAnchor = boundary.head
+        startBlock = boundary.startBlock
       } catch (error) {
-        await cache.clear(seed)
-        throw error
-      }
-      const indexedThrough =
-        after.cursor.nextBlock > after.cursor.startBlock
-          ? after.cursor.nextBlock - 1n
-          : undefined
-      const finalCheckpoint = after.cursor.checkpoints.at(-1)
-      if (finalCheckpoint) {
-        await assertCanonicalCheckpoint(
-          provider,
-          finalCheckpoint,
-          interruption.signal,
-        )
         assertContextActive()
+        if (!isProtocolHistoryUnavailableError(error)) throw error
       }
-      const finalHead = await readSelectedHead(
-        provider,
+      const seed = createEventCursor({
         chainId,
-        interruption.signal,
-      )
-      assertContextActive()
-      if (
-        indexedThrough !== undefined &&
-        (finalHead < indexedThrough ||
-          finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
-      ) {
-        throw new Error(
-          'The wallet head moved behind the confirmed post feed. Retry after the chain stabilizes.',
-        )
-      }
-      if (finalCheckpoint) {
-        await assertCanonicalCheckpoint(
+        filter: PUBLISHED_POST_FILTER,
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        startBlock,
+      })
+      const cache = await openEventCache({
+        ...options.storage,
+        filter: PUBLISHED_POST_FILTER,
+      })
+      try {
+        assertContextActive()
+        let before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+        let cacheReset = before.reset
+        try {
+          decodePostLogs(before.logs)
+        } catch {
+          await cache.clear(seed)
+          before = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+          cacheReset = true
+        }
+        const result = await syncEventLogs(
           provider,
-          finalCheckpoint,
+          PUBLISHED_POST_FILTER,
+          before.cursor,
+          {
+            maxRanges: 1,
+            signal: interruption.signal,
+          },
+        )
+        assertContextActive()
+        decodePostLogs(result.logs)
+        // The discovered head commits to the ancestry that established
+        // startBlock. Do not persist a range if that ancestry was replaced.
+        if (
+          historyAnchor &&
+          !(await protocolHistoryAnchorIsCanonical(
+            provider,
+            chainId,
+            historyAnchor,
+            { signal: interruption.signal },
+          ))
+        ) {
+          assertContextActive()
+          if (historyRetries >= MAX_PROTOCOL_HISTORY_SYNC_RETRIES) {
+            throw new Error(
+              'The protocol history anchor kept changing during post feed synchronization. Retry after the chain stabilizes.',
+            )
+          }
+          historyRetries += 1
+          continue
+        }
+        assertContextActive()
+        await cache.apply(before, result)
+        assertContextActive()
+        const after = await cache.readLatest(seed, POST_FEED_PAGE_SIZE)
+        if (
+          after.generation !== before.generation ||
+          after.revision !== before.revision + 1n ||
+          !sameCursor(after.cursor, result.cursor)
+        ) {
+          throw new Error(
+            'The post feed cache changed after synchronization. Retry the bounded range.',
+          )
+        }
+        let posts: readonly PublishedPost[]
+        try {
+          posts = decodePostLogs(after.logs)
+        } catch (error) {
+          await cache.clear(seed)
+          throw error
+        }
+        const indexedThrough =
+          after.cursor.nextBlock > after.cursor.startBlock
+            ? after.cursor.nextBlock - 1n
+            : undefined
+        const finalCheckpoint = after.cursor.checkpoints.at(-1)
+        if (finalCheckpoint) {
+          await assertCanonicalCheckpoint(
+            provider,
+            finalCheckpoint,
+            interruption.signal,
+          )
+          assertContextActive()
+        }
+        const finalHead = await readSelectedHead(
+          provider,
+          chainId,
           interruption.signal,
         )
         assertContextActive()
+        if (
+          indexedThrough !== undefined &&
+          (finalHead < indexedThrough ||
+            finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
+        ) {
+          throw new Error(
+            'The wallet head moved behind the confirmed post feed. Retry after the chain stabilizes.',
+          )
+        }
+        if (finalCheckpoint) {
+          await assertCanonicalCheckpoint(
+            provider,
+            finalCheckpoint,
+            interruption.signal,
+          )
+          assertContextActive()
+        }
+        const safeHead =
+          finalHead >= POST_FEED_CONFIRMATION_DEPTH
+            ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+            : undefined
+        const deploymentStillPending =
+          safeHead !== undefined && after.cursor.startBlock > safeHead
+        return {
+          cacheReset: cacheReset || after.reset,
+          caughtUp:
+            safeHead === undefined ||
+            (!deploymentStillPending && after.cursor.nextBlock > safeHead),
+          head: finalHead,
+          indexedThrough,
+          posts,
+          safeHead,
+          scannedRanges: result.scannedRanges,
+          startBlock,
+        }
+      } finally {
+        cache.close()
       }
-      const safeHead =
-        finalHead >= POST_FEED_CONFIRMATION_DEPTH
-          ? finalHead - POST_FEED_CONFIRMATION_DEPTH
-          : undefined
-      return {
-        cacheReset: cacheReset || after.reset,
-        caughtUp: safeHead === undefined || after.cursor.nextBlock > safeHead,
-        head: finalHead,
-        indexedThrough,
-        posts,
-        safeHead,
-        scannedRanges: result.scannedRanges,
-      }
-    } finally {
-      cache.close()
     }
   } catch (error) {
     assertContextActive()

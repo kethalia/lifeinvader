@@ -93,6 +93,7 @@ function snapshot(
     posts,
     safeHead: 18n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -230,6 +231,37 @@ describe('PostFeedPanel', () => {
       await screen.findByRole('button', { name: /check for newer posts/i }),
     ).toBeTruthy()
     expect(synchronize).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows a pending deployment without implying that a range was scanned', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi.fn().mockResolvedValue({
+      ...snapshot([], false),
+      indexedThrough: undefined,
+      safeHead: 8n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+
+    render(
+      <PostFeedPanel
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    expect(
+      await screen.findByText(/still reaching confirmation depth/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/not confirmed deeply enough to read its posts/i),
+    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /check deployment confirmations/i,
+      }),
+    )
+    await waitFor(() => expect(synchronize).toHaveBeenCalledTimes(2))
   })
 
   it('shows canonical media commitments without trusting malformed bytes', async () => {

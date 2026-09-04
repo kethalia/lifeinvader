@@ -107,6 +107,185 @@ describe('post feed synchronization', () => {
     ])
   })
 
+  it('starts at the verified deployment block', async () => {
+    const deploymentBlock = 3_456n
+    const logRanges: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logRanges.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      indexedThrough: 4_988n,
+      safeHead: 4_988n,
+      startBlock: deploymentBlock,
+    })
+    expect(logRanges).toEqual([
+      { fromBlock: toHex(deploymentBlock), toBlock: toHex(4_988n) },
+    ])
+  })
+
+  it('falls back to genesis when the RPC rejects historical code reads', async () => {
+    let fromBlock = ''
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          throw new Error('missing trie node')
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string }]
+          fromBlock = filter.fromBlock
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({ caughtUp: true, startBlock: 0n })
+    expect(fromBlock).toBe('0x0')
+  })
+
+  it('waits to scan until a new deployment reaches the safe head', async () => {
+    let head = 20n
+    const logRanges: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(head)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= 14n
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logRanges.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          return [rawPost(14n, 1n, 'Confirmed after waiting.')]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      indexedThrough: undefined,
+      safeHead: 8n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    expect(logRanges).toEqual([])
+
+    head = 32n
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      indexedThrough: 20n,
+      posts: [{ body: 'Confirmed after waiting.', postId: 1n }],
+      safeHead: 20n,
+      scannedRanges: 1,
+      startBlock: 9n,
+    })
+    expect(logRanges).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
+  })
+
+  it('rediscovers a replaced history anchor before mutating the event cache', async () => {
+    let branch = 'a'
+    let deploymentBlock = 37n
+    let reorganized = false
+    let scanned = false
+    const logRanges: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') {
+          if (scanned && !reorganized) {
+            branch = 'b'
+            deploymentBlock = 41n
+            reorganized = true
+          }
+          return '0x1'
+        }
+        if (method === 'eth_blockNumber') return '0x64'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          return { hash: blockHash(blockNumber, branch), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logRanges.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          scanned = true
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
+
+    await expect(
+      synchronizePostFeed(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({ caughtUp: true, startBlock: 41n })
+    expect(logRanges).toEqual([
+      { fromBlock: '0x25', toBlock: '0x58' },
+      { fromBlock: '0x29', toBlock: '0x58' },
+    ])
+    expect(apply).toHaveBeenCalledOnce()
+  })
+
   it('returns decoded confirmed posts newest first', async () => {
     const logs = [
       rawPost(2n, 1n, 'First permanent thought.'),
@@ -235,7 +414,7 @@ describe('post feed synchronization', () => {
   })
 
   it('rejects a committed range that loses confirmation depth', async () => {
-    const heads = [100n, 89n]
+    const heads = [100n, 100n, 100n, 89n]
     const provider: Eip1193Provider = {
       request: vi.fn(async ({ method, params }) => {
         if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE

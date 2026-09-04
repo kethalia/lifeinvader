@@ -37,6 +37,11 @@ export type DiscoverProtocolHistoryOptions = {
   timeoutMs?: number
 }
 
+export type AuthenticateProtocolHistoryAnchorOptions = Pick<
+  DiscoverProtocolHistoryOptions,
+  'signal' | 'timeoutMs'
+>
+
 export type ProtocolHistoryBoundaryResolver = (
   provider: Eip1193Provider,
   chainId: bigint,
@@ -220,6 +225,21 @@ function sameBlock(
     first.blockNumber === second.blockNumber &&
     first.blockHash === second.blockHash
   )
+}
+
+function normalizeFingerprint(
+  value: unknown,
+  field: string,
+): ProtocolBlockFingerprint {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`Invalid ${field}.`)
+  }
+  const fingerprint = value as Record<string, unknown>
+  assertQuantity(fingerprint.blockNumber, `${field} block number`)
+  return {
+    blockHash: parseHash(fingerprint.blockHash, `${field} block hash`),
+    blockNumber: fingerprint.blockNumber,
+  }
 }
 
 function freezeBoundary(
@@ -427,6 +447,52 @@ export async function discoverProtocolHistoryBoundary(
   }
 }
 
+export async function protocolHistoryAnchorIsCanonical(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  anchorValue: ProtocolBlockFingerprint,
+  {
+    signal,
+    timeoutMs = WALLET_READ_TIMEOUT_MS,
+  }: AuthenticateProtocolHistoryAnchorOptions = {},
+) {
+  if (!provider || typeof provider.request !== 'function') {
+    throw new Error('Invalid protocol history provider.')
+  }
+  assertQuantity(chainId, 'protocol history chain identifier')
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error('Invalid protocol history timeout.')
+  }
+  if (signal?.aborted) throw discoveryCancelled(false)
+  const anchor = normalizeFingerprint(anchorValue, 'protocol history anchor')
+  const deadline = Date.now() + timeoutMs
+  const request = (requestValue: ProviderRequest) =>
+    beforeDeadline(
+      () => provider.request(requestValue),
+      deadline,
+      () => new Error('Protocol history anchor authentication timed out.'),
+      signal,
+      () => discoveryCancelled(false),
+    )
+  const firstChainId = parseChainId(await request({ method: 'eth_chainId' }))
+  if (firstChainId !== chainId) {
+    throw new Error('The protocol history belongs to another wallet chain.')
+  }
+  const anchorResponse = await request({
+    method: 'eth_getBlockByNumber',
+    params: [toQuantity(anchor.blockNumber), false],
+  })
+  const currentAnchor =
+    anchorResponse === null
+      ? undefined
+      : parseBlock(anchorResponse, anchor.blockNumber)
+  const finalChainId = parseChainId(await request({ method: 'eth_chainId' }))
+  if (finalChainId !== chainId) {
+    throw new Error('The protocol history belongs to another wallet chain.')
+  }
+  return currentAnchor !== undefined && sameBlock(currentAnchor, anchor)
+}
+
 export async function resolveProtocolHistoryBoundary(
   provider: Eip1193Provider,
   chainId: bigint,
@@ -455,32 +521,14 @@ export async function resolveProtocolHistoryBoundary(
   const providerCache = resolvedBoundaries.get(provider)
   const cached = providerCache?.get(key)
   if (cached) {
-    const deadline = Date.now() + timeoutMs
-    const request = (requestValue: ProviderRequest) =>
-      beforeDeadline(
-        () => provider.request(requestValue),
-        deadline,
-        () => new Error('Protocol history cache authentication timed out.'),
-        options.signal,
-        () => discoveryCancelled(false),
-      )
-    const firstChainId = parseChainId(await request({ method: 'eth_chainId' }))
-    if (firstChainId !== chainId) {
-      throw new Error('The protocol history belongs to another wallet chain.')
+    if (
+      await protocolHistoryAnchorIsCanonical(provider, chainId, cached.head, {
+        signal: options.signal,
+        timeoutMs,
+      })
+    ) {
+      return cached
     }
-    const anchorValue = await request({
-      method: 'eth_getBlockByNumber',
-      params: [toQuantity(cached.head.blockNumber), false],
-    })
-    const currentAnchor =
-      anchorValue === null
-        ? undefined
-        : parseBlock(anchorValue, cached.head.blockNumber)
-    const finalChainId = parseChainId(await request({ method: 'eth_chainId' }))
-    if (finalChainId !== chainId) {
-      throw new Error('The protocol history belongs to another wallet chain.')
-    }
-    if (currentAnchor && sameBlock(currentAnchor, cached.head)) return cached
     providerCache?.delete(key)
   }
   const boundary = await discoverProtocolHistoryBoundary(provider, chainId, {

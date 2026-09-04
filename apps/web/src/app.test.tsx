@@ -42,6 +42,7 @@ const synchronizeEmptyFeed = vi.fn(async () => ({
   posts: [],
   safeHead: 0n,
   scannedRanges: 0,
+  startBlock: 0n,
 }))
 const waitForSafePost = vi.fn(async () => undefined)
 function renderApp() {

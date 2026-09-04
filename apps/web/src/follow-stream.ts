@@ -29,6 +29,7 @@ import {
 import type { FollowDirection } from './follow-projection'
 import {
   isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
   resolveProtocolHistoryBoundary,
   type ProtocolBlockFingerprint,
   type ProtocolHistoryBoundaryResolver,
@@ -296,45 +297,6 @@ async function assertCanonicalCheckpoint(
   }
 }
 
-async function protocolHistoryAnchorIsCanonical(
-  provider: Eip1193Provider,
-  chainId: bigint,
-  anchor: ProtocolBlockFingerprint,
-  signal: AbortSignal,
-) {
-  await assertSelectedChain(provider, chainId, signal)
-  const value = await requestInContext(
-    provider,
-    {
-      method: 'eth_getBlockByNumber',
-      params: [`0x${anchor.blockNumber.toString(16)}`, false],
-    },
-    signal,
-  )
-  let isCanonical = false
-  if (value !== null) {
-    if (typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error(
-        'The wallet returned invalid protocol history anchor data.',
-      )
-    }
-    const block = value as Record<string, unknown>
-    const hash = block.hash
-    if (
-      parseHead(block.number) !== anchor.blockNumber ||
-      typeof hash !== 'string' ||
-      !/^0x[0-9a-f]{64}$/i.test(hash)
-    ) {
-      throw new Error(
-        'The wallet returned invalid protocol history anchor data.',
-      )
-    }
-    isCanonical = hash.toLowerCase() === anchor.blockHash
-  }
-  await assertSelectedChain(provider, chainId, signal)
-  return isCanonical
-}
-
 export async function authenticateIssuedFollowProjectionAnchor(
   anchor: FollowProjectionAnchor,
   authenticateCache: () => Promise<void>,
@@ -589,7 +551,7 @@ export const synchronizeFollowStream: FollowStreamSynchronizer = async (
             provider,
             chainId,
             historyAnchor,
-            interruption.signal,
+            { signal: interruption.signal },
           ))
         ) {
           assertContextActive()
