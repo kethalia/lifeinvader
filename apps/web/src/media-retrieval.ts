@@ -7,6 +7,7 @@ import { LIFEINVADER_UNIXFS_PROFILE } from './media-unixfs'
 
 export const MAX_RETRIEVED_MEDIA_BYTES = 32 * 1024 * 1024
 export const MEDIA_RETRIEVAL_TIMEOUT_MS = 30_000
+const UNIXFS_VERIFICATION_SLICE_BYTES = 1024 * 1024
 
 export type RetrievedMedia = {
   blob: Blob
@@ -179,11 +180,37 @@ async function verifyDeterministicUnixfsCid(
   try {
     const { importByteStream } = await import('ipfs-unixfs-importer')
     signal.throwIfAborted()
+
+    const yieldToBrowser = async () => {
+      signal.throwIfAborted()
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timeout)
+          signal.removeEventListener('abort', finish)
+          resolve()
+        }
+        const timeout = setTimeout(finish, 0)
+        signal.addEventListener('abort', finish, { once: true })
+      })
+      signal.throwIfAborted()
+    }
+
     const imported = await importByteStream(
       (async function* () {
-        signal.throwIfAborted()
-        yield bytes
-        signal.throwIfAborted()
+        for (
+          let offset = 0;
+          offset < bytes.byteLength;
+          offset += UNIXFS_VERIFICATION_SLICE_BYTES
+        ) {
+          await yieldToBrowser()
+          yield bytes.subarray(
+            offset,
+            Math.min(
+              offset + UNIXFS_VERIFICATION_SLICE_BYTES,
+              bytes.byteLength,
+            ),
+          )
+        }
       })(),
       {
         async put(cid) {

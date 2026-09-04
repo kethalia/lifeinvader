@@ -236,6 +236,28 @@ describe('IPFS media retrieval', () => {
     ).rejects.toThrow(/do not reproduce the on-chain deterministic UnixFS CID/i)
   })
 
+  it('yields to caller cancellation while reconstructing buffered dag-pb media', async () => {
+    const png = new Uint8Array(1024 * 1024 + 1)
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const prepared = await preparePaidMediaCar(mediaFile(png))
+    const controller = new AbortController()
+    const retrieval = retrieveIpfsMedia(
+      'https://gateway.example/ipfs/{cid}',
+      prepared.mediaCid,
+      {
+        fetcher: vi.fn(async () => response([png])),
+        signal: controller.signal,
+      },
+    )
+    const expectation = expect(retrieval).rejects.toThrow(
+      /request was cancelled/i,
+    )
+
+    setTimeout(() => controller.abort(), 0)
+
+    await expectation
+  })
+
   it('refuses structured DAG media without contacting the gateway', async () => {
     const structuredCid = parseMediaCid(
       'bafyreidr22rx7ja2xkdytbupiw7e36uj6cwyd2j2zkpixdy35cv3vfzmuq',
