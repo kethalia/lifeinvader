@@ -592,6 +592,7 @@ h1 span {
 
 .filecoin-storage-guidance,
 .filecoin-storage-inspection,
+.filecoin-storage-quote,
 .filecoin-storage-ready,
 .filecoin-storage-unavailable {
   display: grid;
@@ -601,6 +602,7 @@ h1 span {
 }
 
 .filecoin-storage-guidance,
+.filecoin-storage-quote,
 .filecoin-storage-ready {
   background: rgba(232, 255, 0, 0.32);
 }
@@ -616,6 +618,31 @@ h1 span {
 
 .filecoin-storage-unavailable ul {
   padding-left: 1.25rem;
+}
+
+.filecoin-storage-quote dl {
+  display: grid;
+  margin: 0;
+  gap: 0.35rem;
+}
+
+.filecoin-storage-quote dl > div {
+  display: grid;
+  padding: 0.45rem 0;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(7rem, 1fr) minmax(0, 1.25fr);
+}
+
+.filecoin-storage-quote dt {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.filecoin-storage-quote dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .filecoin-storage-return {

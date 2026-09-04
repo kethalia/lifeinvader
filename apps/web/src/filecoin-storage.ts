@@ -28,9 +28,10 @@ export type FilecoinStorageNetwork = {
 }
 
 /**
- * Filecoin Onchain Cloud deployments consumed by Synapse SDK v2.0.0.
- * FWSS is the discovery root; the inspection below verifies its reported
- * dependency graph before a later adapter is allowed to upload or pay.
+ * Filecoin Onchain Cloud deployments consumed by the pinned Synapse SDK
+ * v2.0.0 quote adapter. FWSS is the discovery root; the inspection below
+ * verifies its reported dependency graph before a later adapter is allowed to
+ * upload or pay.
  *
  * Source: https://github.com/FilOzone/synapse-sdk/blob/synapse-sdk-v2.0.0/packages/synapse-core/src/chains.ts
  */
