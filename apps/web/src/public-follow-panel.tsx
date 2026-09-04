@@ -120,6 +120,12 @@ function readStatusCopy(
     return `Reading one bounded range of confirmed ${direction} events…`
   }
   if (state.phase === 'catchup') {
+    if (
+      state.stream.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.safeHead
+    ) {
+      return `Lifeinvader history can begin at block ${state.stream.startBlock.toString()}, but the confirmed head is still ${state.stream.safeHead.toString()}. Wait for deployment confirmations, then check again.`
+    }
     const reset = state.stream.cacheReset
       ? 'The disposable local event cache was reset. '
       : ''
@@ -130,17 +136,22 @@ function readStatusCopy(
       state.projection.phase === 'authenticate'
         ? 'Authenticating the complete local result'
         : 'Reducing one bounded local event page'
-    return `${phase}. ${state.projection.pagesScanned.toString()} pages and ${state.projection.logsProcessed.toString()} signals processed; results stay hidden until complete.`
+    return `${phase}. History starts at block ${state.projection.startBlock.toString()}; ${state.projection.pagesScanned.toString()} pages and ${state.projection.logsProcessed.toString()} signals processed. Results stay hidden until complete.`
   }
   if (state.phase === 'complete') {
-    return `Authenticated through confirmed block ${state.projection.safeHead?.toString() ?? 'none'}. ${state.projection.relationshipsRetained.toString()} active relationships are available.`
+    return `Authenticated from block ${state.projection.startBlock.toString()} through confirmed block ${state.projection.safeHead?.toString() ?? 'none'}. ${state.projection.relationshipsRetained.toString()} active relationships are available.`
   }
   return state.message
 }
 
 function readButtonLabel(state: FollowReadModelState) {
   if (state.phase === 'synchronizing') return 'Reading confirmed follows…'
-  if (state.phase === 'catchup') return 'Load next bounded follow range'
+  if (state.phase === 'catchup') {
+    return state.stream.safeHead !== undefined &&
+      state.stream.startBlock > state.stream.safeHead
+      ? 'Check follow confirmations'
+      : 'Load next bounded follow range'
+  }
   if (state.phase === 'projecting') {
     return state.busy
       ? 'Advancing local projection…'

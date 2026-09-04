@@ -266,6 +266,7 @@ describe('follow projection run', () => {
       pagesScanned: 0n,
       phase: 'follows',
       safeHead: SAFE_HEAD,
+      startBlock: FOLLOW_EVENT_START_BLOCK,
     })
     expect(run.account).toBe(getAddress(SELECTED))
     expect(run.direction).toBe('following')

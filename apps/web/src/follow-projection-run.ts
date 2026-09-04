@@ -20,7 +20,6 @@ import {
 } from './follow-projection'
 import {
   FOLLOW_EVENT_PAGE_SIZE,
-  FOLLOW_EVENT_START_BLOCK,
   assertIssuedFollowProjectionAnchor,
   authenticateIssuedFollowProjectionAnchor,
   type FollowProjectionAnchor,
@@ -45,6 +44,7 @@ export type FollowProjectionRunSnapshot = {
   pagesScanned: bigint
   phase: FollowProjectionRunPhase
   safeHead?: bigint
+  startBlock: bigint
 }
 
 export type OpenFollowProjectionRunOptions = FollowStreamStorageOptions & {
@@ -162,8 +162,9 @@ function sameCachePosition(
 
 function normalizeCachePosition(
   value: unknown,
-  seed: EventCursor,
-  expectedNextBlock: bigint,
+  chainId: bigint,
+  filter: ReturnType<typeof getFollowFilter>,
+  safeHead: bigint | undefined,
 ) {
   if (!isRecord(value)) throw projectionRunError('anchor position')
   let cursor: EventCursor
@@ -172,6 +173,14 @@ function normalizeCachePosition(
   } catch {
     throw projectionRunError('anchor cursor')
   }
+  const seed = createEventCursor({
+    chainId,
+    filter,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock: cursor.startBlock,
+  })
+  const expectedNextBlock =
+    safeHead === undefined ? cursor.startBlock : safeHead + 1n
   if (
     !sameCursorScope(cursor, seed) ||
     cursor.nextBlock !== expectedNextBlock
@@ -207,15 +216,12 @@ function normalizeAnchor(value: unknown): NormalizedProjectionAnchor {
   if (value.safeHead !== safeHead) {
     throw projectionRunError('anchor safe head')
   }
-  const expectedNextBlock =
-    safeHead === undefined ? FOLLOW_EVENT_START_BLOCK : safeHead + 1n
-  const seed = createEventCursor({
-    chainId: value.chainId,
-    filter: getFollowFilter(account, direction),
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: FOLLOW_EVENT_START_BLOCK,
-  })
-  const follows = normalizeCachePosition(value.follows, seed, expectedNextBlock)
+  const follows = normalizeCachePosition(
+    value.follows,
+    value.chainId,
+    getFollowFilter(account, direction),
+    safeHead,
+  )
   if (safeHead !== undefined) {
     const checkpoint = follows.cursor.checkpoints.at(-1)
     if (!checkpoint || checkpoint.blockNumber !== safeHead) {
@@ -316,6 +322,7 @@ export class FollowProjectionRun {
       pagesScanned: this.#pagesScanned,
       phase: this.#phase,
       safeHead: this.#anchor.safeHead,
+      startBlock: this.#anchor.follows.cursor.startBlock,
     }
   }
 
@@ -332,6 +339,10 @@ export class FollowProjectionRun {
 
   get direction() {
     return this.#projection.direction
+  }
+
+  get startBlock() {
+    return this.#anchor.follows.cursor.startBlock
   }
 
   get progress(): FollowProjectionProgress {

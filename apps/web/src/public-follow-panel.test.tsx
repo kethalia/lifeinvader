@@ -101,6 +101,7 @@ function stream(
     recentSignals: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -117,6 +118,7 @@ function projection(
     pagesScanned: 1n,
     phase,
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 
@@ -136,6 +138,7 @@ function reader(
       totalRelationships: 1n,
     } satisfies FollowProjectionReadPage),
     snapshot: projection('follows'),
+    startBlock: 0n,
     ...overrides,
   }
 }
@@ -260,6 +263,32 @@ describe('PublicFollowPanel', () => {
       after: undefined,
       limit: 25,
     })
+  })
+
+  it('explains when the protocol deployment is not confirmed yet', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi.fn().mockResolvedValue({
+      ...stream(),
+      safeHead: 8n,
+      startBlock: 9n,
+    })
+    render(
+      <PublicFollowPanel
+        readModelOptions={{ synchronize }}
+        session={connectedSession(provider)}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed follow history' }),
+    )
+
+    expect(
+      await screen.findByText(/wait for deployment confirmations/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'Check follow confirmations' }),
+    ).toBeTruthy()
   })
 
   it('paginates only through the completed bounded relationship reader', async () => {

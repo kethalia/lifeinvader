@@ -17,7 +17,13 @@ An event cursor is scoped to:
 
 The normalized filter is stored as a fixed-size hash. Topic alternatives are deduplicated and sorted before hashing, so equivalent filters share a cursor. A cursor for another filter or chain is rejected before log requests begin.
 
-The start block and finality depth are explicit cursor inputs. A later chain configuration must supply a known deployment block or a separately verified discovery result; the scanner does not silently request `0x0` through `latest` in one call. Changing confirmation policy requires a fresh cursor and cache rather than reinterpreting already accepted ranges.
+The start block and finality depth are explicit cursor inputs. Follow streams now obtain that input from a separately verified, bounded protocol-code discovery; other event families continue to use block zero while the optimization is integrated incrementally. The scanner never silently requests `0x0` through `latest` in one call. Changing the discovered boundary or confirmation policy selects a fresh cursor and cache rather than reinterpreting already accepted ranges.
+
+## Protocol history boundary
+
+`protocol-history.ts` reads code at explicit block numbers as permitted by Ethereum JSON-RPC [`eth_getCode`](https://ethereum.org/developers/docs/apis/json-rpc/#eth_getcode), then binary-searches the empty-code to exact-v1-code transition. One attempt makes at most 64 sequential code requests under one timeout. It records the exact deployment and preceding block fingerprints, or—when deployment has not reached the configured safe head—the first block after confirmed emptiness.
+
+The search is bracketed by selected-chain checks and two reads of one anchored head. Boundary code is re-read before acceptance. This provides the same portable numeric-block compatibility as the event scanner while detecting a reorganization that changes the anchored ancestry. A provider error on a historical code request is a safe optimization miss: the follow stream starts at genesis instead. Invalid code, a non-monotonic conflict, malformed quantities or blocks, cancellation, and context changes are not downgraded to a fallback.
 
 ## Bounded synchronization
 

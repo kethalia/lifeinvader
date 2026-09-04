@@ -22,6 +22,7 @@ import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import { BrowserEventCache, openEventCache } from './event-cache'
 import { createEventCursor, type IndexedEventLog } from './event-indexer'
 import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
+import { openFollowProjectionRun } from './follow-projection-run'
 import { getFollowersFilter, getFollowingFilter } from './protocol-events'
 import {
   FOLLOW_SET_TOPIC,
@@ -233,6 +234,165 @@ describe('follow stream synchronization', () => {
         topics: [FOLLOW_SET_TOPIC, null, padHex(ACCOUNT_A, { size: 32 })],
       },
     ])
+  })
+
+  it('starts at the verified deployment block and projects that cache scope', async () => {
+    const deploymentBlock = 3_456n
+    const logQueries: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    const snapshot = await synchronizeFollowStream(
+      provider,
+      1n,
+      ACCOUNT_A,
+      'following',
+      { storage: cacheStorage },
+    )
+
+    expect(snapshot).toMatchObject({
+      caughtUp: true,
+      indexedThrough: 4_988n,
+      safeHead: 4_988n,
+      startBlock: deploymentBlock,
+    })
+    expect(snapshot.projectionAnchor?.follows.cursor.startBlock).toBe(
+      deploymentBlock,
+    )
+    expect(logQueries).toEqual([
+      { fromBlock: toHex(deploymentBlock), toBlock: toHex(4_988n) },
+    ])
+
+    const projection = await openFollowProjectionRun(
+      snapshot.projectionAnchor!,
+      cacheStorage,
+    )
+    expect(projection.startBlock).toBe(deploymentBlock)
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'authenticate',
+    })
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'complete',
+    })
+  })
+
+  it('falls back to genesis when the RPC cannot serve historical code', async () => {
+    let fromBlock = ''
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          throw new Error('missing trie node')
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string }]
+          fromBlock = filter.fromBlock
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizeFollowStream(provider, 1n, ACCOUNT_A, 'following', {
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({ caughtUp: true, startBlock: 0n })
+    expect(fromBlock).toBe('0x0')
+  })
+
+  it('waits to project a deployment newer than the confirmed head', async () => {
+    let head = 20n
+    const logQueries: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(head)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= 14n
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          return [rawFollow(14n, ACCOUNT_A, ACCOUNT_B, true)]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    await expect(
+      synchronizeFollowStream(provider, 1n, ACCOUNT_A, 'following', {
+        storage: cacheStorage,
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      indexedThrough: undefined,
+      projectionAnchor: undefined,
+      safeHead: 8n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    expect(logQueries).toEqual([])
+
+    head = 32n
+    await expect(
+      synchronizeFollowStream(provider, 1n, ACCOUNT_A, 'following', {
+        storage: cacheStorage,
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      indexedThrough: 20n,
+      projectionAnchor: {
+        follows: { cursor: { startBlock: 9n } },
+      },
+      recentSignals: [{ blockNumber: 14n, following: true }],
+      safeHead: 20n,
+      scannedRanges: 1,
+      startBlock: 9n,
+    })
+    expect(logQueries).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
   })
 
   it('returns public follow and unfollow signals newest first', async () => {
@@ -490,7 +650,7 @@ describe('follow stream synchronization', () => {
   })
 
   it('fails closed when confirmation depth is lost or the safe head advances', async () => {
-    const regressingHeads = [100n, 89n]
+    const regressingHeads = [100n, 100n, 100n, 89n]
     const regressing = providerFor()
     regressing.request = vi.fn(async ({ method, params }) => {
       if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
@@ -511,7 +671,7 @@ describe('follow stream synchronization', () => {
       }),
     ).rejects.toThrow(/head moved behind the confirmed follows/i)
 
-    const advancingHeads = [20n, 21n]
+    const advancingHeads = [20n, 20n, 20n, 21n]
     const advancing = providerFor()
     advancing.request = vi.fn(async ({ method, params }) => {
       if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE

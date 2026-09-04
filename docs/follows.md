@@ -34,6 +34,23 @@ fingerprints around cache mutation. A result is considered caught up only when
 its cursor reaches the twelve-block safe head and that head is represented by
 the final canonical checkpoint.
 
+Before a fresh follow cursor is created, the client resolves a conservative
+protocol-history boundary through `protocol-history.ts`. It anchors one head by
+hash, checks the exact v1 runtime-code hash, and performs a sequential binary
+search capped at 64 historical `eth_getCode` probes. A confirmed result is
+accepted only when the deployment block contains v1, its preceding block is
+empty, and the original head is still canonical. If deployment is newer than
+the twelve-block boundary, the cursor starts immediately after the last block
+proven empty so it cannot skip a confirmed event.
+
+Successful results are reused in memory for the same provider, chain, and
+confirmation policy only after the cached head hash is reauthenticated. This
+prevents a reset local fork that reuses chain ID `31337` from inheriting a stale
+boundary. If an RPC explicitly cannot serve historical code, the optimization
+falls back to block zero; malformed data, conflicting historical code, a chain
+change, or a replaced anchor fails closed. Code probes are sequential and do
+not fan out alongside the one bounded log request.
+
 The stream returns at most the newest 200 validated signals as a preview. That
 preview is not enough to calculate relationship state. Once caught up, the
 stream instead issues an immutable, page-local projection anchor containing
@@ -45,7 +62,7 @@ counts.
 Changing the provider or chain aborts in-flight work. External cancellation
 also interrupts wallet and cache authentication and removes temporary wallet
 listeners. A malformed cached page is cleared only for its exact directional
-account scope and is rebuilt from block zero.
+account and discovered-start scope, then rebuilt from that same safe boundary.
 
 ## Deterministic relationship projection
 

@@ -27,6 +27,11 @@ import {
   type ProviderRequest,
 } from './ethereum'
 import type { FollowDirection } from './follow-projection'
+import {
+  isProtocolHistoryUnavailableError,
+  resolveProtocolHistoryBoundary,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
 
 export const FOLLOW_EVENT_PAGE_SIZE = 200
 export const FOLLOW_EVENT_START_BLOCK = 0n
@@ -52,6 +57,7 @@ export type FollowStreamSnapshot = {
   recentSignals: readonly FollowSet[]
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type FollowStreamStorageOptions = Pick<
@@ -60,6 +66,7 @@ export type FollowStreamStorageOptions = Pick<
 >
 
 export type SynchronizeFollowStreamOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: FollowStreamStorageOptions
 }
@@ -429,13 +436,14 @@ export async function resetFollowStreamCache(
   accountValue: Address,
   direction: FollowDirection,
   storage: FollowStreamStorageOptions = {},
+  startBlock = FOLLOW_EVENT_START_BLOCK,
 ) {
   const { filter } = getScope(accountValue, direction)
   const seed = createEventCursor({
     chainId,
     filter,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: FOLLOW_EVENT_START_BLOCK,
+    startBlock,
   })
   const cache = await openEventCache({ ...storage, filter })
   try {
@@ -454,12 +462,6 @@ export const synchronizeFollowStream: FollowStreamSynchronizer = async (
 ) => {
   assertActive(options.signal)
   const { account, direction, filter } = getScope(accountValue, directionValue)
-  const seed = createEventCursor({
-    chainId,
-    filter,
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: FOLLOW_EVENT_START_BLOCK,
-  })
   const interruption = new AbortController()
   let contextChanged = false
   const interruptContext = () => {
@@ -492,6 +494,26 @@ export const synchronizeFollowStream: FollowStreamSynchronizer = async (
         'Verified Lifeinvader v1 is required before this chain can provide public follows.',
       )
     }
+    let startBlock = FOLLOW_EVENT_START_BLOCK
+    try {
+      const boundary = await (
+        options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+      )(provider, chainId, {
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        signal: interruption.signal,
+      })
+      assertContextActive()
+      startBlock = boundary.startBlock
+    } catch (error) {
+      assertContextActive()
+      if (!isProtocolHistoryUnavailableError(error)) throw error
+    }
+    const seed = createEventCursor({
+      chainId,
+      filter,
+      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+      startBlock,
+    })
     const cache = await openEventCache({ ...options.storage, filter })
     try {
       assertContextActive()
@@ -579,8 +601,11 @@ export const synchronizeFollowStream: FollowStreamSynchronizer = async (
         finalHead >= POST_FEED_CONFIRMATION_DEPTH
           ? finalHead - POST_FEED_CONFIRMATION_DEPTH
           : undefined
+      const deploymentStillPending =
+        safeHead !== undefined && after.cursor.startBlock > safeHead
       const caughtUp =
-        safeHead === undefined || after.cursor.nextBlock > safeHead
+        safeHead === undefined ||
+        (!deploymentStillPending && after.cursor.nextBlock > safeHead)
       if (
         caughtUp &&
         safeHead !== undefined &&
@@ -616,6 +641,7 @@ export const synchronizeFollowStream: FollowStreamSynchronizer = async (
         recentSignals,
         safeHead,
         scannedRanges: result.scannedRanges,
+        startBlock,
       }
     } finally {
       cache.close()
