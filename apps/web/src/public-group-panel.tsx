@@ -56,8 +56,8 @@ function directoryStatus(state: GroupDirectoryState) {
     if (state.snapshot.safeHead === undefined) {
       return `Lifeinvader history can begin at block ${state.snapshot.startBlock.toString()}, but this chain does not have a confirmed head yet. No group log range was requested. Wait for deployment confirmations, then check again.`
     }
-    if (state.snapshot.startBlock > state.snapshot.safeHead) {
-      return `Lifeinvader history can begin at block ${state.snapshot.startBlock.toString()}, but the confirmed head is still ${state.snapshot.safeHead.toString()}. No group log range was requested. Wait for deployment confirmations, then check again.`
+    if (state.snapshot.historyBoundaryKind === 'pending-confirmation') {
+      return `The earliest possible Lifeinvader deployment block is ${state.snapshot.startBlock.toString()}, but the deployment itself has not reached the confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'} yet. No group log range was requested. Wait for deployment confirmations, then check again.`
     }
     const reset = state.snapshot.cacheReset
       ? 'The disposable local directory cache was reset. '
@@ -74,8 +74,8 @@ function directoryStatus(state: GroupDirectoryState) {
 function directoryButtonLabel(state: GroupDirectoryState) {
   if (state.phase === 'loading') return 'Reading public groups…'
   if (state.phase === 'partial') {
-    return state.snapshot.safeHead === undefined ||
-      state.snapshot.startBlock > state.snapshot.safeHead
+    return state.snapshot.historyBoundaryKind === 'pending-confirmation' ||
+      state.snapshot.safeHead === undefined
       ? 'Check group confirmations'
       : 'Load next group range'
   }
@@ -356,8 +356,8 @@ export function PublicGroupPanel({
       : undefined
   const directoryHistoryPending =
     directoryState.phase === 'partial' &&
-    (directoryState.snapshot.safeHead === undefined ||
-      directoryState.snapshot.startBlock > directoryState.snapshot.safeHead)
+    (directoryState.snapshot.historyBoundaryKind === 'pending-confirmation' ||
+      directoryState.snapshot.safeHead === undefined)
   const selectedGroup = directorySnapshot?.groups.find(
     (group) => group.groupId === selectedGroupId,
   )

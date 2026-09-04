@@ -32,6 +32,9 @@ import {
 export const GROUP_DIRECTORY_PAGE_SIZE = 100
 export const GROUP_DIRECTORY_START_BLOCK = 0n
 
+export type GroupDirectoryHistoryBoundaryKind =
+  'confirmed' | 'genesis-fallback' | 'pending-confirmation'
+
 const NEXT_GROUP_ID_ABI = [
   {
     type: 'function',
@@ -52,6 +55,7 @@ export type GroupDirectorySnapshot = {
   caughtUp: boolean
   groups: readonly PublishedGroup[]
   head: bigint
+  historyBoundaryKind: GroupDirectoryHistoryBoundaryKind
   indexedThrough?: bigint
   safeHead?: bigint
   scannedRanges: number
@@ -335,7 +339,8 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       )
     }
     let historyAnchor: ProtocolBlockFingerprint | undefined
-    let historyBoundaryKind: 'confirmed' | 'pending-confirmation' | undefined
+    let historyBoundaryKind: GroupDirectoryHistoryBoundaryKind =
+      'genesis-fallback'
     let startBlock = GROUP_DIRECTORY_START_BLOCK
     try {
       const boundary = await (
@@ -386,6 +391,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
         caughtUp: false,
         groups: [],
         head: finalHead,
+        historyBoundaryKind,
         indexedThrough: undefined,
         safeHead:
           finalHead >= POST_FEED_CONFIRMATION_DEPTH
@@ -503,7 +509,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
           ? finalHead - POST_FEED_CONFIRMATION_DEPTH
           : undefined
       const caughtUp =
-        safeHead === undefined || after.cursor.nextBlock > safeHead
+        safeHead !== undefined && after.cursor.nextBlock > safeHead
       const confirmedNextGroupId =
         caughtUp && safeHead !== undefined
           ? await readNextGroupId(provider, safeHead, interruption.signal)
@@ -540,6 +546,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
         caughtUp,
         groups,
         head: finalHead,
+        historyBoundaryKind,
         indexedThrough,
         safeHead,
         scannedRanges: result.scannedRanges,

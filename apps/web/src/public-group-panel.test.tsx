@@ -81,6 +81,7 @@ function directory(
     caughtUp,
     groups,
     head: 20n,
+    historyBoundaryKind: 'confirmed',
     indexedThrough: caughtUp ? 8n : 4n,
     safeHead: 8n,
     scannedRanges: 1,
@@ -248,10 +249,11 @@ describe('PublicGroupPanel', () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const synchronizeDirectory = vi.fn().mockResolvedValue({
       ...directory(false, []),
+      historyBoundaryKind: 'pending-confirmation',
       indexedThrough: undefined,
-      safeHead: 8n,
+      safeHead: 9n,
       scannedRanges: 0,
-      startBlock: 10n,
+      startBlock: 9n,
     })
     render(
       <PublicGroupPanel
@@ -269,7 +271,7 @@ describe('PublicGroupPanel', () => {
     ).toBeTruthy()
     expect(
       screen.getByText(
-        /history can begin at block 10.*confirmed head is still 8.*No group log range was requested/i,
+        /earliest possible Lifeinvader deployment block is 9.*has not reached the confirmed head 9 yet.*No group log range was requested/i,
       ),
     ).toBeTruthy()
     expect(screen.queryByText('No confirmed groups found.')).toBeNull()
@@ -281,6 +283,7 @@ describe('PublicGroupPanel', () => {
     const synchronizeDirectory = vi.fn().mockResolvedValue({
       ...directory(false, []),
       head: 5n,
+      historyBoundaryKind: 'pending-confirmation',
       indexedThrough: undefined,
       safeHead: undefined,
       scannedRanges: 0,

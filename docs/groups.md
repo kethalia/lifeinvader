@@ -88,8 +88,11 @@ and fails without retrying. Before reporting catch-up the directory reads
 event count to match. A truncated RPC response therefore resets the disposable
 directory scope instead of permanently skipping groups. An incomplete or
 confirmation-pending directory is marked `caughtUp: false`; callers must not
-present that recent page as the complete set of groups. Cached corruption clears
-only that chain's directory scope, while another chain's scope is preserved.
+present that recent page as the complete set of groups. The snapshot carries an
+explicit `historyBoundaryKind`, so callers do not infer deployment confirmation
+from the numeric relationship between the possible start and safe head. Cached
+corruption clears only that chain's directory scope, while another chain's scope
+is preserved.
 
 The selected-group message stream verifies the chosen chain and exact v1 runtime
 before touching logs. Each explicit invocation scans at most one bounded range

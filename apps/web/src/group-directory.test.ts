@@ -196,6 +196,7 @@ describe('group-directory stream synchronization', () => {
     ).resolves.toMatchObject({
       caughtUp: false,
       groups: [],
+      historyBoundaryKind: 'genesis-fallback',
       indexedThrough: 1_999n,
       scannedRanges: 1,
       startBlock: GROUP_DIRECTORY_START_BLOCK,
@@ -257,6 +258,7 @@ describe('group-directory stream synchronization', () => {
     ).resolves.toMatchObject({
       caughtUp: true,
       groups: [{ groupId: GROUP_A, name: 'Started after deployment' }],
+      historyBoundaryKind: 'confirmed',
       indexedThrough: 4_988n,
       scannedRanges: 1,
       startBlock: 3_000n,
@@ -405,6 +407,7 @@ describe('group-directory stream synchronization', () => {
       caughtUp: false,
       groups: [],
       head: 5_000n,
+      historyBoundaryKind: 'pending-confirmation',
       indexedThrough: undefined,
       safeHead: 4_988n,
       scannedRanges: 0,
@@ -457,6 +460,7 @@ describe('group-directory stream synchronization', () => {
       caughtUp: false,
       groups: [],
       head: 21n,
+      historyBoundaryKind: 'pending-confirmation',
       indexedThrough: undefined,
       safeHead: 9n,
       scannedRanges: 0,
@@ -504,6 +508,44 @@ describe('group-directory stream synchronization', () => {
       caughtUp: false,
       groups: [],
       head: 5n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
+  })
+
+  it('keeps a genesis fallback incomplete before a safe head exists', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error('A pre-finality fallback has no confirmed history.')
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeWithFallback(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 5n,
+      historyBoundaryKind: 'genesis-fallback',
       indexedThrough: undefined,
       safeHead: undefined,
       scannedRanges: 0,
