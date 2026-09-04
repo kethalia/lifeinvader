@@ -664,6 +664,64 @@ describe('FilecoinStoragePanel', () => {
     )
   })
 
+  it('makes an open wallet request dismissibly ambiguous after a context change', async () => {
+    const quoteStorage = vi.fn<FilecoinStorageQuoter>(async () => quote)
+    const pendingFunding = deferred<TransactionReceipt>()
+    let fundingSignal: AbortSignal | undefined
+    const fundStorage = vi.fn<FilecoinStorageFunder>(
+      async (_provider, _quote, options) => {
+        fundingSignal = options.signal
+        return await pendingFunding.promise
+      },
+    )
+    const onWriteLockChange = vi.fn()
+    const view = await renderFundingQuote({
+      fundStorage,
+      onWriteLockChange,
+      quoteStorage,
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /I understand the account-level/i }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh quote and fund/i }),
+    )
+    await screen.findByText(/confirm the permit.*Filecoin Pay transaction/i)
+
+    view.rerender(
+      <FilecoinStoragePanel
+        fundStorage={fundStorage}
+        inspectStorage={vi.fn()}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quoteStorage={quoteStorage}
+        session={{
+          ...connectedSession(),
+          account: '0x000000000000000000000000000000000000b0bb',
+        }}
+      />,
+    )
+
+    await waitFor(() => expect(fundingSignal?.aborted).toBe(true))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toMatch(/request was open/i)
+    expect(alert.textContent).toMatch(/close or reject.*still-open prompt/i)
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(true),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /clear funding lock/i }))
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+
+    await act(async () => pendingFunding.resolve(receipt))
+    expect(
+      screen.queryByText(/account funding confirmed in block 42/i),
+    ).toBeNull()
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(false)
+  })
+
   it('retains a submitted hash across context changes and recovers its receipt', async () => {
     const readyQuote = {
       ...quote,

@@ -236,8 +236,9 @@ function FilecoinFundingStatus({
       <div className="filecoin-storage-funding-problem" role="alert">
         <p>{state.message}</p>
         <p>
-          The wallet returned no hash but may have broadcast. Check wallet
-          activity before allowing another funding attempt.
+          The wallet returned no hash but may have broadcast. Close or reject
+          any still-open prompt, then check wallet activity before allowing
+          another funding attempt.
         </p>
         <button disabled={disabled} onClick={onClearAmbiguous} type="button">
           I checked the wallet; clear funding lock
@@ -318,6 +319,16 @@ export function FilecoinStoragePanel({
     activeFundingController.current = undefined
     setState({ kind: 'idle' })
     setQuoteState({ kind: 'idle' })
+    setFundingState((current) =>
+      current.kind === 'opening'
+        ? {
+            context: current.context,
+            kind: 'ambiguous',
+            message:
+              'The wallet context or prepared CAR changed while the Filecoin Pay request was open.',
+          }
+        : current,
+    )
     setFundingAcknowledged(false)
     return () => {
       inspectionSequence.current += 1
@@ -519,6 +530,7 @@ export function FilecoinStoragePanel({
     }
     let attemptContext = context
     let submittedHash: Hash | undefined
+    let walletRequestOpened = false
     setFundingAcknowledged(false)
     setFundingState({ context, kind: 'refreshing' })
     setQuoteState({ kind: 'checking' })
@@ -554,7 +566,6 @@ export function FilecoinStoragePanel({
           return
         }
 
-        setFundingState({ context: attemptContext, kind: 'opening' })
         const action =
           fundStorage ??
           (await import('./filecoin-storage-funding')).fundFilecoinStorage
@@ -566,10 +577,13 @@ export function FilecoinStoragePanel({
             'The wallet or prepared CAR changed before funding began.',
           )
         }
+        walletRequestOpened = true
+        setFundingState({ context: attemptContext, kind: 'opening' })
         const receipt = await action(provider, freshQuote, {
           expectedAccount: account,
           expectedChainId: context.chainId,
           onSubmitted: (hash) => {
+            if (operationId !== fundingSequence.current) return
             submittedHash = hash
             setFundingState({
               context: attemptContext,
@@ -579,6 +593,7 @@ export function FilecoinStoragePanel({
           },
           signal: controller.signal,
         })
+        if (operationId !== fundingSequence.current) return
         setFundingState({
           context: attemptContext,
           kind: 'confirmed',
@@ -590,6 +605,7 @@ export function FilecoinStoragePanel({
           controller.signal,
         )
       } catch (error) {
+        if (operationId !== fundingSequence.current) return
         const message =
           controller.signal.aborted && !submittedHash
             ? 'The wallet or prepared CAR changed before funding completed.'
@@ -601,7 +617,12 @@ export function FilecoinStoragePanel({
             kind: isTransactionRevertedError(error) ? 'failed' : 'unknown',
             message,
           })
-        } else if (isTransactionSubmissionUnknownError(error)) {
+        } else if (
+          isTransactionSubmissionUnknownError(error) ||
+          (controller.signal.aborted &&
+            walletRequestOpened &&
+            getRpcErrorCode(error) !== 4001)
+        ) {
           setFundingState({
             context: attemptContext,
             kind: 'ambiguous',
@@ -615,12 +636,23 @@ export function FilecoinStoragePanel({
           })
         }
       } finally {
-        fundingOperationActive.current = false
+        if (operationId === fundingSequence.current) {
+          fundingOperationActive.current = false
+        }
         if (activeFundingController.current === controller) {
           activeFundingController.current = undefined
         }
       }
     })()
+  }
+
+  const clearAmbiguousFunding = () => {
+    if (fundingState.kind !== 'ambiguous') return
+    fundingSequence.current += 1
+    activeFundingController.current?.abort()
+    activeFundingController.current = undefined
+    fundingOperationActive.current = false
+    setFundingState({ kind: 'idle' })
   }
 
   const retryFundingReceipt = () => {
@@ -945,7 +977,7 @@ export function FilecoinStoragePanel({
       <FilecoinFundingStatus
         contextCurrent={fundingContextCurrent}
         disabled={disabled}
-        onClearAmbiguous={() => setFundingState({ kind: 'idle' })}
+        onClearAmbiguous={clearAmbiguousFunding}
         onRetryReceipt={retryFundingReceipt}
         state={fundingState}
       />
