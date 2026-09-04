@@ -32,6 +32,7 @@ export type GroupMembershipProjectionReader = Pick<
   | 'isMember'
   | 'readMembers'
   | 'snapshot'
+  | 'startBlock'
 >
 
 export type GroupMembershipProjectionOpener = (
@@ -41,6 +42,7 @@ export type GroupMembershipProjectionOpener = (
 export type GroupMembershipCacheResetter = (
   chainId: bigint,
   groupId: bigint,
+  startBlock: bigint,
 ) => Promise<void>
 
 export type GroupMembershipReadModelState =
@@ -96,7 +98,8 @@ function assertStreamScope(
     (anchor.chainId !== chainId ||
       anchor.groupId !== groupId ||
       anchor.head !== stream.head ||
-      anchor.safeHead !== stream.safeHead)
+      anchor.safeHead !== stream.safeHead ||
+      anchor.memberships.cursor.startBlock !== stream.startBlock)
   ) {
     throw new Error(
       'The public membership projection belongs to another chain boundary.',
@@ -108,10 +111,15 @@ function stateForProjection(
   projection: GroupMembershipProjectionRunSnapshot,
   chainId: bigint,
   groupId: bigint,
+  startBlock: bigint,
 ): GroupMembershipReadModelState {
-  if (projection.chainId !== chainId || projection.groupId !== groupId) {
+  if (
+    projection.chainId !== chainId ||
+    projection.groupId !== groupId ||
+    projection.startBlock !== startBlock
+  ) {
     throw new Error(
-      'The local membership projection belongs to another selected group.',
+      'The local membership projection belongs to another selected history boundary.',
     )
   }
   if (projection.phase === 'complete') {
@@ -129,8 +137,11 @@ function stateForProjection(
 const defaultProjectionOpener: GroupMembershipProjectionOpener = (anchor) =>
   openGroupMembershipProjectionRun(anchor)
 
-const defaultCacheResetter: GroupMembershipCacheResetter = (chainId, groupId) =>
-  resetGroupMembershipStreamCache(chainId, groupId)
+const defaultCacheResetter: GroupMembershipCacheResetter = (
+  chainId,
+  groupId,
+  startBlock,
+) => resetGroupMembershipStreamCache(chainId, groupId, {}, startBlock)
 
 export function useGroupMembershipReadModel(
   session: WalletSession,
@@ -233,15 +244,19 @@ export function useGroupMembershipReadModel(
           openedRun = undefined
           return
         }
-        if (openedRun.groupId !== groupId) {
+        if (
+          openedRun.groupId !== groupId ||
+          openedRun.startBlock !== stream.startBlock
+        ) {
           throw new Error(
-            'The local membership projection belongs to another selected group.',
+            'The local membership projection belongs to another selected group or history boundary.',
           )
         }
         const projectionState = stateForProjection(
           openedRun.snapshot,
           chainId,
           groupId,
+          stream.startBlock,
         )
         activeRun.current = openedRun
         setScopedState({
@@ -306,11 +321,17 @@ export function useGroupMembershipReadModel(
           chainId,
           groupId,
           provider,
-          state: stateForProjection(projection, chainId, groupId),
+          state: stateForProjection(
+            projection,
+            chainId,
+            groupId,
+            state.projection.startBlock,
+          ),
         })
       })
       .catch(async (error: unknown) => {
         if (requestSequence.current !== requestId) return
+        const startBlock = run.startBlock
         run.close()
         activeRun.current = undefined
         let message = describeRpcError(
@@ -320,7 +341,7 @@ export function useGroupMembershipReadModel(
         let retryable = true
         if (isDeferredEventCacheCorruptionError(error)) {
           try {
-            await resetCache(chainId, groupId)
+            await resetCache(chainId, groupId, startBlock)
             if (requestSequence.current !== requestId) return
             message =
               'The corrupt local membership cache was reset. Retry to rebuild it from confirmed chain events.'

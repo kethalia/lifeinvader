@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Address } from 'viem'
 import type { Eip1193Provider } from './ethereum'
+import { createEventCursor } from './event-indexer'
 import {
   GROUP_DIRECTORY_START_BLOCK,
   type GroupDirectorySnapshot,
@@ -20,7 +21,12 @@ import type {
   GroupMembershipStreamSnapshot,
 } from './group-membership-stream'
 import { parseMediaCid } from './media-cid'
-import type { GroupMembershipSet, PublishedGroup } from './protocol-events'
+import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
+import {
+  getGroupMembershipFilter,
+  type GroupMembershipSet,
+  type PublishedGroup,
+} from './protocol-events'
 import { PublicGroupPanel } from './public-group-panel'
 import type { WalletSession } from './wallet-session'
 
@@ -30,13 +36,29 @@ const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
 const GROUP_A = 17n
 const GROUP_B = 18n
+const START_BLOCK = 0n
 const CID = parseMediaCid('QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C')!
+const ANCHOR_CURSOR = {
+  ...createEventCursor({
+    chainId: 1n,
+    filter: getGroupMembershipFilter(GROUP_A),
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock: START_BLOCK,
+  }),
+  checkpoints: [{ blockHash: BLOCK_HASH, blockNumber: 8n }],
+  nextBlock: 9n,
+}
 const ANCHOR = {
   chainId: 1n,
   groupId: GROUP_A,
   head: 20n,
+  memberships: {
+    cursor: ANCHOR_CURSOR,
+    generation: '0'.repeat(64),
+    revision: 1n,
+  },
   safeHead: 8n,
-} as GroupMembershipProjectionAnchor
+} satisfies GroupMembershipProjectionAnchor
 
 function connectedSession(
   provider: Eip1193Provider,
@@ -97,11 +119,13 @@ function membershipStream(
     caughtUp: projectionAnchor !== undefined,
     groupId: GROUP_A,
     head: 20n,
+    historyBoundaryKind: 'genesis-fallback',
     indexedThrough: projectionAnchor ? 8n : 4n,
     ...(projectionAnchor ? { projectionAnchor } : {}),
     recentSignals: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: projectionAnchor?.memberships.cursor.startBlock ?? START_BLOCK,
   }
 }
 
@@ -118,6 +142,7 @@ function projection(
     pagesScanned: complete ? 2n : 1n,
     phase,
     safeHead: 8n,
+    startBlock: START_BLOCK,
   }
 }
 
@@ -340,6 +365,81 @@ describe('PublicGroupPanel', () => {
     expect(screen.getByText('Selected public group #17.')).toBeTruthy()
   })
 
+  it('keeps membership hidden while its deployment boundary awaits confirmation', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizeMembership = vi.fn().mockResolvedValue({
+      ...membershipStream(),
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: 9n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    render(
+      <PublicGroupPanel
+        membershipOptions={{ synchronize: synchronizeMembership }}
+        session={connectedSession(provider)}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Group ID'), {
+      target: { value: GROUP_A.toString() },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Select group' }))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed members' }),
+    )
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Check membership confirmations',
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /earliest possible Lifeinvader deployment block is 9.*has not reached the confirmed head 9 yet.*No membership log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(document.querySelector('.group-member-list')).toBeNull()
+  })
+
+  it('keeps pre-finality membership pending without implying an empty group', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizeMembership = vi.fn().mockResolvedValue({
+      ...membershipStream(),
+      head: 5n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
+    })
+    render(
+      <PublicGroupPanel
+        membershipOptions={{ synchronize: synchronizeMembership }}
+        session={connectedSession(provider)}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Group ID'), {
+      target: { value: GROUP_A.toString() },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Select group' }))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed members' }),
+    )
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Check membership confirmations',
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /membership history can begin at block 0.*does not have a confirmed head yet.*No membership log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(document.querySelector('.group-member-list')).toBeNull()
+  })
+
   it('steps exact-group catch-up and local projection before listing members', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const synchronizeMembership = vi
@@ -374,6 +474,7 @@ describe('PublicGroupPanel', () => {
       isMember: vi.fn().mockReturnValue(true),
       readMembers,
       snapshot: projection('memberships'),
+      startBlock: START_BLOCK,
     } satisfies GroupMembershipProjectionReader
     const openProjection = vi.fn().mockResolvedValue(run)
     render(

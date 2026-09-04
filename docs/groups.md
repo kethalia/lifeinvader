@@ -103,19 +103,33 @@ scope and restarts from genesis; fresh malformed logs fail before cursor commit.
 
 The selected-group membership stream applies the same chain, runtime,
 confirmation, cancellation, and cache rules to the exact indexed
-`GroupMembershipSet` filter. Each invocation scans at most one range and exposes
-at most the newest 200 validated join or leave signals. That recent page is not a
-current member list: repeated signals must be reduced across complete history.
-Only a caught-up stream issues an immutable, page-local projection anchor bound
-to the exact group, cache generation, revision, cursor, provider, and confirmed
-checkpoint. Its authenticator brackets later cache work with canonical wallet
-checks so a projection cannot publish from a copied, stale, or reorganized
-anchor.
+`GroupMembershipSet` filter. After runtime verification it discovers the same
+bounded protocol-history boundary as the directory and scopes the cursor by
+chain, group, and discovered start block. Only a recognized unavailable or
+pruned archival-state rejection falls back to genesis; other discovery failures
+propagate without a log request. A pending deployment boundary returns no
+membership signals or projection anchor and does not open the event cache. It is
+rediscovered on the next explicit confirmation check, including when the safe
+head has only reached the first block after earlier confirmed emptiness.
+
+Each invocation scans at most one range and exposes at most the newest 200
+validated join or leave signals. The discovered head is reauthenticated after
+that range and before IndexedDB commit; replacement discards the result without
+retrying the range. That recent page is not a current member list: repeated
+signals must be reduced across complete history. Only a caught-up stream with a
+confirmed safe head issues an immutable, page-local projection anchor bound to
+the exact group, start block, cache generation, revision, cursor, provider, and
+confirmed checkpoint. Its authenticator brackets later cache work with
+canonical wallet checks so a projection cannot publish from a copied, stale, or
+reorganized anchor.
 
 The stream rechecks its final checkpoint, confirmation depth, head, and wallet
-chain after cache work. It cannot claim catch-up unless its checkpoint anchors the
-twice-sampled safe head. Partial catch-up remains identifiable to the caller, and
-no history is read merely because a wallet connected or a component rendered.
+chain after cache work. It cannot claim catch-up unless a confirmed safe head
+exists and its checkpoint anchors the twice-sampled boundary. Partial catch-up
+remains identifiable to the caller, and no history is read merely because a
+wallet connected or a component rendered. The snapshot carries the explicit
+history-boundary kind and start block so the UI never infers deployment
+confirmation from coincident block numbers.
 
 The membership projection reduces complete-block cache pages in chronological
 order to each account's latest join or leave signal. It retains only current
@@ -151,16 +165,16 @@ at most one RPC range, and a separate action advances at most one local cache
 page. Changing the chain, provider, or group aborts synchronization and closes
 the old projection. Completed member getters stay unavailable during catch-up or
 projection, so partial state cannot be mistaken for authenticated state. Deep
-cache corruption resets only the affected chain/group scope and requires an
-explicit rebuild.
+cache corruption resets only the affected chain/group/start-block scope and
+requires an explicit rebuild.
 
 The public group browser renders this boundary without eager reads. Users can
 advance the confirmed directory one range at a time, select a visible group or
 enter a known positive group ID, then separately advance membership RPC and
-projection work. It states the directory's history start, keeps pending or
-partial results from looking complete, and offers a confirmation check without
-claiming that the first post-confirmed-empty block is necessarily the exact
-deployment block. Partial membership never appears in the member list. After
+projection work. It states both directory and membership history starts, keeps
+pending or partial results from looking complete, and offers a confirmation
+check without claiming that the first post-confirmed-empty block is necessarily
+the exact deployment block. Partial membership never appears in the member list. After
 authentication, current members are shown in deterministic 25-address pages and
 the connected account's public membership status is derived from the same
 projection. Group metadata CIDs are labeled as commitments rather than promises

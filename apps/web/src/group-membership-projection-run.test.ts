@@ -32,6 +32,7 @@ import {
   LIFEINVADER_INIT_CODE,
   PROTOCOL_ADDRESS,
 } from './protocol'
+import type { ProtocolHistoryBoundary } from './protocol-history'
 
 const ACCOUNT_A = '0x000000000000000000000000000000000000aaaa' as Address
 const ACCOUNT_B = '0x000000000000000000000000000000000000bbbb' as Address
@@ -104,13 +105,35 @@ function membershipLog(
   }
 }
 
-function seedCursor(groupId = GROUP_A, chainId = 1n) {
+function seedCursor(
+  groupId = GROUP_A,
+  chainId = 1n,
+  startBlock = GROUP_MEMBERSHIP_EVENT_START_BLOCK,
+) {
   return createEventCursor({
     chainId,
     filter: getGroupMembershipFilter(groupId),
     finalityDepth: FINALITY_DEPTH,
-    startBlock: GROUP_MEMBERSHIP_EVENT_START_BLOCK,
+    startBlock,
   })
+}
+
+function historyBoundary(startBlock: bigint): ProtocolHistoryBoundary {
+  return {
+    chainId: 1n,
+    codeProbes: 1,
+    confirmedThrough: {
+      blockHash: blockHash(SAFE_HEAD),
+      blockNumber: SAFE_HEAD,
+    },
+    deployment: {
+      blockHash: blockHash(startBlock),
+      blockNumber: startBlock,
+    },
+    head: { blockHash: blockHash(HEAD), blockNumber: HEAD },
+    kind: 'confirmed',
+    startBlock,
+  }
 }
 
 function cursorAtSafeHead(seed: EventCursor) {
@@ -180,8 +203,9 @@ function anchorProvider() {
 async function populateMemberships(
   storageOptions: TestStorage,
   logs: readonly IndexedEventLog[],
+  startBlock = GROUP_MEMBERSHIP_EVENT_START_BLOCK,
 ) {
-  const seed = seedCursor()
+  const seed = seedCursor(GROUP_A, 1n, startBlock)
   const cache = await openEventCache({
     ...storageOptions,
     filter: getGroupMembershipFilter(GROUP_A),
@@ -202,15 +226,21 @@ async function populateMemberships(
   }
 }
 
-async function prepareProjection(logs: readonly IndexedEventLog[]) {
+async function prepareProjection(
+  logs: readonly IndexedEventLog[],
+  startBlock = GROUP_MEMBERSHIP_EVENT_START_BLOCK,
+) {
   const storageOptions = storage()
-  await populateMemberships(storageOptions, logs)
+  await populateMemberships(storageOptions, logs, startBlock)
   const { control, provider } = anchorProvider()
   const synchronized = await synchronizeGroupMembershipStream(
     provider,
     1n,
     GROUP_A,
-    { storage: storageOptions },
+    {
+      resolveHistoryBoundary: async () => historyBoundary(startBlock),
+      storage: storageOptions,
+    },
   )
   if (!synchronized.projectionAnchor) {
     throw new Error('The test stream did not issue a projection anchor.')
@@ -244,8 +274,10 @@ describe('group membership projection run', () => {
       pagesScanned: 0n,
       phase: 'memberships',
       safeHead: SAFE_HEAD,
+      startBlock: GROUP_MEMBERSHIP_EVENT_START_BLOCK,
     })
     expect(run.groupId).toBe(GROUP_A)
+    expect(run.startBlock).toBe(GROUP_MEMBERSHIP_EVENT_START_BLOCK)
     expect(() => run.readMembers()).toThrow(/not complete/i)
     expect(() => run.getMember(ACCOUNT_A)).toThrow(/not complete/i)
     expect(() => run.isMember(ACCOUNT_A)).toThrow(/not complete/i)
@@ -302,6 +334,30 @@ describe('group membership projection run', () => {
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
     expect(run.readMembers().members).toHaveLength(2)
+  })
+
+  it('reconstructs the cache scoped to a discovered deployment boundary', async () => {
+    const startBlock = 2n
+    const prepared = await prepareProjection(
+      [membershipLog(ACCOUNT_A, true, 3n)],
+      startBlock,
+    )
+    const run = await openGroupMembershipProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+
+    expect(prepared.anchor.memberships.cursor.startBlock).toBe(startBlock)
+    expect(run.snapshot.startBlock).toBe(startBlock)
+    expect(run.startBlock).toBe(startBlock)
+    await run.advance()
+    expect(run.snapshot).toMatchObject({
+      logsProcessed: 1n,
+      phase: 'authenticate',
+      startBlock,
+    })
+    await run.advance()
+    expect(run.getMember(ACCOUNT_A)).toMatchObject({ blockNumber: 3n })
   })
 
   it('keeps complete blocks intact while honoring the requested page budget', async () => {

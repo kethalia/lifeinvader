@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Address } from 'viem'
 import type { Eip1193Provider } from './ethereum'
 import { DeferredEventCacheCorruptionError } from './event-cache'
+import { createEventCursor } from './event-indexer'
 import type { GroupMembershipProjectionReadPage } from './group-membership-projection'
 import {
   useGroupMembershipReadModel,
@@ -13,7 +14,11 @@ import type {
   GroupMembershipProjectionAnchor,
   GroupMembershipStreamSnapshot,
 } from './group-membership-stream'
-import type { GroupMembershipSet } from './protocol-events'
+import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
+import {
+  getGroupMembershipFilter,
+  type GroupMembershipSet,
+} from './protocol-events'
 import type { WalletSession } from './wallet-session'
 
 const ACCOUNT = '0x000000000000000000000000000000000000a11c' as Address
@@ -22,12 +27,28 @@ const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'22'.repeat(32)}` as const
 const GROUP_A = 17n
 const GROUP_B = 18n
+const START_BLOCK = 0n
+const ANCHOR_CURSOR = {
+  ...createEventCursor({
+    chainId: 1n,
+    filter: getGroupMembershipFilter(GROUP_A),
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock: START_BLOCK,
+  }),
+  checkpoints: [{ blockHash: BLOCK_HASH, blockNumber: 8n }],
+  nextBlock: 9n,
+}
 const ANCHOR = {
   chainId: 1n,
   groupId: GROUP_A,
   head: 20n,
+  memberships: {
+    cursor: ANCHOR_CURSOR,
+    generation: '0'.repeat(64),
+    revision: 1n,
+  },
   safeHead: 8n,
-} as GroupMembershipProjectionAnchor
+} satisfies GroupMembershipProjectionAnchor
 const MEMBER = {
   account: ACCOUNT,
   blockHash: BLOCK_HASH,
@@ -66,11 +87,13 @@ function stream(
     caughtUp: projectionAnchor !== undefined,
     groupId,
     head: 20n,
+    historyBoundaryKind: 'genesis-fallback',
     indexedThrough: 8n,
     ...(projectionAnchor ? { projectionAnchor } : {}),
     recentSignals: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: projectionAnchor?.memberships.cursor.startBlock ?? START_BLOCK,
   }
 }
 
@@ -78,6 +101,7 @@ function projection(
   phase: GroupMembershipProjectionRunSnapshot['phase'],
   groupId = GROUP_A,
   chainId = 1n,
+  startBlock = START_BLOCK,
 ): GroupMembershipProjectionRunSnapshot {
   const complete = phase === 'complete'
   return {
@@ -89,6 +113,7 @@ function projection(
     pagesScanned: 1n,
     phase,
     safeHead: 8n,
+    startBlock,
   }
 }
 
@@ -103,6 +128,7 @@ function reader(
     isMember: vi.fn().mockReturnValue(true),
     readMembers: vi.fn().mockReturnValue(MEMBER_PAGE),
     snapshot: projection('memberships'),
+    startBlock: START_BLOCK,
     ...overrides,
   }
 }
@@ -269,16 +295,26 @@ describe('useGroupMembershipReadModel', () => {
   it('resets only the selected scope after deferred cache corruption', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const resetCache = vi.fn().mockResolvedValue(undefined)
+    const startBlock = 5n
+    const dynamicAnchor = {
+      ...ANCHOR,
+      memberships: {
+        ...ANCHOR.memberships,
+        cursor: { ...ANCHOR.memberships.cursor, startBlock },
+      },
+    } satisfies GroupMembershipProjectionAnchor
     const run = reader({
       advance: vi
         .fn()
         .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+      snapshot: projection('memberships', GROUP_A, 1n, startBlock),
+      startBlock,
     })
     const { result } = renderHook(() =>
       useGroupMembershipReadModel(connectedSession(provider), GROUP_A, {
         openProjection: vi.fn().mockResolvedValue(run),
         resetCache,
-        synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronize: vi.fn().mockResolvedValue(stream(dynamicAnchor)),
       }),
     )
     act(() => result.current.loadNextRange())
@@ -287,7 +323,7 @@ describe('useGroupMembershipReadModel', () => {
     act(() => result.current.advanceProjection())
     await waitFor(() => expect(result.current.state.phase).toBe('failed'))
 
-    expect(resetCache).toHaveBeenCalledWith(1n, GROUP_A)
+    expect(resetCache).toHaveBeenCalledWith(1n, GROUP_A, startBlock)
     expect(result.current.state).toMatchObject({
       message: expect.stringMatching(/cache was reset.*retry/i),
       phase: 'failed',
