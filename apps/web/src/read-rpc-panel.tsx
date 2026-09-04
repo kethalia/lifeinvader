@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { createAnchoredReadRpcProvider } from './anchored-read-rpc'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
 import {
   createHttpRpcProvider,
@@ -176,9 +177,17 @@ export function useReadRpcSelection(
         ) {
           return false
         }
+        const anchoredProvider = createAnchoredReadRpcProvider(
+          attemptContext.walletProvider,
+          candidate,
+          verification,
+        )
+        // Ownership of the raw HTTP transport moves to the anchored wrapper.
+        // The wrapper closes it when this selection is cleared or replaced.
+        attempt.candidateClosed = true
         const selection = Object.freeze({
           ...attemptContext,
-          provider: candidate,
+          provider: anchoredProvider,
           verification,
         })
         activeAttempt.current = undefined
@@ -272,8 +281,9 @@ export function ReadRpcPanel({
         <p id="read-rpc-help">
           This URL stays in this tab and is never posted on-chain or saved by
           Lifeinvader. Verification compares the wallet and endpoint at one
-          shared confirmed block. The endpoint can observe your IP address,
-          requested methods, contract address, and page origin.
+          shared confirmed block, which remains wallet-checked during reads. The
+          endpoint can observe your IP address, requested methods, contract
+          address, and page origin, and can return false data.
         </p>
       </div>
       <form onSubmit={submit}>

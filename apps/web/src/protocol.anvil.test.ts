@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createAnchoredReadRpcProvider } from './anchored-read-rpc'
 import { synchronizeDirectMessageStream } from './direct-message-stream'
 import { synchronizeFollowStream } from './follow-stream'
 import { synchronizeGroupDirectory } from './group-directory'
@@ -179,15 +180,22 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
     expect(account).toBeDefined()
     expect(recipient).toBeDefined()
     if (!account || !recipient) return
-    await expect(
-      verifyReadRpcProvider(provider, LOCAL_CHAIN_ID, readProvider, {
-        confirmationDepth: 0n,
-      }),
-    ).resolves.toMatchObject({
+    const readRpcVerification = await verifyReadRpcProvider(
+      provider,
+      LOCAL_CHAIN_ID,
+      readProvider,
+      { confirmationDepth: 0n },
+    )
+    expect(readRpcVerification).toMatchObject({
       blockNumber: 0n,
       chainId: LOCAL_CHAIN_ID,
       endpointOrigin: expect.stringMatching(/^http:\/\/127\.0\.0\.1:/),
     })
+    readProvider = createAnchoredReadRpcProvider(
+      provider,
+      readProvider,
+      readRpcVerification,
+    )
     await expect(inspectProtocol(readProvider)).resolves.toEqual({
       kind: 'deployable',
     })
@@ -627,14 +635,11 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
       likedByAccount: false,
       repostCount: 1n,
     })
-    for (const readMethod of [
-      'eth_call',
-      'eth_getCode',
-      'eth_getLogs',
-      'eth_getTransactionReceipt',
-    ]) {
+    for (const readMethod of ['eth_call', 'eth_getCode', 'eth_getLogs']) {
       expect(walletRequestMethods).not.toContain(readMethod)
     }
+    expect(walletRequestMethods).toContain('eth_getBlockByNumber')
+    expect(walletRequestMethods).toContain('eth_getTransactionReceipt')
     expect(walletRequestMethods).toContain('eth_sendTransaction')
   })
 })
