@@ -277,7 +277,7 @@ export function ReadRpcPanel({
     <section className="read-rpc-panel" aria-labelledby="read-rpc-title">
       <div>
         <p className="eyebrow">Bring your own public infrastructure</p>
-        <h2 id="read-rpc-title">Choose an RPC for posts and profiles.</h2>
+        <h2 id="read-rpc-title">Choose an RPC for public history.</h2>
         <p id="read-rpc-help">
           This URL stays in this tab and is never posted on-chain or saved by
           Lifeinvader. Verification compares the wallet and endpoint at one
@@ -328,15 +328,15 @@ export function ReadRpcPanel({
           <p>Connect a wallet before selecting a matching read endpoint.</p>
         ) : controller.selection ? (
           <p>
-            Post and profile reads use{' '}
+            Post, profile, and message reads use{' '}
             <strong>{controller.selection.verification.endpointOrigin}</strong>,
             matched to wallet history at confirmed block{' '}
             {controller.selection.verification.blockNumber.toString()}.
           </p>
         ) : (
           <p>
-            Post and profile reads currently use the wallet’s RPC. Entering a
-            URL sends nothing until you choose verification.
+            Post, profile, and message reads currently use the wallet’s RPC.
+            Entering a URL sends nothing until you choose verification.
           </p>
         )}
         {controller.error ? <p role="alert">{controller.error}</p> : null}

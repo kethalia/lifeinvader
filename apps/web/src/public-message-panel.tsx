@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { getAddress, isAddress, type Address, type Hash, type Hex } from 'viem'
 import {
   synchronizeDirectMessageStream,
@@ -259,11 +259,13 @@ function MessageList({
 }
 
 export function PublicMessagePanel({
+  readProvider,
   sendMessage = sendDirectMessage,
   session,
   synchronize = synchronizeDirectMessageStream,
   waitForReceipt = waitForTransactionReceipt,
 }: {
+  readProvider?: Eip1193Provider
   sendMessage?: typeof sendDirectMessage
   session: WalletSession
   synchronize?: DirectMessageStreamSynchronizer
@@ -284,9 +286,16 @@ export function PublicMessagePanel({
   const operationSequence = useRef(0)
   const readSequence = useRef(0)
   const recipientInputRef = useRef(recipientInput)
-  const sessionRef = useRef(session)
+  const historySession = useMemo<WalletSession>(
+    () =>
+      readProvider !== undefined && readProvider !== session.provider
+        ? { ...session, provider: readProvider }
+        : session,
+    [readProvider, session],
+  )
+  const historySessionRef = useRef(historySession)
   recipientInputRef.current = recipientInput
-  sessionRef.current = session
+  historySessionRef.current = historySession
 
   useEffect(() => {
     readSequence.current += 1
@@ -298,13 +307,20 @@ export function PublicMessagePanel({
       activeRead.current?.abort()
       activeRead.current = undefined
     }
-  }, [session.account, session.chainId, session.provider, session.status])
+  }, [
+    historySession.account,
+    historySession.chainId,
+    historySession.provider,
+    historySession.status,
+  ])
 
   const connected =
     session.status === 'connected' &&
     session.account !== undefined &&
     session.chainId !== undefined &&
     session.provider !== undefined
+  const readsSelectedRpc =
+    connected && readProvider !== undefined && readProvider !== session.provider
   const recipientSelection = parseRecipient(recipientInput)
   let parsedMediaCid: ReturnType<typeof parseMediaCid>
   let mediaCidError: string | undefined
@@ -330,7 +346,7 @@ export function PublicMessagePanel({
   )
   const displayedReadState =
     readState.phase === 'idle' ||
-    contextMatchesSelection(readState.context, session, recipientInput)
+    contextMatchesSelection(readState.context, historySession, recipientInput)
       ? readState
       : ({ phase: 'idle' } as const)
 
@@ -568,7 +584,7 @@ export function PublicMessagePanel({
   const runConversationStep = () => {
     const account = session.account
     const chainId = session.chainId
-    const provider = session.provider
+    const provider = historySession.provider
     const recipient = recipientSelection.recipient
     if (
       session.status !== 'connected' ||
@@ -601,7 +617,7 @@ export function PublicMessagePanel({
           requestId !== readSequence.current ||
           !contextMatchesSelection(
             context,
-            sessionRef.current,
+            historySessionRef.current,
             recipientInputRef.current,
           )
         ) {
@@ -627,7 +643,7 @@ export function PublicMessagePanel({
           requestId !== readSequence.current ||
           !contextMatchesSelection(
             context,
-            sessionRef.current,
+            historySessionRef.current,
             recipientInputRef.current,
           )
         ) {
@@ -883,10 +899,11 @@ export function PublicMessagePanel({
         >
           <h3>Reconstruct this public conversation</h3>
           <p className="message-history-scope">
-            The browser asks the wallet RPC only for the selected conversation,
-            starting at the verified protocol history boundary and reading one
-            bounded confirmed range per click. No inbox server or global message
-            scan is used.
+            The browser asks{' '}
+            {readsSelectedRpc ? 'the selected read RPC' : 'the wallet RPC'} only
+            for the selected conversation, starting at the verified protocol
+            history boundary and reading one bounded confirmed range per click.
+            No inbox server or global message scan is used.
           </p>
           <p
             aria-live="polite"

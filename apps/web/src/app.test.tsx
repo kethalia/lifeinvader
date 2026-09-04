@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CID } from 'multiformats/cid'
 import { encodeAbiParameters, padHex, toHex } from 'viem'
 import { App } from './app'
+import type { DirectMessageStreamSynchronizer } from './direct-message-stream'
 import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
@@ -17,6 +18,7 @@ import type { PostFeedSynchronizer } from './post-feed'
 import type { ProfileStreamSynchronizer } from './profile-stream'
 import {
   FACTORY_ADDRESS,
+  getDirectConversationId,
   LIFEINVADER_INIT_CODE,
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
@@ -37,6 +39,7 @@ const UNKNOWN_TRANSACTION_HASH =
   '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 const RECEIPT_BLOCK_HASH = `0x${'dd'.repeat(32)}`
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
+const MESSAGE_RECIPIENT = '0x0000000000000000000000000000000000000b0b'
 const MEDIA_CID_V0 = 'QmYwAPJzv5CZsnAzt8auVZRnGiVQPcK1nK3X8KzZtXQf8C'
 const MEDIA_CID = parseMediaCid(MEDIA_CID_V0)!
 const synchronizeEmptyFeed = vi.fn<PostFeedSynchronizer>(async () => ({
@@ -58,10 +61,24 @@ const synchronizeEmptyProfile = vi.fn<ProfileStreamSynchronizer>(async () => ({
   scannedRanges: 1,
   startBlock: 0n,
 }))
+const synchronizeEmptyMessages = vi.fn<DirectMessageStreamSynchronizer>(
+  async (_provider, _chainId, account, recipient) => ({
+    cacheReset: false,
+    caughtUp: false,
+    conversationId: getDirectConversationId(account, recipient),
+    head: 100n,
+    indexedThrough: 88n,
+    recentMessages: [],
+    safeHead: 88n,
+    scannedRanges: 1,
+    startBlock: 0n,
+  }),
+)
 const waitForSafePost = vi.fn(async () => undefined)
 function renderApp() {
   return render(
     <App
+      synchronizeDirectMessages={synchronizeEmptyMessages}
       synchronizePostFeed={synchronizeEmptyFeed}
       synchronizeProfile={synchronizeEmptyProfile}
       waitForPostConfirmation={waitForSafePost}
@@ -94,6 +111,7 @@ afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
   synchronizeEmptyFeed.mockClear()
+  synchronizeEmptyMessages.mockClear()
   synchronizeEmptyProfile.mockClear()
   waitForSafePost.mockClear()
   vi.unstubAllGlobals()
@@ -131,7 +149,7 @@ describe('App', () => {
     expect(screen.getByText(/no injected wallet found/i)).toBeTruthy()
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
   })
-  it('routes posts and profiles through an in-memory endpoint with wallet fallback', async () => {
+  it('routes public history through an in-memory endpoint with wallet fallback', async () => {
     const commonBlockHash = `0x${'ef'.repeat(32)}`
     const endpointUrl = 'https://rpc.example/account/private-key'
     const fetcher = vi.fn(
@@ -209,6 +227,18 @@ describe('App', () => {
       expect(synchronizeEmptyProfile).toHaveBeenCalledTimes(1),
     )
     expect(synchronizeEmptyProfile.mock.calls[0]?.[0]).toBe(selectedProvider)
+    fireEvent.change(screen.getByLabelText(/recipient address/i), {
+      target: { value: MESSAGE_RECIPIENT },
+    })
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /load confirmed public conversation/i,
+      }),
+    )
+    await waitFor(() =>
+      expect(synchronizeEmptyMessages).toHaveBeenCalledTimes(1),
+    )
+    expect(synchronizeEmptyMessages.mock.calls[0]?.[0]).toBe(selectedProvider)
 
     fireEvent.click(screen.getByRole('button', { name: /use wallet RPC/i }))
     await waitFor(() => expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(3))
@@ -220,6 +250,15 @@ describe('App', () => {
       expect(synchronizeEmptyProfile).toHaveBeenCalledTimes(2),
     )
     expect(synchronizeEmptyProfile.mock.calls[1]?.[0]).toBe(provider)
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /load confirmed public conversation/i,
+      }),
+    )
+    await waitFor(() =>
+      expect(synchronizeEmptyMessages).toHaveBeenCalledTimes(2),
+    )
+    expect(synchronizeEmptyMessages.mock.calls[1]?.[0]).toBe(provider)
     await expect(
       selectedProvider.request({ method: 'eth_chainId' }),
     ).rejects.toThrow(/transport was closed/i)
