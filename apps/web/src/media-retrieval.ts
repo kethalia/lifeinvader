@@ -38,6 +38,49 @@ function ascii(bytes: Uint8Array, offset: number, length: number) {
   return String.fromCharCode(...bytes.slice(offset, offset + length))
 }
 
+function readUint32(bytes: Uint8Array, offset: number) {
+  return (
+    bytes[offset]! * 0x1000000 +
+    bytes[offset + 1]! * 0x10000 +
+    bytes[offset + 2]! * 0x100 +
+    bytes[offset + 3]!
+  )
+}
+
+function inspectFtypBrands(bytes: Uint8Array) {
+  if (bytes.byteLength < 16 || ascii(bytes, 4, 4) !== 'ftyp') return
+
+  const shortSize = readUint32(bytes, 0)
+  let boxEnd: number
+  let brandOffset: number
+  if (shortSize === 1) {
+    if (bytes.byteLength < 24) return
+    let longSize = 0n
+    for (let index = 8; index < 16; index += 1) {
+      longSize = longSize * 256n + BigInt(bytes[index]!)
+    }
+    if (longSize > BigInt(Number.MAX_SAFE_INTEGER)) return
+    boxEnd = Number(longSize)
+    brandOffset = 16
+  } else {
+    boxEnd = shortSize === 0 ? bytes.byteLength : shortSize
+    brandOffset = 8
+  }
+  if (
+    boxEnd > bytes.byteLength ||
+    boxEnd < brandOffset + 8 ||
+    (boxEnd - (brandOffset + 8)) % 4 !== 0
+  ) {
+    return
+  }
+
+  const brands = [ascii(bytes, brandOffset, 4)]
+  for (let offset = brandOffset + 8; offset < boxEnd; offset += 4) {
+    brands.push(ascii(bytes, offset, 4))
+  }
+  return brands
+}
+
 function inspectMediaType(bytes: Uint8Array): {
   kind: RetrievedMedia['kind']
   mimeType: string
@@ -67,9 +110,9 @@ function inspectMediaType(bytes: Uint8Array): {
   if (bytes.byteLength >= 4 && ascii(bytes, 0, 4) === 'OggS') {
     return { kind: 'video', mimeType: 'video/ogg' }
   }
-  if (bytes.byteLength >= 12 && ascii(bytes, 4, 4) === 'ftyp') {
-    const brand = ascii(bytes, 8, 4)
-    return brand === 'avif' || brand === 'avis'
+  const ftypBrands = inspectFtypBrands(bytes)
+  if (ftypBrands) {
+    return ftypBrands.some((brand) => brand === 'avif' || brand === 'avis')
       ? { kind: 'image', mimeType: 'image/avif' }
       : { kind: 'video', mimeType: 'video/mp4' }
   }
@@ -136,7 +179,11 @@ function readContentLength(response: Response, maximumBytes: number) {
   }
 }
 
-async function readBoundedBody(response: Response, maximumBytes: number) {
+async function readBoundedBody(
+  response: Response,
+  maximumBytes: number,
+  abort: () => void,
+) {
   if (!response.body) {
     throw retrievalError('the gateway response has no readable body.')
   }
@@ -163,7 +210,8 @@ async function readBoundedBody(response: Response, maximumBytes: number) {
       total = nextTotal
     }
   } catch (error) {
-    await reader.cancel().catch(() => undefined)
+    abort()
+    void reader.cancel().catch(() => undefined)
     throw error
   }
   if (total === 0) throw retrievalError('the gateway returned an empty file.')
@@ -204,9 +252,13 @@ export const retrieveIpfsMedia: MediaRetriever = async (
   const expectedCid = parseRawCid(cid)
 
   const controller = new AbortController()
+  let timedOut = false
   const abortFromCaller = () => controller.abort(options.signal?.reason)
   options.signal?.addEventListener('abort', abortFromCaller, { once: true })
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const timeout = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
 
   try {
     const response = await (options.fetcher ?? fetch)(
@@ -221,12 +273,22 @@ export const retrieveIpfsMedia: MediaRetriever = async (
       },
     )
     if (!response.ok) {
+      controller.abort()
+      void response.body?.cancel().catch(() => undefined)
       throw retrievalError(
         `the gateway returned HTTP ${response.status.toString()}.`,
       )
     }
-    readContentLength(response, maximumBytes)
-    const bytes = await readBoundedBody(response, maximumBytes)
+    try {
+      readContentLength(response, maximumBytes)
+    } catch (error) {
+      controller.abort()
+      void response.body?.cancel().catch(() => undefined)
+      throw error
+    }
+    const bytes = await readBoundedBody(response, maximumBytes, () =>
+      controller.abort(),
+    )
     controller.signal.throwIfAborted()
     await verifyRawCid(bytes, expectedCid)
     controller.signal.throwIfAborted()
@@ -243,7 +305,7 @@ export const retrieveIpfsMedia: MediaRetriever = async (
         cause: error instanceof Error ? error : undefined,
       })
     }
-    if (controller.signal.aborted) {
+    if (timedOut) {
       throw retrievalError('the gateway request timed out.', {
         cause: error instanceof Error ? error : undefined,
       })

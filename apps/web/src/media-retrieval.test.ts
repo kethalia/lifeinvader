@@ -45,6 +45,18 @@ function response(
   } as Response
 }
 
+function ftyp(majorBrand: string, compatibleBrands: string[] = []) {
+  const bytes = new Uint8Array(16 + compatibleBrands.length * 4)
+  const view = new DataView(bytes.buffer)
+  view.setUint32(0, bytes.byteLength)
+  bytes.set(new TextEncoder().encode('ftyp'), 4)
+  bytes.set(new TextEncoder().encode(majorBrand), 8)
+  compatibleBrands.forEach((brand, index) => {
+    bytes.set(new TextEncoder().encode(brand), 16 + index * 4)
+  })
+  return bytes
+}
+
 afterEach(() => {
   vi.useRealTimers()
 })
@@ -135,8 +147,9 @@ describe('IPFS media retrieval', () => {
       'video',
       'video/webm',
     ],
-    [new TextEncoder().encode('....ftypisom'), 'video', 'video/mp4'],
-    [new TextEncoder().encode('....ftypavif'), 'image', 'image/avif'],
+    [ftyp('isom', ['mp42']), 'video', 'video/mp4'],
+    [ftyp('avif'), 'image', 'image/avif'],
+    [ftyp('mif1', ['miaf', 'avif']), 'image', 'image/avif'],
   ] as const)(
     'recognizes supported bytes instead of trusting response headers',
     async (bytes, kind, mimeType) => {
@@ -201,12 +214,49 @@ describe('IPFS media retrieval', () => {
     expect(fetcher).not.toHaveBeenCalled()
   })
 
-  it('rejects HTTP failures, malformed lengths, and empty bodies', async () => {
+  it('cancels response bodies rejected before streaming', async () => {
+    const httpCancel = vi.fn()
+    let httpSignal: AbortSignal | undefined
+    const httpFailure = {
+      body: new ReadableStream<Uint8Array>({ cancel: httpCancel }),
+      headers: { get: () => null },
+      ok: false,
+      status: 404,
+    } as unknown as Response
     await expect(
       retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', CID, {
-        fetcher: vi.fn(async () => response([], { status: 404 })),
+        fetcher: vi.fn(async (_input, init) => {
+          httpSignal = init?.signal ?? undefined
+          return httpFailure
+        }),
       }),
     ).rejects.toThrow(/HTTP 404/i)
+    expect(httpSignal?.aborted).toBe(true)
+    expect(httpCancel).toHaveBeenCalledTimes(1)
+
+    const lengthCancel = vi.fn()
+    let lengthSignal: AbortSignal | undefined
+    const oversized = {
+      body: new ReadableStream<Uint8Array>({ cancel: lengthCancel }),
+      headers: {
+        get: () => (MAX_RETRIEVED_MEDIA_BYTES + 1).toString(),
+      },
+      ok: true,
+      status: 200,
+    } as unknown as Response
+    await expect(
+      retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', CID, {
+        fetcher: vi.fn(async (_input, init) => {
+          lengthSignal = init?.signal ?? undefined
+          return oversized
+        }),
+      }),
+    ).rejects.toThrow(/exceeds the 33554432-byte limit/i)
+    expect(lengthSignal?.aborted).toBe(true)
+    expect(lengthCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects malformed lengths and empty bodies', async () => {
     await expect(
       retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', CID, {
         fetcher: vi.fn(async () =>
@@ -221,18 +271,9 @@ describe('IPFS media retrieval', () => {
     ).rejects.toThrow(/empty file/i)
   })
 
-  it('rejects oversized declared and streamed responses before decoding', async () => {
-    await expect(
-      retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', CID, {
-        fetcher: vi.fn(async () =>
-          response([], {
-            contentLength: (MAX_RETRIEVED_MEDIA_BYTES + 1).toString(),
-          }),
-        ),
-      }),
-    ).rejects.toThrow(/exceeds the 33554432-byte limit/i)
-
+  it('cancels streamed responses that cross the byte limit', async () => {
     const cancel = vi.fn()
+    let fetchSignal: AbortSignal | undefined
     const streamed = {
       body: new ReadableStream<Uint8Array>({
         cancel,
@@ -246,10 +287,14 @@ describe('IPFS media retrieval', () => {
     } as unknown as Response
     await expect(
       retrieveIpfsMedia('https://gateway.example/ipfs/{cid}', CID, {
-        fetcher: vi.fn(async () => streamed),
+        fetcher: vi.fn(async (_input, init) => {
+          fetchSignal = init?.signal ?? undefined
+          return streamed
+        }),
         maximumBytes: 4,
       }),
     ).rejects.toThrow(/exceeds the 4-byte limit/i)
+    expect(fetchSignal?.aborted).toBe(true)
     expect(cancel).toHaveBeenCalledTimes(1)
   })
 
