@@ -3,8 +3,10 @@ import { sha256 } from 'multiformats/hashes/sha2'
 import { describe, expect, it, vi } from 'vitest'
 import {
   MAX_PAID_MEDIA_BYTES,
+  MAX_PAID_MEDIA_CAR_BYTES,
   MIN_PAID_MEDIA_CAR_BYTES,
   preparePaidMediaCar,
+  validatePreparedMediaCar,
 } from './paid-media-car'
 
 const CONTENT = new TextEncoder().encode('hello world'.repeat(16))
@@ -104,6 +106,56 @@ describe('paid media CAR preparation', () => {
       type: 'image/gif',
     })
     expect(second.file.name).toBe('renamed.mp4')
+  })
+
+  it('revalidates every block and snapshots bytes before paid storage', async () => {
+    const prepared = await preparePaidMediaCar(mediaFile())
+    const validated = await validatePreparedMediaCar(prepared)
+    const firstByte = validated.carBytes[0]
+
+    prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
+
+    expect(validated).not.toBe(prepared)
+    expect(validated.carBytes).not.toBe(prepared.carBytes)
+    expect(validated.carBytes[0]).toBe(firstByte)
+    expect(Object.isFrozen(validated)).toBe(true)
+    expect(Object.isFrozen(validated.file)).toBe(true)
+    expect(Object.isFrozen(validated.mediaCid)).toBe(true)
+
+    const intact = await preparePaidMediaCar(mediaFile())
+    const corrupted = {
+      ...intact,
+      carBytes: intact.carBytes.slice(),
+    }
+    const lastIndex = corrupted.carBytes.length - 1
+    corrupted.carBytes[lastIndex] = (corrupted.carBytes[lastIndex] ?? 0) ^ 0x01
+    await expect(validatePreparedMediaCar(corrupted)).rejects.toThrow(
+      /failed CID verification/i,
+    )
+  })
+
+  it('rejects inconsistent roots and malformed or unbounded archives', async () => {
+    const prepared = await preparePaidMediaCar(mediaFile())
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        mediaCid: { ...prepared.mediaCid, codec: 'dag-pb' },
+      }),
+    ).rejects.toThrow(/declared root CID is inconsistent/i)
+
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: new Uint8Array(MIN_PAID_MEDIA_CAR_BYTES),
+      }),
+    ).rejects.toThrow(/not valid CAR data/i)
+
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: new Uint8Array(MAX_PAID_MEDIA_CAR_BYTES + 1),
+      }),
+    ).rejects.toThrow(/byte length is out of bounds/i)
   })
 
   it('matches a stable raw CID fixture', async () => {

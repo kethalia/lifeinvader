@@ -2,6 +2,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from 'vitest'
 import {
+  custom,
   decodeFunctionResult,
   encodeFunctionData,
   getAddress,
@@ -16,6 +17,7 @@ import {
 } from './filecoin-storage'
 import { fundFilecoinStorage } from './filecoin-storage-funding'
 import { quoteFilecoinStorage } from './filecoin-storage-quote'
+import { bindFilecoinStorageSynapseChain } from './filecoin-storage-synapse'
 
 const forkRpcUrl = process.env.LIFEINVADER_FILECOIN_FORK_RPC_URL
 const describeFork = forkRpcUrl ? describe : describe.skip
@@ -263,6 +265,63 @@ describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
     expect(methods.length).toBeLessThanOrEqual(16)
     expect(methods).not.toContain('eth_sendTransaction')
     expect(methods).not.toContain('eth_signTypedData_v4')
+  }, 30_000)
+
+  it('resolves one approved IPFS-indexing provider with two bounded reads', async () => {
+    if (!forkRpcUrl) return
+    const methods: string[] = []
+    const provider = httpProvider(forkRpcUrl, methods, UNUSED_QUOTE_ACCOUNT)
+    const [{ Synapse, calibration, mainnet }, warmStorage] = await Promise.all([
+      import('@filoz/synapse-sdk'),
+      import('@filoz/synapse-sdk/warm-storage'),
+    ])
+    const binding = bindFilecoinStorageSynapseChain(
+      FILECOIN_CALIBRATION_CHAIN_ID,
+      { calibration, mainnet },
+    )
+    if (!binding) throw new Error('Calibration binding is unavailable.')
+    const transport = custom(
+      {
+        request: ({ method, params }) =>
+          provider.request({
+            method,
+            ...(params === undefined
+              ? {}
+              : { params: params as readonly unknown[] | object }),
+          }),
+      },
+      { retryCount: 0 },
+    )
+    const synapse = Synapse.create({
+      account: UNUSED_QUOTE_ACCOUNT,
+      chain: binding.chain,
+      pieceBatching: false,
+      source: 'lifeinvader',
+      transport,
+      withCDN: false,
+    })
+    const service = new warmStorage.WarmStorageService({
+      client: synapse.client,
+      readClient: synapse.readClient,
+    })
+
+    const [resolved, approved] = await Promise.all([
+      synapse.providers.getProvider({ providerId: 2n }),
+      service.isProviderIdApproved({ providerId: 2n }),
+    ])
+
+    expect(approved).toBe(true)
+    expect(resolved).toMatchObject({
+      id: 2n,
+      isActive: true,
+      pdp: {
+        ipniIpfs: true,
+        minPieceSizeInBytes: 1_048_576n,
+        paymentTokenAddress: '0x0000000000000000000000000000000000000000',
+        serviceURL: expect.stringMatching(/^https:\/\//),
+      },
+    })
+    expect(methods).toEqual(['eth_call', 'eth_call'])
   }, 30_000)
 
   it('funds and approves one quote through an authenticated transaction', async () => {
