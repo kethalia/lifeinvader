@@ -60,6 +60,7 @@ type TestStorage = Required<
 
 type AnchorProviderControl = {
   head: bigint
+  headAfterRead?: bigint
   safeHeadHash: Hex
 }
 
@@ -184,7 +185,14 @@ function anchorProvider() {
     request: vi.fn(async ({ method, params }) => {
       if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
       if (method === 'eth_chainId') return '0x1'
-      if (method === 'eth_blockNumber') return toHex(control.head)
+      if (method === 'eth_blockNumber') {
+        const head = control.head
+        if (control.headAfterRead !== undefined) {
+          control.head = control.headAfterRead
+          control.headAfterRead = undefined
+        }
+        return toHex(head)
+      }
       if (method === 'eth_getBlockByNumber') {
         const [number] = params as [Hex]
         const blockNumber = BigInt(number)
@@ -508,6 +516,23 @@ describe('post reaction projection run', () => {
     prepared.control.safeHeadHash = hash('replacement safe head')
 
     await expect(run.advance()).rejects.toThrow(/checkpoint changed/i)
+    expect(run.snapshot.phase).toBe('failed')
+    expect(() => run.getSummary(7n)).toThrow(/not complete/i)
+  })
+
+  it('rejects a provider head that regresses during final cache proof', async () => {
+    const prepared = await prepareProjection([], [])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    prepared.control.headAfterRead = HEAD - 1n
+
+    await expect(run.advance()).rejects.toThrow(
+      /head moved behind the post reaction projection anchor/i,
+    )
     expect(run.snapshot.phase).toBe('failed')
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
   })

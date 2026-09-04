@@ -355,12 +355,17 @@ export async function authenticateIssuedPostReactionProjectionAnchor(
       )
       assertContextActive()
     }
-    await assertSelectedChain(
+    const finalHead = await readSelectedHead(
       issued.provider,
       issued.chainId,
       interruption.signal,
     )
     assertContextActive()
+    if (finalHead < issued.head) {
+      throw new Error(
+        'The wallet head moved behind the post reaction projection anchor.',
+      )
+    }
   } catch (error) {
     assertContextActive()
     throw error
