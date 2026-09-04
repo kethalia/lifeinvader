@@ -95,11 +95,24 @@ corruption clears only that chain's directory scope, while another chain's scope
 is preserved.
 
 The selected-group message stream verifies the chosen chain and exact v1 runtime
-before touching logs. Each explicit invocation scans at most one bounded range
-with the exact group filter, persists a reorganization-aware cursor in disposable
-IndexedDB storage, and returns at most the newest 100 retained messages. Separate
-group IDs use separate cache scopes. A malformed cached page clears only that
-scope and restarts from genesis; fresh malformed logs fail before cursor commit.
+before touching logs, then discovers the bounded protocol deployment boundary.
+Only a recognized unavailable or pruned archival-state rejection falls back to
+genesis; other discovery failures propagate without requesting group-message
+logs. If deployment is newer than the confirmed head, or no confirmed head
+exists yet, the stream reports pending confirmation without opening its event
+cache. A later explicit check rediscovers that boundary rather than treating the
+first block after confirmed emptiness as proof of deployment.
+
+Each explicit invocation scans at most one bounded range with the exact group
+filter, persists a reorganization-aware chain/group/start-block cursor in
+disposable IndexedDB storage, and returns at most the newest 100 retained
+messages. It reauthenticates the discovered head before applying the range; a
+replacement discards the result without retry. Separate group IDs and discovered
+starts use separate cache scopes. A malformed cached page clears only that scope
+and restarts from its verified start; fresh malformed logs fail before cursor
+commit. A stream without a confirmed safe head stays incomplete, and the
+explicit history-boundary kind prevents the UI from mistaking numeric equality
+for deployment confirmation.
 
 The selected-group membership stream applies the same chain, runtime,
 confirmation, cancellation, and cache rules to the exact indexed
@@ -200,12 +213,13 @@ selected group. Unknown hashes are reauthenticated against the original wallet
 context and exact `GroupMessageSent` payload before completion is reported.
 
 Confirmed message reads request only the selected group's indexed topic, one
-bounded range per action. Partial catch-up is described but never rendered as a
-complete channel. Changing the provider, chain, or selected group aborts the old
-request, while a mismatched synchronizer result fails closed. The completed view
-shows at most the newest 100 retained events in chronological display order and
-labels IPFS values as availability-unproven commitments; it never fetches a
-gateway merely because a CID appears in a log.
+bounded range per action from the displayed verified start block. Pending and
+partial catch-up are described but never rendered as a complete channel.
+Changing the provider, chain, or selected group aborts the old request, while a
+mismatched synchronizer result fails closed. The completed view shows at most
+the newest 100 retained events in chronological display order and labels IPFS
+values as availability-unproven commitments; it never fetches a gateway merely
+because a CID appears in a log.
 
 The Anvil integration covers create, join, leave, send, confirmed exact-group
 message and membership readback, and discovery of the immutable group

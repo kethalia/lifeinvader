@@ -105,10 +105,12 @@ function snapshot(
     caughtUp,
     groupId,
     head: 30n,
+    historyBoundaryKind: 'genesis-fallback',
     indexedThrough: 18n,
     recentMessages: messages,
     safeHead: 18n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -366,6 +368,81 @@ describe('PublicGroupMessagePanel', () => {
     expect(renderedMessages[1]?.textContent).toContain('Newer group event.')
     expect(screen.getByText(MEDIA_CID.text)).toBeTruthy()
     expect(screen.getAllByText(/newest retained page/i)).toHaveLength(2)
+  })
+
+  it('keeps group messages hidden while deployment confirmation is pending', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi
+      .fn<GroupMessageStreamSynchronizer>()
+      .mockResolvedValue({
+        ...snapshot([], false),
+        historyBoundaryKind: 'pending-confirmation',
+        indexedThrough: undefined,
+        safeHead: 9n,
+        scannedRanges: 0,
+        startBlock: 9n,
+      })
+    render(
+      <PublicGroupMessagePanel
+        selectedGroupId={GROUP_ID}
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed group messages/i }),
+    )
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Check group-message confirmations',
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /earliest possible Lifeinvader deployment block is 9.*has not reached the confirmed head 9 yet.*No group-message log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(document.querySelector('.message-empty-result')).toBeNull()
+  })
+
+  it('keeps pre-finality group messages pending without implying an empty channel', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronize = vi
+      .fn<GroupMessageStreamSynchronizer>()
+      .mockResolvedValue({
+        ...snapshot([], false),
+        head: 5n,
+        historyBoundaryKind: 'pending-confirmation',
+        indexedThrough: undefined,
+        safeHead: undefined,
+        scannedRanges: 0,
+        startBlock: 0n,
+      })
+    render(
+      <PublicGroupMessagePanel
+        selectedGroupId={GROUP_ID}
+        session={connectedSession(provider)}
+        synchronize={synchronize}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed group messages/i }),
+    )
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Check group-message confirmations',
+      }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /group-message history can begin at block 0.*does not have a confirmed head yet.*No group-message log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(document.querySelector('.message-empty-result')).toBeNull()
   })
 
   it('aborts the old group read and ignores its stale result', async () => {
