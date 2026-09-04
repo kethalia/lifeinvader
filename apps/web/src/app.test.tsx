@@ -14,6 +14,7 @@ import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
 import type { PostFeedSynchronizer } from './post-feed'
+import type { ProfileStreamSynchronizer } from './profile-stream'
 import {
   FACTORY_ADDRESS,
   LIFEINVADER_INIT_CODE,
@@ -47,11 +48,22 @@ const synchronizeEmptyFeed = vi.fn<PostFeedSynchronizer>(async () => ({
   scannedRanges: 0,
   startBlock: 0n,
 }))
+const synchronizeEmptyProfile = vi.fn<ProfileStreamSynchronizer>(async () => ({
+  cacheReset: false,
+  caughtUp: false,
+  head: 100n,
+  indexedThrough: 88n,
+  recentProfiles: [],
+  safeHead: 88n,
+  scannedRanges: 1,
+  startBlock: 0n,
+}))
 const waitForSafePost = vi.fn(async () => undefined)
 function renderApp() {
   return render(
     <App
       synchronizePostFeed={synchronizeEmptyFeed}
+      synchronizeProfile={synchronizeEmptyProfile}
       waitForPostConfirmation={waitForSafePost}
     />,
   )
@@ -82,6 +94,7 @@ afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
   synchronizeEmptyFeed.mockClear()
+  synchronizeEmptyProfile.mockClear()
   waitForSafePost.mockClear()
   vi.unstubAllGlobals()
 })
@@ -118,7 +131,7 @@ describe('App', () => {
     expect(screen.getByText(/no injected wallet found/i)).toBeTruthy()
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
   })
-  it('verifies an in-memory endpoint for feed reads and keeps the wallet as fallback', async () => {
+  it('routes posts and profiles through an in-memory endpoint with wallet fallback', async () => {
     const commonBlockHash = `0x${'ef'.repeat(32)}`
     const endpointUrl = 'https://rpc.example/account/private-key'
     const fetcher = vi.fn(
@@ -189,9 +202,24 @@ describe('App', () => {
     expect(screen.queryByText(/private-key/i)).toBeNull()
     expect(fetcher).toHaveBeenCalledTimes(4)
 
+    fireEvent.click(
+      screen.getByRole('button', { name: /load confirmed profile/i }),
+    )
+    await waitFor(() =>
+      expect(synchronizeEmptyProfile).toHaveBeenCalledTimes(1),
+    )
+    expect(synchronizeEmptyProfile.mock.calls[0]?.[0]).toBe(selectedProvider)
+
     fireEvent.click(screen.getByRole('button', { name: /use wallet RPC/i }))
     await waitFor(() => expect(synchronizeEmptyFeed).toHaveBeenCalledTimes(3))
     expect(synchronizeEmptyFeed.mock.calls[2]?.[0]).toBe(provider)
+    fireEvent.click(
+      await screen.findByRole('button', { name: /load confirmed profile/i }),
+    )
+    await waitFor(() =>
+      expect(synchronizeEmptyProfile).toHaveBeenCalledTimes(2),
+    )
+    expect(synchronizeEmptyProfile.mock.calls[1]?.[0]).toBe(provider)
     await expect(
       selectedProvider.request({ method: 'eth_chainId' }),
     ).rejects.toThrow(/transport was closed/i)

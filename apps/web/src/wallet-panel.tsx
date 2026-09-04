@@ -36,6 +36,7 @@ import type { PreparedMediaCar } from './paid-media-car'
 import { FilecoinStoragePanel } from './filecoin-storage-panel'
 import { ProfileComposer } from './profile-composer'
 import { ProfileReader } from './profile-reader'
+import type { ProfileStreamSynchronizer } from './profile-stream'
 const inspectionCopy: Record<ProtocolInspection['kind'], string> = {
   ready: 'Verified Lifeinvader v1 code is ready.',
   deployable: 'The canonical factory is verified. You can deploy v1 here.',
@@ -195,13 +196,17 @@ export function WalletPanel({
   onPostConfirmed,
   prepareMediaAction,
   publishPostAction = publishPost,
+  readProvider,
   setProfileAction = setProfile,
+  synchronizeProfile,
   walletSession,
 }: {
   onPostConfirmed(post: IncludedPost): void
   prepareMediaAction?: PaidMediaPreparer
   publishPostAction?: typeof publishPost
+  readProvider?: Eip1193Provider
   setProfileAction?: typeof setProfile
+  synchronizeProfile?: ProfileStreamSynchronizer
   walletSession: WalletSessionController
 }) {
   const wallets = useWalletProviders()
@@ -933,7 +938,11 @@ export function WalletPanel({
         </div>
         <div className="wallet-profile">
           <h3>4. Public profile</h3>
-          <ProfileReader session={session} />
+          <ProfileReader
+            readProvider={readProvider}
+            session={session}
+            synchronize={synchronizeProfile}
+          />
           <h4>Publish a complete snapshot</h4>
           {!connected ? (
             <p>

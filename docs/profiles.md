@@ -44,6 +44,12 @@ call, strictly decodes every returned event, and commits accepted ranges to the
 reorg-aware IndexedDB event cache. Its nominal 200-event recent page is only a
 preview, never a complete profile projection.
 
+When the user selects a separate read RPC, connected-profile synchronization
+uses the same wallet-anchored provider as the post feed. Changing or clearing
+that provider aborts and discards the old read-model state before wallet-RPC
+fallback can begin. Profile publication, protocol inspection, and transaction
+receipt recovery remain on the original injected wallet provider.
+
 Before creating a fresh cursor, the profile stream resolves the shared bounded
 protocol-history boundary. It verifies the exact v1 runtime-code transition
 with at most 64 sequential historical code probes and carries the discovered

@@ -1,3 +1,5 @@
+import { useMemo } from 'react'
+import type { Eip1193Provider } from './ethereum'
 import { decodeMediaCid } from './media-cid'
 import {
   useProfileReadModel,
@@ -131,12 +133,23 @@ function ConfirmedProfile({ profile }: { profile?: ProfileSet }) {
 
 export function ProfileReader({
   openProjection,
+  readProvider,
   resetCache,
   resumeStore,
   session,
   synchronize,
-}: UseProfileReadModelOptions & { session: WalletSession }) {
-  const model = useProfileReadModel(session, {
+}: UseProfileReadModelOptions & {
+  readProvider?: Eip1193Provider
+  session: WalletSession
+}) {
+  const historySession = useMemo<WalletSession>(
+    () =>
+      readProvider !== undefined && readProvider !== session.provider
+        ? { ...session, provider: readProvider }
+        : session,
+    [readProvider, session],
+  )
+  const model = useProfileReadModel(historySession, {
     openProjection,
     resetCache,
     resumeStore,
