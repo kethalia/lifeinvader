@@ -22,8 +22,10 @@ import {
   waitForTransactionReceipt,
   type TransactionReceipt,
 } from './protocol'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { PublishedDirectMessage } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const FAILED_ATTEMPT_HISTORY_LIMIT = 8
@@ -296,6 +298,12 @@ export function PublicMessagePanel({
   const historySessionRef = useRef(historySession)
   recipientInputRef.current = recipientInput
   historySessionRef.current = historySession
+  const openingOperations = useOpeningWalletOperations(
+    attempts,
+    setAttempts,
+    session,
+    contextMatchesSession,
+  )
 
   useEffect(() => {
     readSequence.current += 1
@@ -332,12 +340,14 @@ export function PublicMessagePanel({
   }
   const bodyBytes = getPostBodyByteLength(body)
   const emptyPayload = bodyBytes === 0 && parsedMediaCid === undefined
-  const currentAttempts = attempts.filter((attempt) =>
-    accountChainMatchesSession(attempt, session),
-  )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = attempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'messages',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeProblem = problems.findLast((problem) =>
     contextMatchesSession(problem, session),
   )
@@ -416,6 +426,7 @@ export function PublicMessagePanel({
       return
     }
     const id = ++operationSequence.current
+    const control = openingOperations.begin(id)
     const context: MessageContext = {
       account,
       body,
@@ -452,6 +463,7 @@ export function PublicMessagePanel({
           recipient,
           { body: context.body, mediaCid: context.mediaCid },
           (hash) => {
+            if (!control.active) return
             submittedHash = hash
             setAttempts((current) =>
               current.map((attempt) =>
@@ -462,8 +474,10 @@ export function PublicMessagePanel({
             )
           },
         )
+        if (!control.active) return
         finishMessage(context, id, receipt)
       } catch (error) {
+        if (!control.active) return
         const message = describeRpcError(
           error,
           'The public message transaction failed.',
@@ -501,6 +515,8 @@ export function PublicMessagePanel({
             [...current, { ...context, id, message }].slice(-8),
           )
         }
+      } finally {
+        openingOperations.release(id, control)
       }
     })()
   }
@@ -576,6 +592,7 @@ export function PublicMessagePanel({
   }
 
   const dismissAttempt = (attempt: MessageAttempt) => {
+    openingOperations.deactivate(attempt.id)
     setAttempts((current) =>
       current.filter((candidate) => candidate.id !== attempt.id),
     )
@@ -785,9 +802,11 @@ export function PublicMessagePanel({
               }
               type="submit"
             >
-              {writeLocked
+              {localWriteLocked
                 ? 'Public message action pending…'
-                : 'Send public message on-chain'}
+                : lockedByAnotherConsole
+                  ? 'Another wallet action is pending…'
+                  : 'Send public message on-chain'}
             </button>
           </form>
 
@@ -841,7 +860,9 @@ export function PublicMessagePanel({
                   ) : null}
                   . {statusCopy}{' '}
                   {!currentAccountChain
-                    ? 'This belongs to another account or chain and does not lock the current composer.'
+                    ? unresolved
+                      ? 'This belongs to another account or chain and keeps every wallet write locked until it is resolved or dismissed.'
+                      : 'This failed action belongs to another account or chain and does not lock new writes.'
                     : !currentProvider && unresolved
                       ? `Reconnect ${attempt.walletName} for provider-specific recovery. This unresolved action still locks this account and chain.`
                       : !currentProvider

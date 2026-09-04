@@ -196,19 +196,22 @@ of availability.
 The adjacent transaction console creates groups and publishes explicit join or
 leave events through the connected wallet. A directory selection feeds its
 membership target, while a confirmed creation selects the identifier assigned
-by the contract. It locks duplicate writes after a hash or ambiguous broadcast,
-keeps old wallet contexts isolated, and clears a creation draft only after the
-exact payload is authenticated in a canonical receipt. Unknown hashes can be
-retried only from the original provider, account, and chain with the expected
-creation or membership event bound into receipt validation.
+by the contract. It locks app-wide duplicate writes after a hash or ambiguous
+broadcast, keeps old wallet contexts isolated, and clears a creation draft only
+after the exact payload is authenticated in a canonical receipt. Changing the
+account, chain, or provider while a wallet prompt is open turns it into a
+dismissible hashless ambiguity and invalidates its late callbacks. Unknown
+hashes can be retried only from the original provider, account, and chain with
+the expected creation or membership event bound into receipt validation.
 
 The selected-group message console remains inert until the user chooses a group
 and explicitly advances a read or submits a write. Sending does not require
 membership: the interface treats membership as public social metadata, requires
 an explicit disclosure acknowledgment, and receipt-verifies the exact sender,
 group, body, and canonical CID bytes. A submitted or ambiguously broadcast
-message locks further writes for that account and chain until its outcome is
-resolved. A receipt clears only an unchanged draft for the same wallet and still
+message locks every app write until its outcome is resolved. A wallet-context
+change makes a still-opening prompt dismissible and prevents its late result
+from mutating the composer. A receipt clears only an unchanged draft for the same wallet and still
 selected group. Unknown hashes are reauthenticated against the original wallet
 context and exact `GroupMessageSent` payload before completion is reported.
 

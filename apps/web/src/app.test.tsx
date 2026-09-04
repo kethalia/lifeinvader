@@ -30,6 +30,10 @@ import {
 import { WalletPanel } from './wallet-panel'
 import { resetWalletDiscoveryForTests } from './wallet-providers'
 import type { WalletSessionController } from './wallet-session'
+import {
+  WalletWriteBoundary,
+  useWalletWriteBoundary,
+} from './wallet-write-boundary'
 const FACTORY_RUNTIME_CODE =
   '0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3'
 const PROTOCOL_RUNTIME_CODE = `0x${LIFEINVADER_INIT_CODE.slice(2 + 0x32 * 2)}`
@@ -136,6 +140,10 @@ function deferred<T>() {
   })
   return { promise, reject, resolve }
 }
+function ActiveWalletWrite() {
+  useWalletWriteBoundary('feed', true)
+  return null
+}
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
@@ -179,6 +187,49 @@ describe('App', () => {
     ).toBeTruthy()
     expect(screen.getByText(/no injected wallet found/i)).toBeTruthy()
     expect(screen.getByText(/there are no private actions/i)).toBeTruthy()
+  })
+  it('keeps wallet reconnection available while another write is unresolved', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const connect = vi.fn(async () => undefined)
+    const stop = announceWallet('Recovery Wallet', 'recovery-wallet', provider)
+
+    render(
+      <WalletWriteBoundary>
+        <ActiveWalletWrite />
+        <WalletPanel
+          onPostConfirmed={vi.fn()}
+          walletSession={{
+            connect,
+            refresh: vi.fn(async () => undefined),
+            session: {
+              account: ACCOUNT,
+              chainId: 1n,
+              name: 'Recovery Wallet',
+              provider,
+              status: 'connected',
+            },
+          }}
+        />
+      </WalletWriteBoundary>,
+    )
+
+    const reconnect = await screen.findByRole('button', {
+      name: /connect recovery wallet/i,
+    })
+    const body = await screen.findByLabelText(/permanent public statement/i)
+    fireEvent.change(body, { target: { value: 'Wait for the other receipt.' } })
+
+    expect(reconnect.hasAttribute('disabled')).toBe(false)
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+    fireEvent.click(reconnect)
+    expect(connect).toHaveBeenCalledTimes(1)
+    stop()
   })
   it('routes public history through an in-memory endpoint with wallet fallback', async () => {
     const commonBlockHash = `0x${'ef'.repeat(32)}`
@@ -363,6 +414,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText(/permanent public statement/i), {
       target: { value: 'About to be reorged.' },
     })
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     expect(
       await screen.findByRole('button', { name: /deploy protocol here/i }),
@@ -526,7 +578,7 @@ describe('App', () => {
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     stop()
   })
-  it('scopes concurrent busy writes to their original wallet context', async () => {
+  it('makes a stranded wallet prompt dismissible and ignores its late result', async () => {
     let chainId = '0x1'
     let submissions = 0
     const firstSubmission = deferred<string>()
@@ -571,14 +623,30 @@ describe('App', () => {
     fireEvent.change(textarea, { target: { value: 'Waiting on chain A.' } })
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     await waitFor(() => expect(submissions).toBe(1))
+    expect(
+      screen
+        .getByText(/confirm or reject the request/i)
+        .closest('.transaction-pending')?.textContent,
+    ).toMatch(/Post wallet request opened/i)
 
     await act(async () => emitChain('0x2'))
     const chainBPublish = await screen.findByRole('button', {
       name: /publish on-chain/i,
     })
-    expect(chainBPublish.hasAttribute('disabled')).toBe(false)
-    fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
+    expect(chainBPublish.hasAttribute('disabled')).toBe(true)
     fireEvent.click(chainBPublish)
+    expect(submissions).toBe(1)
+
+    expect(
+      await screen.findByText(/wallet request may have broadcast/i),
+    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked my wallet/i }),
+    )
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
+
+    fireEvent.change(textarea, { target: { value: 'Waiting on chain B.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     await waitFor(() => expect(submissions).toBe(2))
     expect(buttonDisabled(/^publishing…$/i)).toBe(true)
 
@@ -599,7 +667,7 @@ describe('App', () => {
     ).toBeTruthy()
     stop()
   })
-  it('does not let a stale post completion clear the current draft', async () => {
+  it('does not let a dismissed stale post completion clear the current draft', async () => {
     let selectedChain = '0x1'
     const provider = {
       request: vi.fn(async ({ method }: { method: string }) => {
@@ -645,6 +713,12 @@ describe('App', () => {
       />,
     )
     await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    expect(
+      await screen.findByText(/wallet request may have broadcast/i),
+    ).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked my wallet/i }),
+    )
     fireEvent.change(textarea, { target: { value: 'Unsent chain B draft.' } })
     const mediaInput = screen.getByLabelText(/IPFS media CID/i)
     fireEvent.change(mediaInput, { target: { value: MEDIA_CID_V0 } })
@@ -672,7 +746,7 @@ describe('App', () => {
         walletSession={controller(1n)}
       />,
     )
-    expect(await screen.findByText(/included in block 42/i)).toBeTruthy()
+    expect(screen.queryByText(/included in block 42/i)).toBeNull()
   })
   it('prepares local media, locks publishing, and commits its CID', async () => {
     let selectedChain = '0x1'
@@ -808,7 +882,7 @@ describe('App', () => {
     expect(buttonDisabled(/publish on-chain/i)).toBe(false)
     expect((restoredMediaInput as HTMLInputElement).disabled).toBe(false)
   })
-  it('preserves an unknown post while another chain starts a write', async () => {
+  it('keeps an unknown post locked across chains until it is dismissed', async () => {
     let chainId = '0x1'
     let submissions = 0
     const listeners = new Map<string, Set<(value: unknown) => void>>()
@@ -858,15 +932,13 @@ describe('App', () => {
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
     await act(async () => emitChain('0x2'))
     expect(
-      await screen.findByText(/another wallet context.*current console/i),
+      await screen.findByText(
+        /another wallet context.*keeps every wallet write locked/i,
+      ),
     ).toBeTruthy()
-    expect(buttonDisabled(/publish on-chain/i)).toBe(false)
-
-    fireEvent.change(textarea, { target: { value: 'Rejected on chain B.' } })
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
-    expect((await screen.findByRole('alert')).textContent).toMatch(
-      /request was rejected/i,
-    )
+    expect(submissions).toBe(1)
 
     await act(async () => emitChain('0x1'))
     expect(
@@ -874,6 +946,17 @@ describe('App', () => {
     ).toBeTruthy()
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
     expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /i checked this hash/i }),
+    )
+    await act(async () => emitChain('0x2'))
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
+    fireEvent.change(textarea, { target: { value: 'Rejected on chain B.' } })
+    fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /request was rejected/i,
+    )
     stop()
   })
   it('keeps a submitted hash pending and preserves its receipt if refresh fails', async () => {
@@ -993,7 +1076,7 @@ describe('App', () => {
     expect(await screen.findByText(/final status is unknown/i)).toBeTruthy()
     expect(screen.getByTitle(UNKNOWN_TRANSACTION_HASH)).toBeTruthy()
     expect(buttonDisabled(/publish on-chain/i)).toBe(true)
-    expect(buttonDisabled(/connect pending wallet/i)).toBe(true)
+    expect(buttonDisabled(/connect pending wallet/i)).toBe(false)
     fireEvent.click(
       screen.getByRole('button', { name: /check receipt again/i }),
     )

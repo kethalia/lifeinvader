@@ -15,7 +15,9 @@ import {
   type TransactionReceipt,
   type TransactionSubmitted,
 } from './protocol'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const FAILED_ATTEMPT_HISTORY_LIMIT = 8
 
@@ -137,7 +139,9 @@ function ActionAttemptStatus({
         ) : null}
         . {statusCopy}{' '}
         {!currentContext
-          ? 'This belongs to another wallet context and does not lock the current controls.'
+          ? attempt.status === 'failed'
+            ? 'This failed action belongs to another wallet context and does not lock new writes.'
+            : 'This belongs to another wallet context and keeps every wallet write locked until it is resolved or dismissed.'
           : null}
       </p>
       {attempt.message ? (
@@ -214,6 +218,12 @@ export function GroupTransactionConsole({
   const sessionRef = useRef(session)
   selectedGroupIdRef.current = selectedGroupId
   sessionRef.current = session
+  const openingOperations = useOpeningWalletOperations(
+    attempts,
+    setAttempts,
+    session,
+    contextMatchesSession,
+  )
 
   useEffect(() => {
     setMembershipGroupIdInput(selectedGroupId?.toString() ?? '')
@@ -246,9 +256,14 @@ export function GroupTransactionConsole({
   const currentAttempts = attempts.filter((attempt) =>
     contextMatchesSession(attempt, session),
   )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = attempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'group-actions',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeAttempt = currentAttempts.findLast(
     (attempt) => attempt.status === 'opening' || attempt.status === 'pending',
   )
@@ -312,6 +327,7 @@ export function GroupTransactionConsole({
     ) => Promise<TransactionReceipt>,
   ) => {
     const id = ++operationSequence.current
+    const control = openingOperations.begin(id)
     let submittedHash: Hash | undefined
     setProblems((current) =>
       current.filter((problem) => !sameWalletContext(problem.context, context)),
@@ -330,9 +346,10 @@ export function GroupTransactionConsole({
         { ...context, id, status: 'opening' },
       ]),
     )
-    void Promise.resolve()
-      .then(() =>
-        operation((hash) => {
+    void (async () => {
+      try {
+        const receipt = await operation((hash) => {
+          if (!control.active) return
           submittedHash = hash
           setAttempts((current) =>
             current.map((attempt) =>
@@ -341,10 +358,11 @@ export function GroupTransactionConsole({
                 : attempt,
             ),
           )
-        }),
-      )
-      .then((receipt) => finishAction(context, id, receipt))
-      .catch((error: unknown) => {
+        })
+        if (!control.active) return
+        finishAction(context, id, receipt)
+      } catch (error) {
+        if (!control.active) return
         const message = describeRpcError(
           error,
           'The public group transaction failed.',
@@ -380,7 +398,10 @@ export function GroupTransactionConsole({
           )
           setProblems((current) => [...current, { context, message }].slice(-8))
         }
-      })
+      } finally {
+        openingOperations.release(id, control)
+      }
+    })()
   }
 
   const handleCreate = (event: FormEvent<HTMLFormElement>) => {
@@ -703,11 +724,12 @@ export function GroupTransactionConsole({
           attempt={attempt}
           currentContext={contextMatchesSession(attempt, session)}
           key={attempt.id}
-          onDismiss={() =>
+          onDismiss={() => {
+            openingOperations.deactivate(attempt.id)
             setAttempts((current) =>
               current.filter((candidate) => candidate.id !== attempt.id),
             )
-          }
+          }}
           onRetry={() => retryReceipt(attempt)}
         />
       ))}

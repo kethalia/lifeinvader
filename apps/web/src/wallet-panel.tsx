@@ -29,11 +29,13 @@ import {
 } from './protocol'
 import { useWalletProviders } from './wallet-providers'
 import type { WalletSession, WalletSessionController } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 import { PaidMediaPicker, type PaidMediaPreparer } from './paid-media-picker'
 import type { PreparedMediaCar } from './paid-media-car'
 import { FilecoinStoragePanel } from './filecoin-storage-panel'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import { ProfileComposer } from './profile-composer'
 import { ProfileReader } from './profile-reader'
 import type { ProfileStreamSynchronizer } from './profile-stream'
@@ -81,7 +83,7 @@ type BusyOperation = {
 type SubmittedTransaction = TransactionContext & {
   hash?: TransactionReceipt['hash']
   id: number
-  status: 'ambiguous' | 'failed' | 'pending' | 'unknown'
+  status: 'ambiguous' | 'failed' | 'opening' | 'pending' | 'unknown'
 }
 type TransactionProblem = {
   context?: WalletContext
@@ -138,17 +140,28 @@ function TransactionStatus({
         ? 'Profile'
         : 'Post'
   const statusCopy =
-    transaction.status === 'pending'
-      ? 'Waiting for an on-chain receipt…'
-      : transaction.status === 'failed'
-        ? 'Reverted on-chain. This hash is final; you can safely try again.'
-        : transaction.status === 'ambiguous'
-          ? 'The wallet returned no hash, but may have broadcast it. Check wallet activity before trying again.'
-          : 'Its final status is unknown. Check this hash before trying again.'
+    transaction.status === 'opening'
+      ? 'Confirm or reject the request in the wallet.'
+      : transaction.status === 'pending'
+        ? 'Waiting for an on-chain receipt…'
+        : transaction.status === 'failed'
+          ? 'Reverted on-chain. This hash is final; you can safely try again.'
+          : transaction.status === 'ambiguous'
+            ? 'No hash is available, but the wallet request may have broadcast. Check wallet activity before trying again.'
+            : 'Its final status is unknown. Check this hash before trying again.'
   return (
     <div className="transaction-pending action-feedback" role="status">
       <span>
-        {transaction.hash ? (
+        {transaction.status === 'opening' ? (
+          <>
+            {label} wallet request opened on chain{' '}
+            {transaction.chainId.toString()} from{' '}
+            <code title={transaction.account}>
+              {shortAddress(transaction.account)}
+            </code>{' '}
+            via {transaction.walletName}.{' '}
+          </>
+        ) : transaction.hash ? (
           <>
             {label} submitted on chain {transaction.chainId.toString()} from{' '}
             <code title={transaction.account}>
@@ -172,7 +185,9 @@ function TransactionStatus({
         )}
         {statusCopy}{' '}
         {!currentContext
-          ? 'This belongs to another wallet context and does not lock the current console.'
+          ? transaction.status === 'failed'
+            ? 'This failed action belongs to another wallet context and does not lock new writes.'
+            : 'This belongs to another wallet context and keeps every wallet write locked until it is resolved or dismissed.'
           : null}
       </span>
       {transaction.status === 'unknown' ||
@@ -227,6 +242,7 @@ export function WalletPanel({
   const [mediaPickerRevision, setMediaPickerRevision] = useState(0)
   const [mediaPreparationBusy, setMediaPreparationBusy] = useState(false)
   const [mediaPreparationFailed, setMediaPreparationFailed] = useState(false)
+  const [storageWriteLocked, setStorageWriteLocked] = useState(false)
   const [preparedMedia, setPreparedMedia] = useState<PreparedMediaCar>()
   const [preparedMediaPublicationChainId, setPreparedMediaPublicationChainId] =
     useState<bigint>()
@@ -244,8 +260,17 @@ export function WalletPanel({
   const inspectionSequence = useRef(0)
   const operationSequence = useRef(0)
   const sessionRef = useRef(session)
-  const transactionSequence = useRef(0)
   sessionRef.current = session
+  const openingOperations = useOpeningWalletOperations(
+    submittedTransactions,
+    setSubmittedTransactions,
+    session,
+    transactionContextMatchesSession,
+    (ids) =>
+      setBusyOperations((current) =>
+        current.filter((operation) => !ids.has(operation.id)),
+      ),
+  )
   const handlePreparedMedia = (prepared: PreparedMediaCar | undefined) => {
     composeRevision.current += 1
     setPreparedMedia(prepared)
@@ -331,6 +356,8 @@ export function WalletPanel({
     profilePayload?: ProfilePayload,
   ) => {
     let submittedHash: TransactionReceipt['hash'] | undefined
+    const operationId = ++operationSequence.current
+    const control = openingOperations.begin(operationId)
     const walletContext =
       session.account && session.chainId !== undefined && session.provider
         ? {
@@ -346,7 +373,7 @@ export function WalletPanel({
             ...walletContext,
             action,
             composeRevision: composeRevision.current,
-            id: ++transactionSequence.current,
+            id: operationId,
             postBody: action === 'post' ? body : '',
             postMediaCid:
               action === 'post' ? (parsedMediaCid?.bytes ?? '0x') : '0x',
@@ -357,7 +384,6 @@ export function WalletPanel({
               action === 'profile' ? (profilePayload?.displayName ?? '') : '',
           }
         : undefined
-    const operationId = ++operationSequence.current
     setBusyOperations((current) => [
       ...current,
       {
@@ -383,24 +409,29 @@ export function WalletPanel({
     }
     if (submittedContext) {
       setSubmittedTransactions((current) =>
-        current.filter(
-          (transaction) =>
-            transaction.status !== 'failed' ||
-            !sameWalletContext(transaction, submittedContext),
-        ),
+        [
+          ...current.filter(
+            (transaction) =>
+              transaction.status !== 'failed' ||
+              !sameWalletContext(transaction, submittedContext),
+          ),
+          { ...submittedContext, status: 'opening' as const },
+        ].slice(-12),
       )
     }
     try {
       const nextReceipt = await operation((hash) => {
-        if (!submittedContext) return
+        if (!control.active || !submittedContext) return
         submittedHash = hash
-        setSubmittedTransactions((current) => [
-          ...current.filter(
-            (transaction) => transaction.id !== submittedContext.id,
+        setSubmittedTransactions((current) =>
+          current.map((transaction) =>
+            transaction.id === submittedContext.id
+              ? { ...transaction, hash, status: 'pending' }
+              : transaction,
           ),
-          { ...submittedContext, hash, status: 'pending' },
-        ])
+        )
       })
+      if (!control.active) return
       if (nextReceipt && submittedContext) {
         setResults((current) =>
           [
@@ -438,9 +469,16 @@ export function WalletPanel({
             provider: submittedContext.provider,
           })
         }
+      } else if (submittedContext) {
+        setSubmittedTransactions((current) =>
+          current.filter(
+            (transaction) => transaction.id !== submittedContext.id,
+          ),
+        )
       }
       if (action === 'deploy') await refreshInspection()
     } catch (error) {
+      if (!control.active) return
       if (submittedHash && submittedContext) {
         setSubmittedTransactions((current) => [
           ...current.filter(
@@ -481,6 +519,7 @@ export function WalletPanel({
         ].slice(-12),
       )
     } finally {
+      openingOperations.release(operationId, control)
       setBusyOperations((current) =>
         current.filter((operation) => operation.id !== operationId),
       )
@@ -701,15 +740,18 @@ export function WalletPanel({
   const activeResult = results.findLast((result) =>
     transactionContextMatchesSession(result, session),
   )
-  const activeSubmittedTransactions = submittedTransactions.filter(
-    (transaction) => transactionContextMatchesSession(transaction, session),
-  )
   const busyAction = busyOperations.findLast((operation) =>
     busyOperationMatchesSession(operation, session),
   )?.action
-  const transactionWriteLocked = activeSubmittedTransactions.some(
-    (transaction) => transaction.status !== 'failed',
+  const protocolTransactionWriteLocked =
+    busyOperations.some((operation) => operation.action !== 'chain') ||
+    submittedTransactions.some((transaction) => transaction.status !== 'failed')
+  const walletWriteLocked = protocolTransactionWriteLocked || storageWriteLocked
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'wallet',
+    walletWriteLocked,
   )
+  const transactionWriteLocked = walletWriteLocked || lockedByAnotherConsole
   return (
     <section className="wallet-panel" aria-labelledby="wallet-panel-title">
       <div className="wallet-panel-heading">
@@ -738,9 +780,7 @@ export function WalletPanel({
                   type="button"
                   key={wallet.id}
                   disabled={
-                    session.status === 'connecting' ||
-                    busyAction !== undefined ||
-                    transactionWriteLocked
+                    session.status === 'connecting' || busyAction !== undefined
                   }
                   onClick={() => void connect(wallet)}
                 >
@@ -930,7 +970,12 @@ export function WalletPanel({
             </form>
           )}
           <FilecoinStoragePanel
-            disabled={busyAction !== undefined || transactionWriteLocked}
+            disabled={
+              busyAction !== undefined ||
+              protocolTransactionWriteLocked ||
+              lockedByAnotherConsole
+            }
+            onWriteLockChange={setStorageWriteLocked}
             prepared={preparedMedia}
             publicationChainId={preparedMediaPublicationChainId}
             session={session}
@@ -983,6 +1028,10 @@ export function WalletPanel({
             transaction={transaction}
             onRetry={() => handleRetryReceipt(transaction)}
             onDismiss={() => {
+              openingOperations.deactivate(transaction.id)
+              setBusyOperations((current) =>
+                current.filter((operation) => operation.id !== transaction.id),
+              )
               setSubmittedTransactions((current) =>
                 current.filter((candidate) => candidate.id !== transaction.id),
               )

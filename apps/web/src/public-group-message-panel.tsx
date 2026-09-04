@@ -21,8 +21,10 @@ import {
   waitForTransactionReceipt,
   type TransactionReceipt,
 } from './protocol'
+import { useOpeningWalletOperations } from './opening-wallet-operation'
 import type { PublishedGroupMessage } from './protocol-events'
 import type { WalletSession } from './wallet-session'
+import { useWalletWriteBoundary } from './wallet-write-boundary'
 
 const FAILED_ATTEMPT_HISTORY_LIMIT = 8
 const MAX_UINT256 = (1n << 256n) - 1n
@@ -302,6 +304,12 @@ export function PublicGroupMessagePanel({
   selectedGroupIdRef.current = selectedGroupId
   historySessionRef.current = historySession
   walletSessionRef.current = session
+  const openingOperations = useOpeningWalletOperations(
+    attempts,
+    setAttempts,
+    session,
+    contextMatchesSession,
+  )
 
   const connected =
     session.status === 'connected' &&
@@ -339,12 +347,14 @@ export function PublicGroupMessagePanel({
   }
   const bodyBytes = getPostBodyByteLength(body)
   const emptyPayload = bodyBytes === 0 && parsedMediaCid === undefined
-  const currentAttempts = attempts.filter((attempt) =>
-    accountChainMatchesSession(attempt, session),
-  )
-  const writeLocked = currentAttempts.some(
+  const localWriteLocked = attempts.some(
     (attempt) => attempt.status !== 'failed',
   )
+  const lockedByAnotherConsole = useWalletWriteBoundary(
+    'group-messages',
+    localWriteLocked,
+  )
+  const writeLocked = localWriteLocked || lockedByAnotherConsole
   const activeProblem = problems.findLast((problem) =>
     contextMatchesSelection(problem, session, selectedGroupId),
   )
@@ -422,6 +432,7 @@ export function PublicGroupMessagePanel({
       return
     }
     const id = ++operationSequence.current
+    const control = openingOperations.begin(id)
     const context: GroupMessageContext = {
       account,
       body,
@@ -457,6 +468,7 @@ export function PublicGroupMessagePanel({
           context.groupId,
           { body: context.body, mediaCid: context.mediaCid },
           (hash) => {
+            if (!control.active) return
             submittedHash = hash
             setAttempts((current) =>
               current.map((attempt) =>
@@ -467,8 +479,10 @@ export function PublicGroupMessagePanel({
             )
           },
         )
+        if (!control.active) return
         finishMessage(context, id, receipt)
       } catch (error) {
+        if (!control.active) return
         const message = describeRpcError(
           error,
           'The public group message transaction failed.',
@@ -506,6 +520,8 @@ export function PublicGroupMessagePanel({
             [...current, { ...context, id, message }].slice(-8),
           )
         }
+      } finally {
+        openingOperations.release(id, control)
       }
     })()
   }
@@ -759,9 +775,11 @@ export function PublicGroupMessagePanel({
               }
               type="submit"
             >
-              {writeLocked
+              {localWriteLocked
                 ? 'Group message action pending…'
-                : 'Send group message on-chain'}
+                : lockedByAnotherConsole
+                  ? 'Another wallet action is pending…'
+                  : 'Send group message on-chain'}
             </button>
           </form>
 
@@ -822,7 +840,9 @@ export function PublicGroupMessagePanel({
                   ) : null}
                   . {statusCopy}{' '}
                   {!currentAccountChain
-                    ? 'This belongs to another account or chain and does not lock the current composer.'
+                    ? unresolved
+                      ? 'This belongs to another account or chain and keeps every wallet write locked until it is resolved or dismissed.'
+                      : 'This failed action belongs to another account or chain and does not lock new writes.'
                     : !currentProvider && unresolved
                       ? `Reconnect ${attempt.walletName} for provider-specific recovery. This unresolved action still locks this account and chain.`
                       : currentProvider && !currentSelection
@@ -845,13 +865,14 @@ export function PublicGroupMessagePanel({
                       </button>
                     ) : null}
                     <button
-                      onClick={() =>
+                      onClick={() => {
+                        openingOperations.deactivate(attempt.id)
                         setAttempts((current) =>
                           current.filter(
                             (candidate) => candidate.id !== attempt.id,
                           ),
                         )
-                      }
+                      }}
                       type="button"
                     >
                       {attempt.hash

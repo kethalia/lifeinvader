@@ -13,6 +13,7 @@ import { PublicMessagePanel } from './public-message-panel'
 import { ReadRpcPanel, useReadRpcSelection } from './read-rpc-panel'
 import { WalletPanel } from './wallet-panel'
 import { useWalletSession } from './wallet-session'
+import { WalletWriteBoundary } from './wallet-write-boundary'
 
 const PublicGroupPanel = lazy(() =>
   import('./public-group-panel').then((module) => ({
@@ -69,7 +70,7 @@ export function App({
   const readRpc = useReadRpcSelection(walletSession.session)
   const [includedPost, setIncludedPost] = useState<IncludedPost>()
   return (
-    <div className="site-shell">
+    <WalletWriteBoundary className="site-shell">
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
@@ -207,6 +208,6 @@ export function App({
         <p>Lifeinvader is an unofficial parody project.</p>
         <p>No hosted backend. Everything is public.</p>
       </footer>
-    </div>
+    </WalletWriteBoundary>
   )
 }

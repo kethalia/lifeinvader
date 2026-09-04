@@ -12,7 +12,7 @@ A receipt counts as inclusion only when its canonical block contains a `CommentP
 
 ## Recovery and drafts
 
-The feed does not show an optimistic comment. If the wallet may have broadcast without returning a hash, or a returned hash cannot yet be verified, other post writes in that wallet context remain locked until the user checks the wallet or retries the receipt. The retained recovery record includes the original provider, chain, account, post, body, and media bytes, so another context cannot relabel it.
+The feed does not show an optimistic comment. If the wallet may have broadcast without returning a hash, or a returned hash cannot yet be verified, every transaction-producing console remains locked until the user checks the wallet or retries the receipt. The retained recovery record includes the original provider, chain, account, post, body, and media bytes, so another context cannot relabel it. Changing account, chain, or provider while the wallet prompt is open converts it to a dismissible hashless ambiguity and invalidates late callbacks from that abandoned operation.
 
 Drafts are retained separately for each provider, chain, and account context. Each draft is also bound to the confirmed post event's block hash and log index, not only its numeric post identifier. If that exact event leaves the visible confirmed page or is replaced by a reorg, the composer becomes a paused, copyable draft with an explicit discard control instead of permitting a comment against different content.
 
