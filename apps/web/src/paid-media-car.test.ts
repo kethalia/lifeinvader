@@ -213,4 +213,38 @@ describe('paid media CAR preparation', () => {
       ),
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
+
+  it('actively cancels a pending file read when aborted', async () => {
+    let notifyReadStarted = () => {}
+    const readStarted = new Promise<void>((resolve) => {
+      notifyReadStarted = resolve
+    })
+    let cancelReason: unknown
+    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      cancel(reason) {
+        cancelReason = reason
+      },
+      pull() {
+        notifyReadStarted()
+        return new Promise(() => {})
+      },
+    })
+    const controller = new AbortController()
+    const abortReason = new DOMException('Stop stalled read.', 'AbortError')
+    const preparation = preparePaidMediaCar(
+      {
+        name: 'stalled.mp4',
+        size: CONTENT.byteLength,
+        stream: () => stream,
+        type: 'video/mp4',
+      },
+      { signal: controller.signal },
+    )
+
+    await readStarted
+    controller.abort(abortReason)
+
+    await expect(preparation).rejects.toBe(abortReason)
+    expect(cancelReason).toBe(abortReason)
+  })
 })

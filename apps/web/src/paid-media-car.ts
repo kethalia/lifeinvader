@@ -125,6 +125,13 @@ export async function preparePaidMediaCar(
   async function* content() {
     const reader = file.stream().getReader()
     let completed = false
+    let abortCancellation: Promise<void> | undefined
+    const cancelPendingRead = () => {
+      abortCancellation = reader.cancel(options.signal?.reason).catch(() => {
+        // The abort reason remains the public failure even if cancel also fails.
+      })
+    }
+    options.signal?.addEventListener('abort', cancelPendingRead, { once: true })
     try {
       while (true) {
         assertNotAborted(options.signal)
@@ -152,11 +159,16 @@ export async function preparePaidMediaCar(
         yield chunk.value
       }
     } finally {
+      options.signal?.removeEventListener('abort', cancelPendingRead)
       if (!completed) {
-        try {
-          await reader.cancel(options.signal?.reason)
-        } catch {
-          // Preserve the original read, validation, or cancellation failure.
+        if (abortCancellation) {
+          await abortCancellation
+        } else {
+          try {
+            await reader.cancel(options.signal?.reason)
+          } catch {
+            // Preserve the original read or validation failure.
+          }
         }
       }
       reader.releaseLock()
