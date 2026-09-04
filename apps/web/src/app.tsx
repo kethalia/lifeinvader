@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from 'react'
 import type { DirectMessageStreamSynchronizer } from './direct-message-stream'
+import type { FollowStreamSynchronizer } from './follow-stream'
 import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSynchronizer } from './post-feed'
 import type {
@@ -50,11 +51,13 @@ const networkFacts = [
 
 export function App({
   synchronizeDirectMessages,
+  synchronizeFollows,
   synchronizePostFeed,
   synchronizeProfile,
   waitForPostConfirmation,
 }: {
   synchronizeDirectMessages?: DirectMessageStreamSynchronizer
+  synchronizeFollows?: FollowStreamSynchronizer
   synchronizePostFeed?: PostFeedSynchronizer
   synchronizeProfile?: ProfileStreamSynchronizer
   waitForPostConfirmation?: PostFeedConfirmationWaiter
@@ -141,7 +144,15 @@ export function App({
             </section>
           }
         >
-          <PublicFollowPanel session={walletSession.session} />
+          <PublicFollowPanel
+            readModelOptions={
+              synchronizeFollows
+                ? { synchronize: synchronizeFollows }
+                : undefined
+            }
+            readProvider={readRpc.selection?.provider}
+            session={walletSession.session}
+          />
         </Suspense>
 
         <Suspense
