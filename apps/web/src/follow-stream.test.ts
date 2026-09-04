@@ -300,6 +300,63 @@ describe('follow stream synchronization', () => {
     })
   })
 
+  it('rediscovers a replaced history anchor before mutating the event cache', async () => {
+    let branch = 'a'
+    let deploymentBlock = 37n
+    let reorganized = false
+    let scanned = false
+    const logQueries: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') {
+          if (scanned && !reorganized) {
+            branch = 'b'
+            deploymentBlock = 41n
+            reorganized = true
+          }
+          return '0x1'
+        }
+        if (method === 'eth_blockNumber') return '0x64'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          return { hash: blockHash(blockNumber, branch), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          scanned = true
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
+
+    await expect(
+      synchronizeFollowStream(provider, 1n, ACCOUNT_A, 'following', {
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      startBlock: 41n,
+    })
+    expect(logQueries).toEqual([
+      { fromBlock: '0x25', toBlock: '0x58' },
+      { fromBlock: '0x29', toBlock: '0x58' },
+    ])
+    expect(apply).toHaveBeenCalledOnce()
+  })
+
   it('falls back to genesis when the RPC cannot serve historical code', async () => {
     let fromBlock = ''
     const provider: Eip1193Provider = {

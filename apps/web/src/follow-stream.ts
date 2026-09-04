@@ -30,11 +30,13 @@ import type { FollowDirection } from './follow-projection'
 import {
   isProtocolHistoryUnavailableError,
   resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
   type ProtocolHistoryBoundaryResolver,
 } from './protocol-history'
 
 export const FOLLOW_EVENT_PAGE_SIZE = 200
 export const FOLLOW_EVENT_START_BLOCK = 0n
+const MAX_PROTOCOL_HISTORY_SYNC_RETRIES = 1
 export type { FollowDirection } from './follow-projection'
 
 export type FollowProjectionAnchor = {
@@ -294,6 +296,45 @@ async function assertCanonicalCheckpoint(
   }
 }
 
+async function protocolHistoryAnchorIsCanonical(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  anchor: ProtocolBlockFingerprint,
+  signal: AbortSignal,
+) {
+  await assertSelectedChain(provider, chainId, signal)
+  const value = await requestInContext(
+    provider,
+    {
+      method: 'eth_getBlockByNumber',
+      params: [`0x${anchor.blockNumber.toString(16)}`, false],
+    },
+    signal,
+  )
+  let isCanonical = false
+  if (value !== null) {
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(
+        'The wallet returned invalid protocol history anchor data.',
+      )
+    }
+    const block = value as Record<string, unknown>
+    const hash = block.hash
+    if (
+      parseHead(block.number) !== anchor.blockNumber ||
+      typeof hash !== 'string' ||
+      !/^0x[0-9a-f]{64}$/i.test(hash)
+    ) {
+      throw new Error(
+        'The wallet returned invalid protocol history anchor data.',
+      )
+    }
+    isCanonical = hash.toLowerCase() === anchor.blockHash
+  }
+  await assertSelectedChain(provider, chainId, signal)
+  return isCanonical
+}
+
 export async function authenticateIssuedFollowProjectionAnchor(
   anchor: FollowProjectionAnchor,
   authenticateCache: () => Promise<void>,
@@ -494,157 +535,183 @@ export const synchronizeFollowStream: FollowStreamSynchronizer = async (
         'Verified Lifeinvader v1 is required before this chain can provide public follows.',
       )
     }
-    let startBlock = FOLLOW_EVENT_START_BLOCK
-    try {
-      const boundary = await (
-        options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
-      )(provider, chainId, {
-        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-        signal: interruption.signal,
-      })
-      assertContextActive()
-      startBlock = boundary.startBlock
-    } catch (error) {
-      assertContextActive()
-      if (!isProtocolHistoryUnavailableError(error)) throw error
-    }
-    const seed = createEventCursor({
-      chainId,
-      filter,
-      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-      startBlock,
-    })
-    const cache = await openEventCache({ ...options.storage, filter })
-    try {
-      assertContextActive()
-      let before = await cache.readLatest(seed, FOLLOW_EVENT_PAGE_SIZE)
-      assertContextActive()
-      let cacheReset = before.reset
+    let historyRetries = 0
+    while (true) {
+      let historyAnchor: ProtocolBlockFingerprint | undefined
+      let startBlock = FOLLOW_EVENT_START_BLOCK
       try {
-        decodeFollowLogs(before.logs, account, direction)
-      } catch {
+        const boundary = await (
+          options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+        )(provider, chainId, {
+          finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+          signal: interruption.signal,
+        })
         assertContextActive()
-        await cache.clear(seed)
-        assertContextActive()
-        before = await cache.readLatest(seed, FOLLOW_EVENT_PAGE_SIZE)
-        assertContextActive()
-        cacheReset = true
-      }
-      const result = await syncEventLogs(provider, filter, before.cursor, {
-        maxRanges: 1,
-        signal: interruption.signal,
-      })
-      assertContextActive()
-      decodeFollowLogs(result.logs, account, direction)
-      await cache.apply(before, result)
-      assertContextActive()
-      const after = await cache.readLatest(seed, FOLLOW_EVENT_PAGE_SIZE)
-      assertContextActive()
-      if (
-        after.generation !== before.generation ||
-        after.revision !== before.revision + 1n ||
-        !sameCursor(after.cursor, result.cursor)
-      ) {
-        throw new Error(
-          'The follow cache changed after synchronization. Retry the bounded range.',
-        )
-      }
-      let decodedPage: readonly FollowSet[]
-      try {
-        decodedPage = decodeFollowLogs(after.logs, account, direction)
+        historyAnchor = boundary.head
+        startBlock = boundary.startBlock
       } catch (error) {
         assertContextActive()
-        await cache.clear(seed)
-        assertContextActive()
-        throw error
+        if (!isProtocolHistoryUnavailableError(error)) throw error
       }
-      const recentSignals = decodedPage.slice(0, FOLLOW_EVENT_PAGE_SIZE)
-      const indexedThrough =
-        after.cursor.nextBlock > after.cursor.startBlock
-          ? after.cursor.nextBlock - 1n
-          : undefined
-      const finalCheckpoint = after.cursor.checkpoints.at(-1)
-      if (finalCheckpoint) {
-        await assertCanonicalCheckpoint(
-          provider,
-          finalCheckpoint,
-          interruption.signal,
-        )
-        assertContextActive()
-      }
-      const finalHead = await readSelectedHead(
-        provider,
+      const seed = createEventCursor({
         chainId,
-        interruption.signal,
-      )
-      assertContextActive()
-      if (
-        indexedThrough !== undefined &&
-        (finalHead < indexedThrough ||
-          finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
-      ) {
-        throw new Error(
-          'The wallet head moved behind the confirmed follows. Retry after the chain stabilizes.',
-        )
-      }
-      if (finalCheckpoint) {
-        await assertCanonicalCheckpoint(
+        filter,
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        startBlock,
+      })
+      const cache = await openEventCache({ ...options.storage, filter })
+      try {
+        assertContextActive()
+        let before = await cache.readLatest(seed, FOLLOW_EVENT_PAGE_SIZE)
+        assertContextActive()
+        let cacheReset = before.reset
+        try {
+          decodeFollowLogs(before.logs, account, direction)
+        } catch {
+          assertContextActive()
+          await cache.clear(seed)
+          assertContextActive()
+          before = await cache.readLatest(seed, FOLLOW_EVENT_PAGE_SIZE)
+          assertContextActive()
+          cacheReset = true
+        }
+        const result = await syncEventLogs(provider, filter, before.cursor, {
+          maxRanges: 1,
+          signal: interruption.signal,
+        })
+        assertContextActive()
+        decodeFollowLogs(result.logs, account, direction)
+        // The discovered head commits to the ancestry that established
+        // startBlock. Do not persist a range if that ancestry was replaced.
+        if (
+          historyAnchor &&
+          !(await protocolHistoryAnchorIsCanonical(
+            provider,
+            chainId,
+            historyAnchor,
+            interruption.signal,
+          ))
+        ) {
+          assertContextActive()
+          if (historyRetries >= MAX_PROTOCOL_HISTORY_SYNC_RETRIES) {
+            throw new Error(
+              'The protocol history anchor kept changing during follow synchronization. Retry after the chain stabilizes.',
+            )
+          }
+          historyRetries += 1
+          continue
+        }
+        assertContextActive()
+        await cache.apply(before, result)
+        assertContextActive()
+        const after = await cache.readLatest(seed, FOLLOW_EVENT_PAGE_SIZE)
+        assertContextActive()
+        if (
+          after.generation !== before.generation ||
+          after.revision !== before.revision + 1n ||
+          !sameCursor(after.cursor, result.cursor)
+        ) {
+          throw new Error(
+            'The follow cache changed after synchronization. Retry the bounded range.',
+          )
+        }
+        let decodedPage: readonly FollowSet[]
+        try {
+          decodedPage = decodeFollowLogs(after.logs, account, direction)
+        } catch (error) {
+          assertContextActive()
+          await cache.clear(seed)
+          assertContextActive()
+          throw error
+        }
+        const recentSignals = decodedPage.slice(0, FOLLOW_EVENT_PAGE_SIZE)
+        const indexedThrough =
+          after.cursor.nextBlock > after.cursor.startBlock
+            ? after.cursor.nextBlock - 1n
+            : undefined
+        const finalCheckpoint = after.cursor.checkpoints.at(-1)
+        if (finalCheckpoint) {
+          await assertCanonicalCheckpoint(
+            provider,
+            finalCheckpoint,
+            interruption.signal,
+          )
+          assertContextActive()
+        }
+        const finalHead = await readSelectedHead(
           provider,
-          finalCheckpoint,
+          chainId,
           interruption.signal,
         )
         assertContextActive()
+        if (
+          indexedThrough !== undefined &&
+          (finalHead < indexedThrough ||
+            finalHead - indexedThrough < POST_FEED_CONFIRMATION_DEPTH)
+        ) {
+          throw new Error(
+            'The wallet head moved behind the confirmed follows. Retry after the chain stabilizes.',
+          )
+        }
+        if (finalCheckpoint) {
+          await assertCanonicalCheckpoint(
+            provider,
+            finalCheckpoint,
+            interruption.signal,
+          )
+          assertContextActive()
+        }
+        await assertSelectedChain(provider, chainId, interruption.signal)
+        assertContextActive()
+        const safeHead =
+          finalHead >= POST_FEED_CONFIRMATION_DEPTH
+            ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+            : undefined
+        const deploymentStillPending =
+          safeHead !== undefined && after.cursor.startBlock > safeHead
+        const caughtUp =
+          safeHead === undefined ||
+          (!deploymentStillPending && after.cursor.nextBlock > safeHead)
+        if (
+          caughtUp &&
+          safeHead !== undefined &&
+          finalCheckpoint?.blockNumber !== safeHead
+        ) {
+          throw new Error(
+            'The follow stream did not anchor at the confirmed safe head.',
+          )
+        }
+        const position = {
+          cursor: after.cursor,
+          generation: after.generation,
+          revision: after.revision,
+        }
+        return {
+          account,
+          cacheReset: cacheReset || after.reset,
+          caughtUp,
+          direction,
+          head: finalHead,
+          indexedThrough,
+          projectionAnchor: caughtUp
+            ? issueProjectionAnchor(
+                provider,
+                chainId,
+                account,
+                direction,
+                position,
+                finalHead,
+                safeHead,
+              )
+            : undefined,
+          recentSignals,
+          safeHead,
+          scannedRanges: result.scannedRanges,
+          startBlock,
+        }
+      } finally {
+        cache.close()
       }
-      await assertSelectedChain(provider, chainId, interruption.signal)
-      assertContextActive()
-      const safeHead =
-        finalHead >= POST_FEED_CONFIRMATION_DEPTH
-          ? finalHead - POST_FEED_CONFIRMATION_DEPTH
-          : undefined
-      const deploymentStillPending =
-        safeHead !== undefined && after.cursor.startBlock > safeHead
-      const caughtUp =
-        safeHead === undefined ||
-        (!deploymentStillPending && after.cursor.nextBlock > safeHead)
-      if (
-        caughtUp &&
-        safeHead !== undefined &&
-        finalCheckpoint?.blockNumber !== safeHead
-      ) {
-        throw new Error(
-          'The follow stream did not anchor at the confirmed safe head.',
-        )
-      }
-      const position = {
-        cursor: after.cursor,
-        generation: after.generation,
-        revision: after.revision,
-      }
-      return {
-        account,
-        cacheReset: cacheReset || after.reset,
-        caughtUp,
-        direction,
-        head: finalHead,
-        indexedThrough,
-        projectionAnchor: caughtUp
-          ? issueProjectionAnchor(
-              provider,
-              chainId,
-              account,
-              direction,
-              position,
-              finalHead,
-              safeHead,
-            )
-          : undefined,
-        recentSignals,
-        safeHead,
-        scannedRanges: result.scannedRanges,
-        startBlock,
-      }
-    } finally {
-      cache.close()
     }
   } catch (error) {
     assertContextActive()

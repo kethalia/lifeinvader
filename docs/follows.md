@@ -46,7 +46,10 @@ proven empty so it cannot skip a confirmed event.
 Successful results are reused in memory for the same provider, chain, and
 confirmation policy only after the cached head hash is reauthenticated. This
 prevents a reset local fork that reuses chain ID `31337` from inheriting a stale
-boundary. If an RPC explicitly cannot serve historical code, the optimization
+boundary. The same anchored head is checked again after the bounded log request
+and before its cache mutation. A replaced anchor discards that result and
+retries discovery once; a second replacement fails without applying the stale
+result. If an RPC explicitly cannot serve historical code, the optimization
 falls back to block zero; malformed data, conflicting historical code, a chain
 change, or a replaced anchor fails closed. Code probes are sequential and do
 not fan out alongside the one bounded log request.
