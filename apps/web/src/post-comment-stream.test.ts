@@ -10,9 +10,14 @@ import {
   type Address,
   type Hex,
 } from 'viem'
-import type { Eip1193Provider, ProviderRequest } from './ethereum'
+import {
+  WALLET_READ_TIMEOUT_MS,
+  type Eip1193Provider,
+  type ProviderRequest,
+} from './ethereum'
 import { BrowserEventCache } from './event-cache'
 import type { IndexedEventLog } from './event-indexer'
+import { openPostCommentProjectionRun } from './post-comment-projection-run'
 import {
   synchronizePostCommentStream,
   type PostCommentStreamStorageOptions,
@@ -24,6 +29,7 @@ import {
   POST_PUBLISHED_TOPIC,
   PROTOCOL_ADDRESS,
 } from './protocol'
+import { ProtocolHistoryUnavailableError } from './protocol-history'
 
 const AUTHOR = '0x000000000000000000000000000000000000c0c0' as Address
 const DATA_PARAMETERS = [{ type: 'string' }, { type: 'bytes' }] as const
@@ -95,7 +101,17 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-afterEach(() => vi.restoreAllMocks())
+async function unsupportedHistory(): Promise<never> {
+  throw new ProtocolHistoryUnavailableError(
+    0n,
+    new Error('Historical state is unavailable.'),
+  )
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('post comment stream synchronization', () => {
   it('resumes one global stream through exactly one bounded range per call', async () => {
@@ -173,6 +189,250 @@ describe('post comment stream synchronization', () => {
         topics: PUBLISHED_COMMENT_FILTER.topics,
       },
     ])
+  })
+
+  it('starts at the verified deployment block and projects that cache scope', async () => {
+    const deploymentBlock = 3_456n
+    const logQueries: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    const snapshot = await synchronizePostCommentStream(provider, 1n, {
+      storage: cacheStorage,
+    })
+
+    expect(snapshot).toMatchObject({
+      caughtUp: true,
+      indexedThrough: 4_988n,
+      safeHead: 4_988n,
+      startBlock: deploymentBlock,
+    })
+    expect(snapshot.projectionAnchor?.comments.cursor.startBlock).toBe(
+      deploymentBlock,
+    )
+    expect(logQueries).toEqual([
+      { fromBlock: toHex(deploymentBlock), toBlock: toHex(4_988n) },
+    ])
+
+    const projection = await openPostCommentProjectionRun(
+      snapshot.projectionAnchor!,
+      [7n],
+      cacheStorage,
+    )
+    expect(projection.snapshot.startBlock).toBe(deploymentBlock)
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'authenticate',
+    })
+    await expect(projection.advance()).resolves.toMatchObject({
+      phase: 'complete',
+    })
+  })
+
+  it('rediscovers a replaced history anchor before mutating the event cache', async () => {
+    let branch = 'a'
+    let deploymentBlock = 37n
+    let reorganized = false
+    let scanned = false
+    const logQueries: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') {
+          if (scanned && !reorganized) {
+            branch = 'b'
+            deploymentBlock = 41n
+            reorganized = true
+          }
+          return '0x1'
+        }
+        if (method === 'eth_blockNumber') return '0x64'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          return { hash: blockHash(blockNumber, branch), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= deploymentBlock
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          scanned = true
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
+
+    await expect(
+      synchronizePostCommentStream(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({ caughtUp: true, startBlock: 41n })
+    expect(logQueries).toEqual([
+      { fromBlock: '0x25', toBlock: '0x58' },
+      { fromBlock: '0x29', toBlock: '0x58' },
+    ])
+    expect(apply).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to genesis when the RPC cannot serve historical code', async () => {
+    let fromBlock = ''
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          throw new Error('missing trie node')
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string }]
+          fromBlock = filter.fromBlock
+          return []
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+
+    await expect(
+      synchronizePostCommentStream(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({ caughtUp: true, startBlock: 0n })
+    expect(fromBlock).toBe('0x0')
+  })
+
+  it('does not start a genesis scan while a historical code request is timed out', async () => {
+    vi.useFakeTimers()
+    const requests: ProviderRequest[] = []
+    const provider: Eip1193Provider = {
+      async request(request) {
+        requests.push(request)
+        const { method, params } = request
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          if (blockTag === 'latest') return PROTOCOL_RUNTIME_CODE
+          return new Promise<unknown>(() => undefined)
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const outcome = synchronizePostCommentStream(provider, 1n, {
+      storage: storage(),
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(WALLET_READ_TIMEOUT_MS)
+    const error = await outcome
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toMatch(/history discovery timed out/i)
+    expect(requests).not.toContainEqual(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('waits to project a deployment newer than the confirmed head', async () => {
+    let head = 20n
+    const logQueries: Array<{ fromBlock: string; toBlock: string }> = []
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(head)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, blockTag] = params as [string, string]
+          return blockTag === 'latest' || BigInt(blockTag) >= 14n
+            ? PROTOCOL_RUNTIME_CODE
+            : '0x'
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ fromBlock: string; toBlock: string }]
+          logQueries.push({
+            fromBlock: filter.fromBlock,
+            toBlock: filter.toBlock,
+          })
+          return [rawComment(14n, 1n, 7n, 'Confirmed after deployment.')]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    const cacheStorage = storage()
+
+    await expect(
+      synchronizePostCommentStream(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      indexedThrough: undefined,
+      projectionAnchor: undefined,
+      safeHead: 8n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    expect(logQueries).toEqual([])
+
+    head = 32n
+    await expect(
+      synchronizePostCommentStream(provider, 1n, { storage: cacheStorage }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      indexedThrough: 20n,
+      projectionAnchor: {
+        comments: { cursor: { startBlock: 9n } },
+      },
+      recentComments: [
+        { blockNumber: 14n, body: 'Confirmed after deployment.' },
+      ],
+      safeHead: 20n,
+      scannedRanges: 1,
+      startBlock: 9n,
+    })
+    expect(logQueries).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
   })
 
   it('returns validated recent comments newest first without claiming a complete thread', async () => {
@@ -320,7 +580,10 @@ describe('post comment stream synchronization', () => {
     }
 
     await expect(
-      synchronizePostCommentStream(provider, 1n, { storage: storage() }),
+      synchronizePostCommentStream(provider, 1n, {
+        resolveHistoryBoundary: unsupportedHistory,
+        storage: storage(),
+      }),
     ).rejects.toThrow(/different wallet chain/i)
     expect(blockReads).toBe(2)
   })
@@ -396,7 +659,10 @@ describe('post comment stream synchronization', () => {
     }
 
     await expect(
-      synchronizePostCommentStream(provider, 1n, { storage: storage() }),
+      synchronizePostCommentStream(provider, 1n, {
+        resolveHistoryBoundary: unsupportedHistory,
+        storage: storage(),
+      }),
     ).resolves.toMatchObject({
       caughtUp: false,
       indexedThrough: 8n,
@@ -471,6 +737,7 @@ describe('post comment stream synchronization', () => {
     const clear = vi.spyOn(BrowserEventCache.prototype, 'clear')
 
     const pending = synchronizePostCommentStream(provider, 1n, {
+      resolveHistoryBoundary: unsupportedHistory,
       signal: controller.signal,
       storage: storage(),
     })

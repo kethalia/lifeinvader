@@ -90,6 +90,7 @@ function stream(
     recentComments: [],
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: 0n,
   }
 }
 
@@ -105,6 +106,7 @@ function projection(
     pagesScanned: 1n,
     phase,
     safeHead: 8n,
+    startBlock: 0n,
   }
 }
 

@@ -240,6 +240,7 @@ describe('post comment projection run', () => {
       pagesScanned: 0n,
       phase: 'comments',
       safeHead: SAFE_HEAD,
+      startBlock: POST_COMMENT_EVENT_START_BLOCK,
     })
     expect(run.trackedPostIds).toEqual([7n, 8n])
     expect(() => run.readComments(7n)).toThrow(/not complete/i)

@@ -24,6 +24,21 @@ Comment history uses one separate global `CommentPublished` stream rather than m
 
 Each explicit synchronization call verifies the selected chain and exact protocol runtime, advances at most one accepted adaptive block range, validates every comment payload, and atomically advances its own IndexedDB scope. Any bounded split retries remain inside the shared indexer's request and result limits. The stream uses the same twelve-block confirmation depth, canonical checkpoint checks, rollback behavior, request timeout, cancellation, and hard RPC/cache work limits as the other event streams.
 
+Before creating a fresh comment cursor, the client resolves the shared bounded
+protocol-history boundary. A confirmed exact-v1 deployment starts the cursor at
+its deployment block. When deployment is newer than the safe head, it starts
+immediately after the last confirmed empty block, performs no premature log
+request, and withholds the projection until confirmation depth catches up. The
+discovery head is hash-reauthenticated after the bounded comment request and
+before cache mutation; a replaced result is discarded and discovery is retried
+once, while a second replacement fails closed.
+
+An explicit historical-state rejection falls back to genesis. A local timeout,
+malformed history data, conflicting code, cancellation, or wallet-context
+change does not. Boundaries cached for the same provider, chain, and finality
+policy are reused only after their head fingerprint is reauthenticated, avoiding
+redundant code-probe bursts without trusting a reset local fork.
+
 The returned recent-comment page is only a bounded preview. Its nominal limit is 200 logs and the shared cache may extend through the rest of the boundary block under its existing hard cap. It must never be described as a complete thread. A projection anchor is issued only after the stream catches up to one authenticated confirmed safe head.
 
 ## Bounded local projection
