@@ -64,16 +64,35 @@ invalid booleans, non-canonical topic padding or ABI data, empty or oversized
 content, and malformed dynamic values. Raw on-chain CID bytes are length-checked
 rather than treated as proof that content exists.
 
-The global group directory scans only `GroupCreated`. Each explicit invocation
-advances at most one bounded range, persists a chain-scoped reorganization-aware
-cursor, and returns at most the newest 100 retained definitions after validating
-the complete cache page and the event identifier sequence. Before reporting
-catch-up it reads `nextGroupId()` at the exact confirmed safe-head block and
-requires the retained event count to match. A truncated RPC response therefore
-resets the disposable directory scope instead of permanently skipping groups.
-An incomplete directory is marked `caughtUp: false`; callers must not present
-that recent page as the complete set of groups. Cached corruption clears only
-that chain's directory scope, while another chain's scope is preserved.
+The global group directory scans only `GroupCreated`. After verifying the
+selected chain and exact v1 runtime, it discovers the bounded protocol-history
+boundary described in [`indexing.md`](./indexing.md) and starts a fresh cursor
+there. Only a recognized unavailable or pruned archival-state rejection falls
+back to genesis; rate limits, transport failures, timeouts, malformed history,
+code conflicts, cancellation, and context changes fail closed without
+requesting group logs. If the boundary is newer than the confirmed head, or the
+chain does not have a confirmed head yet, the directory reports confirmation
+pending without requesting logs or reading `nextGroupId()`. Each explicit
+confirmation check rediscovers a pending boundary; the directory cannot clear
+that state merely because the safe head reached the first block after earlier
+confirmed emptiness. It proceeds only once the deployment block itself is
+confirmed.
+
+Each explicit invocation advances at most one bounded range, persists a
+chain-scoped reorganization-aware cursor, and returns at most the newest 100
+retained definitions after validating the complete cache page and the event
+identifier sequence. A discovered head is reauthenticated after that one range
+and before it can be applied to IndexedDB; a replaced anchor discards the result
+and fails without retrying. Before reporting catch-up the directory reads
+`nextGroupId()` at the exact confirmed safe-head block and requires the retained
+event count to match. A truncated RPC response therefore resets the disposable
+directory scope instead of permanently skipping groups. An incomplete or
+confirmation-pending directory is marked `caughtUp: false`; callers must not
+present that recent page as the complete set of groups. The snapshot carries an
+explicit `historyBoundaryKind`, so callers do not infer deployment confirmation
+from the numeric relationship between the possible start and safe head. Cached
+corruption clears only that chain's directory scope, while another chain's scope
+is preserved.
 
 The selected-group message stream verifies the chosen chain and exact v1 runtime
 before touching logs. Each explicit invocation scans at most one bounded range
@@ -138,7 +157,10 @@ explicit rebuild.
 The public group browser renders this boundary without eager reads. Users can
 advance the confirmed directory one range at a time, select a visible group or
 enter a known positive group ID, then separately advance membership RPC and
-projection work. Partial membership never appears in the member list. After
+projection work. It states the directory's history start, keeps pending or
+partial results from looking complete, and offers a confirmation check without
+claiming that the first post-confirmed-empty block is necessarily the exact
+deployment block. Partial membership never appears in the member list. After
 authentication, current members are shown in deterministic 25-address pages and
 the connected account's public membership status is derived from the same
 projection. Group metadata CIDs are labeled as commitments rather than promises

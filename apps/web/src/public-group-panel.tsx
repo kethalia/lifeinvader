@@ -53,21 +53,32 @@ function directoryStatus(state: GroupDirectoryState) {
     return 'Reading one bounded range of confirmed public groups…'
   }
   if (state.phase === 'partial') {
+    if (state.snapshot.safeHead === undefined) {
+      return `Lifeinvader history can begin at block ${state.snapshot.startBlock.toString()}, but this chain does not have a confirmed head yet. No group log range was requested. Wait for deployment confirmations, then check again.`
+    }
+    if (state.snapshot.historyBoundaryKind === 'pending-confirmation') {
+      return `The earliest possible Lifeinvader deployment block is ${state.snapshot.startBlock.toString()}, but the deployment itself has not reached the confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'} yet. No group log range was requested. Wait for deployment confirmations, then check again.`
+    }
     const reset = state.snapshot.cacheReset
       ? 'The disposable local directory cache was reset. '
       : ''
-    return `${reset}More confirmed group history remains. Indexed through block ${state.snapshot.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'}.`
+    return `${reset}More confirmed group history remains from block ${state.snapshot.startBlock.toString()}. Indexed through block ${state.snapshot.indexedThrough?.toString() ?? 'none'} of confirmed head ${state.snapshot.safeHead?.toString() ?? 'unknown'}.`
   }
   if (state.phase === 'complete') {
     const boundary = state.snapshot.safeHead?.toString() ?? 'none yet'
-    return `Caught up through confirmed block ${boundary}. Showing up to 100 newest groups.`
+    return `Caught up from block ${state.snapshot.startBlock.toString()} through confirmed block ${boundary}. Showing up to 100 newest groups.`
   }
   return state.message
 }
 
 function directoryButtonLabel(state: GroupDirectoryState) {
   if (state.phase === 'loading') return 'Reading public groups…'
-  if (state.phase === 'partial') return 'Load next group range'
+  if (state.phase === 'partial') {
+    return state.snapshot.historyBoundaryKind === 'pending-confirmation' ||
+      state.snapshot.safeHead === undefined
+      ? 'Check group confirmations'
+      : 'Load next group range'
+  }
   if (state.phase === 'complete') return 'Check for newer groups'
   if (state.phase === 'failed') return 'Retry public groups'
   return 'Load confirmed public groups'
@@ -343,6 +354,10 @@ export function PublicGroupPanel({
     directoryState.phase === 'partial' || directoryState.phase === 'complete'
       ? directoryState.snapshot
       : undefined
+  const directoryHistoryPending =
+    directoryState.phase === 'partial' &&
+    (directoryState.snapshot.historyBoundaryKind === 'pending-confirmation' ||
+      directoryState.snapshot.safeHead === undefined)
   const selectedGroup = directorySnapshot?.groups.find(
     (group) => group.groupId === selectedGroupId,
   )
@@ -406,7 +421,7 @@ export function PublicGroupPanel({
           >
             {directoryButtonLabel(directoryState)}
           </button>
-          {directorySnapshot ? (
+          {directorySnapshot && !directoryHistoryPending ? (
             <>
               <GroupDirectoryList
                 groups={directorySnapshot.groups}

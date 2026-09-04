@@ -11,8 +11,19 @@ import { PROTOCOL_ADDRESS, PROTOCOL_CODE_HASH } from './protocol'
 
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 const MAX_CODE_BYTES = 24_576
+const MAX_RPC_ERROR_NODES = 8
 export const DEFAULT_PROTOCOL_HISTORY_CODE_PROBES = 64
 export const MAX_PROTOCOL_HISTORY_CODE_PROBES = 64
+
+const HISTORICAL_STATE_UNAVAILABLE_PATTERNS = [
+  /\bmissing trie node\b/i,
+  /\b(?:historical|archive|pruned) (?:state|data|history)\b.*\b(?:unavailable|not available|unsupported|required)\b/i,
+  /\barchive node\b.*\brequired\b/i,
+  /\b(?:state|data)\b.*\b(?:for|at)\b.*\bblock\b.*\b(?:unavailable|not available|pruned)\b/i,
+  /\b(?:state|data)\b.*\b(?:unavailable|not available|pruned)\b.*\b(?:for|at)\b.*\bblock\b/i,
+  /\bno (?:state|data)\b.*\bavailable\b.*\b(?:for|at)\b.*\bblock\b/i,
+  /\brequested block\b.*\b(?:pruned|too old)\b/i,
+] as const
 
 export type ProtocolBlockFingerprint = Readonly<{
   blockHash: Hash
@@ -69,6 +80,58 @@ export function isProtocolHistoryUnavailableError(
   error: unknown,
 ): error is ProtocolHistoryUnavailableError {
   return error instanceof ProtocolHistoryUnavailableError
+}
+
+function isHistoricalStateUnavailableRpcError(error: unknown) {
+  const pending: unknown[] = [error]
+  const visited = new Set<object>()
+  for (
+    let index = 0;
+    index < pending.length && index < MAX_RPC_ERROR_NODES;
+    index += 1
+  ) {
+    const candidate = pending[index]
+    if (typeof candidate === 'string') {
+      if (
+        HISTORICAL_STATE_UNAVAILABLE_PATTERNS.some((pattern) =>
+          pattern.test(candidate),
+        )
+      ) {
+        return true
+      }
+      continue
+    }
+    if (
+      typeof candidate !== 'object' ||
+      candidate === null ||
+      Array.isArray(candidate) ||
+      visited.has(candidate)
+    ) {
+      continue
+    }
+    visited.add(candidate)
+    const record = candidate as Record<string, unknown>
+    const message = record.message
+    if (
+      typeof message === 'string' &&
+      HISTORICAL_STATE_UNAVAILABLE_PATTERNS.some((pattern) =>
+        pattern.test(message),
+      )
+    ) {
+      return true
+    }
+    for (const key of ['cause', 'data', 'error', 'originalError'] as const) {
+      const nested = record[key]
+      if (
+        pending.length < MAX_RPC_ERROR_NODES &&
+        (typeof nested === 'string' ||
+          (typeof nested === 'object' && nested !== null))
+      ) {
+        pending.push(nested)
+      }
+    }
+  }
+  return false
 }
 
 type DiscoveryContext = {
@@ -318,6 +381,7 @@ export async function discoverProtocolHistoryBoundary(
     } catch (error) {
       refreshContext()
       if (error instanceof ProtocolHistoryTimeoutError) throw error
+      if (!isHistoricalStateUnavailableRpcError(error)) throw error
       throw new ProtocolHistoryUnavailableError(blockNumber, error)
     }
     const code = parseCode(value)
@@ -522,10 +586,11 @@ export async function resolveProtocolHistoryBoundary(
   const cached = providerCache?.get(key)
   if (cached) {
     if (
-      await protocolHistoryAnchorIsCanonical(provider, chainId, cached.head, {
+      cached.kind === 'confirmed' &&
+      (await protocolHistoryAnchorIsCanonical(provider, chainId, cached.head, {
         signal: options.signal,
         timeoutMs,
-      })
+      }))
     ) {
       return cached
     }
@@ -540,6 +605,8 @@ export async function resolveProtocolHistoryBoundary(
     currentProviderCache = new Map()
     resolvedBoundaries.set(provider, currentProviderCache)
   }
-  currentProviderCache.set(key, boundary)
+  if (boundary.kind === 'confirmed') {
+    currentProviderCache.set(key, boundary)
+  }
   return boundary
 }

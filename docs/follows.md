@@ -49,10 +49,11 @@ prevents a reset local fork that reuses chain ID `31337` from inheriting a stale
 boundary. The same anchored head is checked again after the bounded log request
 and before its cache mutation. A replaced anchor discards that result and
 retries discovery once; a second replacement fails without applying the stale
-result. If an RPC explicitly cannot serve historical code, the optimization
-falls back to block zero. A local discovery timeout does not take that fallback
-while the wallet request may still be pending. Malformed data, conflicting
-historical code, a chain change, or a replaced anchor fails closed. Code probes
+result. Only an RPC failure recognized as unavailable or pruned archival state
+lets the optimization fall back to block zero. Rate limits, transport failures,
+and local discovery timeouts do not take that fallback while a wallet request
+may still be pending. Malformed data, conflicting historical code, a chain
+change, or a replaced anchor fails closed. Code probes
 are sequential and do not fan out alongside the one bounded log request.
 
 The stream returns at most the newest 200 validated signals as a preview. That

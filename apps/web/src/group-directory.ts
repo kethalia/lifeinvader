@@ -15,6 +15,13 @@ import {
 } from './protocol-events'
 import { inspectProtocol, PROTOCOL_ADDRESS } from './protocol'
 import {
+  isProtocolHistoryUnavailableError,
+  protocolHistoryAnchorIsCanonical,
+  resolveProtocolHistoryBoundary,
+  type ProtocolBlockFingerprint,
+  type ProtocolHistoryBoundaryResolver,
+} from './protocol-history'
+import {
   beforeDeadline,
   parseChainId,
   WALLET_READ_TIMEOUT_MS,
@@ -24,6 +31,9 @@ import {
 
 export const GROUP_DIRECTORY_PAGE_SIZE = 100
 export const GROUP_DIRECTORY_START_BLOCK = 0n
+
+export type GroupDirectoryHistoryBoundaryKind =
+  'confirmed' | 'genesis-fallback' | 'pending-confirmation'
 
 const NEXT_GROUP_ID_ABI = [
   {
@@ -45,9 +55,11 @@ export type GroupDirectorySnapshot = {
   caughtUp: boolean
   groups: readonly PublishedGroup[]
   head: bigint
+  historyBoundaryKind: GroupDirectoryHistoryBoundaryKind
   indexedThrough?: bigint
   safeHead?: bigint
   scannedRanges: number
+  startBlock: bigint
 }
 
 export type GroupDirectoryStorageOptions = Pick<
@@ -56,6 +68,7 @@ export type GroupDirectoryStorageOptions = Pick<
 >
 
 export type SynchronizeGroupDirectoryOptions = {
+  resolveHistoryBoundary?: ProtocolHistoryBoundaryResolver
   signal?: AbortSignal
   storage?: GroupDirectoryStorageOptions
 }
@@ -266,12 +279,13 @@ function sameCursor(first: EventCursor, second: EventCursor) {
 export async function resetGroupDirectoryCache(
   chainId: bigint,
   storage: GroupDirectoryStorageOptions = {},
+  startBlock = GROUP_DIRECTORY_START_BLOCK,
 ) {
   const seed = createEventCursor({
     chainId,
     filter: GROUP_CREATED_FILTER,
     finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: GROUP_DIRECTORY_START_BLOCK,
+    startBlock,
   })
   const cache = await openEventCache({
     ...storage,
@@ -290,12 +304,6 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
   options = {},
 ) => {
   assertActive(options.signal)
-  const seed = createEventCursor({
-    chainId,
-    filter: GROUP_CREATED_FILTER,
-    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
-    startBlock: GROUP_DIRECTORY_START_BLOCK,
-  })
   const interruption = new AbortController()
   let contextChanged = false
   const interruptContext = () => {
@@ -330,6 +338,75 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
         'Verified Lifeinvader v1 is required before this chain can provide a group directory.',
       )
     }
+    let historyAnchor: ProtocolBlockFingerprint | undefined
+    let historyBoundaryKind: GroupDirectoryHistoryBoundaryKind =
+      'genesis-fallback'
+    let startBlock = GROUP_DIRECTORY_START_BLOCK
+    try {
+      const boundary = await (
+        options.resolveHistoryBoundary ?? resolveProtocolHistoryBoundary
+      )(provider, chainId, {
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        signal: interruption.signal,
+      })
+      assertContextActive()
+      historyAnchor = boundary.head
+      historyBoundaryKind = boundary.kind
+      startBlock = boundary.startBlock
+    } catch (error) {
+      assertContextActive()
+      if (!isProtocolHistoryUnavailableError(error)) throw error
+    }
+    if (historyBoundaryKind === 'pending-confirmation') {
+      if (
+        !historyAnchor ||
+        !(await protocolHistoryAnchorIsCanonical(
+          provider,
+          chainId,
+          historyAnchor,
+          { signal: interruption.signal },
+        ))
+      ) {
+        assertContextActive()
+        throw new Error(
+          'The protocol history anchor changed during group-directory synchronization. Retry after the chain stabilizes.',
+        )
+      }
+      assertContextActive()
+      const finalHead = await readSelectedHead(
+        provider,
+        chainId,
+        interruption.signal,
+      )
+      assertContextActive()
+      if (finalHead < historyAnchor.blockNumber) {
+        throw new Error(
+          'The wallet head moved behind the group-directory history anchor.',
+        )
+      }
+      await assertSelectedChain(provider, chainId, interruption.signal)
+      assertContextActive()
+      return {
+        cacheReset: false,
+        caughtUp: false,
+        groups: [],
+        head: finalHead,
+        historyBoundaryKind,
+        indexedThrough: undefined,
+        safeHead:
+          finalHead >= POST_FEED_CONFIRMATION_DEPTH
+            ? finalHead - POST_FEED_CONFIRMATION_DEPTH
+            : undefined,
+        scannedRanges: 0,
+        startBlock,
+      }
+    }
+    const seed = createEventCursor({
+      chainId,
+      filter: GROUP_CREATED_FILTER,
+      finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+      startBlock,
+    })
     const cache = await openEventCache({
       ...options.storage,
       filter: GROUP_CREATED_FILTER,
@@ -357,6 +434,23 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
       )
       assertContextActive()
       const freshGroups = decodeGroupLogs(result.logs)
+      // The discovered head commits to the ancestry that established
+      // startBlock. Never persist a range if that ancestry was replaced.
+      if (
+        historyAnchor &&
+        !(await protocolHistoryAnchorIsCanonical(
+          provider,
+          chainId,
+          historyAnchor,
+          { signal: interruption.signal },
+        ))
+      ) {
+        assertContextActive()
+        throw new Error(
+          'The protocol history anchor changed during group-directory synchronization. Retry after the chain stabilizes.',
+        )
+      }
+      assertContextActive()
       await cache.apply(before, result)
       assertContextActive()
       const after = await cache.readLatest(seed, GROUP_DIRECTORY_PAGE_SIZE)
@@ -415,7 +509,7 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
           ? finalHead - POST_FEED_CONFIRMATION_DEPTH
           : undefined
       const caughtUp =
-        safeHead === undefined || after.cursor.nextBlock > safeHead
+        safeHead !== undefined && after.cursor.nextBlock > safeHead
       const confirmedNextGroupId =
         caughtUp && safeHead !== undefined
           ? await readNextGroupId(provider, safeHead, interruption.signal)
@@ -452,9 +546,11 @@ export const synchronizeGroupDirectory: GroupDirectorySynchronizer = async (
         caughtUp,
         groups,
         head: finalHead,
+        historyBoundaryKind,
         indexedThrough,
         safeHead,
         scannedRanges: result.scannedRanges,
+        startBlock,
       }
     } finally {
       cache.close()

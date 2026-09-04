@@ -9,7 +9,10 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Address } from 'viem'
 import type { Eip1193Provider } from './ethereum'
-import type { GroupDirectorySnapshot } from './group-directory'
+import {
+  GROUP_DIRECTORY_START_BLOCK,
+  type GroupDirectorySnapshot,
+} from './group-directory'
 import type { GroupMembershipProjectionReader } from './group-membership-read-model'
 import type { GroupMembershipProjectionRunSnapshot } from './group-membership-projection-run'
 import type {
@@ -78,9 +81,11 @@ function directory(
     caughtUp,
     groups,
     head: 20n,
+    historyBoundaryKind: 'confirmed',
     indexedThrough: caughtUp ? 8n : 4n,
     safeHead: 8n,
     scannedRanges: 1,
+    startBlock: GROUP_DIRECTORY_START_BLOCK,
   }
 }
 
@@ -207,7 +212,9 @@ describe('PublicGroupPanel', () => {
       screen.getByRole('button', { name: 'Load next group range' }),
     )
     expect(
-      await screen.findByText(/Caught up through confirmed block 8/i),
+      await screen.findByText(
+        /Caught up from block 0 through confirmed block 8/i,
+      ),
     ).toBeTruthy()
     expect(synchronizeDirectory).toHaveBeenCalledTimes(2)
     expect(screen.getByText(CID.text)).toBeTruthy()
@@ -236,6 +243,73 @@ describe('PublicGroupPanel', () => {
         name: 'Load confirmed group messages',
       }).disabled,
     ).toBe(false)
+  })
+
+  it('keeps a pending directory hidden until its history boundary is confirmed', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizeDirectory = vi.fn().mockResolvedValue({
+      ...directory(false, []),
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: 9n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    render(
+      <PublicGroupPanel
+        session={connectedSession(provider)}
+        synchronizeDirectory={synchronizeDirectory}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed public groups' }),
+    )
+
+    expect(
+      await screen.findByRole('button', { name: 'Check group confirmations' }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /earliest possible Lifeinvader deployment block is 9.*has not reached the confirmed head 9 yet.*No group log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText('No confirmed groups found.')).toBeNull()
+    expect(document.querySelector('.group-empty-result')).toBeNull()
+  })
+
+  it('keeps a pre-finality directory pending without showing an empty result', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const synchronizeDirectory = vi.fn().mockResolvedValue({
+      ...directory(false, []),
+      head: 5n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
+    })
+    render(
+      <PublicGroupPanel
+        session={connectedSession(provider)}
+        synchronizeDirectory={synchronizeDirectory}
+      />,
+    )
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load confirmed public groups' }),
+    )
+
+    expect(
+      await screen.findByRole('button', { name: 'Check group confirmations' }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(
+        /history can begin at block 0.*does not have a confirmed head yet.*No group log range was requested/i,
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText('No confirmed groups found.')).toBeNull()
+    expect(document.querySelector('.group-empty-result')).toBeNull()
   })
 
   it('accepts a valid direct group ID and rejects malformed selections', () => {

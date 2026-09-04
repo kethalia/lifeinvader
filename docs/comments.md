@@ -33,11 +33,12 @@ discovery head is hash-reauthenticated after the bounded comment request and
 before cache mutation; a replaced result is discarded and discovery is retried
 once, while a second replacement fails closed.
 
-An explicit historical-state rejection falls back to genesis. A local timeout,
-malformed history data, conflicting code, cancellation, or wallet-context
-change does not. Boundaries cached for the same provider, chain, and finality
-policy are reused only after their head fingerprint is reauthenticated, avoiding
-redundant code-probe bursts without trusting a reset local fork.
+Only a recognized unavailable or pruned archival-state rejection falls back to
+genesis. A rate limit, transport failure, local timeout, malformed history data,
+conflicting code, cancellation, or wallet-context change does not. Boundaries
+cached for the same provider, chain, and finality policy are reused only after
+their head fingerprint is reauthenticated, avoiding redundant code-probe bursts
+without trusting a reset local fork.
 
 The returned recent-comment page is only a bounded preview. Its nominal limit is 200 logs and the shared cache may extend through the rest of the boundary block under its existing hard cap. It must never be described as a complete thread. A projection anchor is issued only after the stream catches up to one authenticated confirmed safe head.
 

@@ -423,16 +423,16 @@ describe('post comment stream synchronization', () => {
       caughtUp: true,
       indexedThrough: 20n,
       projectionAnchor: {
-        comments: { cursor: { startBlock: 9n } },
+        comments: { cursor: { startBlock: 14n } },
       },
       recentComments: [
         { blockNumber: 14n, body: 'Confirmed after deployment.' },
       ],
       safeHead: 20n,
       scannedRanges: 1,
-      startBlock: 9n,
+      startBlock: 14n,
     })
-    expect(logQueries).toEqual([{ fromBlock: '0x9', toBlock: '0x14' }])
+    expect(logQueries).toEqual([{ fromBlock: '0xe', toBlock: '0x14' }])
   })
 
   it('returns validated recent comments newest first without claiming a complete thread', async () => {

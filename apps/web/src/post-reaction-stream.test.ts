@@ -474,18 +474,18 @@ describe('post reaction stream synchronization', () => {
         recentSignals: [{ blockNumber: 14n, postId: 7n }],
       },
       projectionAnchor: {
-        likes: { cursor: { startBlock: 9n } },
-        reposts: { cursor: { startBlock: 9n } },
+        likes: { cursor: { startBlock: 14n } },
+        reposts: { cursor: { startBlock: 14n } },
       },
       reposts: {
         caughtUp: true,
         recentReposts: [{ blockNumber: 15n, postId: 7n }],
       },
-      startBlock: 9n,
+      startBlock: 14n,
     })
     expect(logQueries).toEqual([
-      { fromBlock: '0x9', topic: LIKE_SET_TOPIC },
-      { fromBlock: '0x9', topic: REPOST_PUBLISHED_TOPIC },
+      { fromBlock: '0xe', topic: LIKE_SET_TOPIC },
+      { fromBlock: '0xe', topic: REPOST_PUBLISHED_TOPIC },
     ])
   })
 

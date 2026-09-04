@@ -15,6 +15,7 @@ import {
   resetGroupDirectoryCache,
   synchronizeGroupDirectory,
   type GroupDirectoryStorageOptions,
+  type SynchronizeGroupDirectoryOptions,
 } from './group-directory'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import { BrowserEventCache, openEventCache } from './event-cache'
@@ -26,6 +27,10 @@ import {
   LIFEINVADER_INIT_CODE,
   PROTOCOL_ADDRESS,
 } from './protocol'
+import {
+  ProtocolHistoryUnavailableError,
+  type ProtocolHistoryBoundary,
+} from './protocol-history'
 
 const ACCOUNT_A = '0x000000000000000000000000000000000000aaaa' as Address
 const ACCOUNT_B = '0x000000000000000000000000000000000000bbbb' as Address
@@ -102,10 +107,53 @@ function storage(factory = new IDBFactory()): GroupDirectoryStorageOptions {
   }
 }
 
+async function unsupportedHistory(): Promise<never> {
+  throw new ProtocolHistoryUnavailableError(
+    0n,
+    new Error('Historical state is unavailable.'),
+  )
+}
+
+function historyBoundary(
+  startBlock: bigint,
+  headBlock = 5_000n,
+): ProtocolHistoryBoundary {
+  const safeBlock = headBlock - POST_FEED_CONFIRMATION_DEPTH
+  return {
+    chainId: 1n,
+    codeProbes: 1,
+    confirmedThrough: {
+      blockHash: blockHash(safeBlock),
+      blockNumber: safeBlock,
+    },
+    deployment: {
+      blockHash: blockHash(startBlock),
+      blockNumber: startBlock,
+    },
+    head: {
+      blockHash: blockHash(headBlock),
+      blockNumber: headBlock,
+    },
+    kind: startBlock > safeBlock ? 'pending-confirmation' : 'confirmed',
+    startBlock,
+  }
+}
+
+function synchronizeWithFallback(
+  provider: Eip1193Provider,
+  chainId: bigint,
+  options: SynchronizeGroupDirectoryOptions = {},
+) {
+  return synchronizeGroupDirectory(provider, chainId, {
+    resolveHistoryBoundary: unsupportedHistory,
+    ...options,
+  })
+}
+
 afterEach(() => vi.restoreAllMocks())
 
 describe('group-directory stream synchronization', () => {
-  it('resumes global group discovery through one bounded range per call', async () => {
+  it('falls back to genesis and resumes one bounded range per call', async () => {
     const logQueries: Array<{
       fromBlock: string
       toBlock: string
@@ -142,17 +190,19 @@ describe('group-directory stream synchronization', () => {
     const cacheStorage = storage()
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
       caughtUp: false,
       groups: [],
+      historyBoundaryKind: 'genesis-fallback',
       indexedThrough: 1_999n,
       scannedRanges: 1,
+      startBlock: GROUP_DIRECTORY_START_BLOCK,
     })
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
@@ -174,6 +224,339 @@ describe('group-directory stream synchronization', () => {
         topics: [GROUP_CREATED_TOPIC],
       },
     ])
+  })
+
+  it('starts global group discovery at the verified deployment boundary', async () => {
+    const requests: ProviderRequest[] = []
+    const resolveHistoryBoundary = vi.fn(async () => historyBoundary(3_000n))
+    const provider: Eip1193Provider = {
+      request: vi.fn(async (request: ProviderRequest) => {
+        requests.push(request)
+        const { method, params } = request
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_call') return uint256Result(2n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          return [
+            rawGroup(3_001n, GROUP_A, ACCOUNT_A, 'Started after deployment'),
+          ]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary,
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: true,
+      groups: [{ groupId: GROUP_A, name: 'Started after deployment' }],
+      historyBoundaryKind: 'confirmed',
+      indexedThrough: 4_988n,
+      scannedRanges: 1,
+      startBlock: 3_000n,
+    })
+    expect(resolveHistoryBoundary).toHaveBeenCalledWith(
+      provider,
+      1n,
+      expect.objectContaining({
+        finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+        signal: expect.any(AbortSignal),
+      }),
+    )
+    const logRequestIndex = requests.findIndex(
+      ({ method }) => method === 'eth_getLogs',
+    )
+    expect(requests[logRequestIndex]?.params).toEqual([
+      {
+        address: PROTOCOL_ADDRESS,
+        fromBlock: '0xbb8',
+        toBlock: '0x137c',
+        topics: [GROUP_CREATED_TOPIC],
+      },
+    ])
+    expect(
+      requests.findIndex(
+        ({ method, params }, index) =>
+          index > logRequestIndex &&
+          method === 'eth_getBlockByNumber' &&
+          (params as [string])[0] === '0x1388',
+      ),
+    ).toBeGreaterThan(logRequestIndex)
+  })
+
+  it('fails closed when history discovery does not explicitly reject historical state', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary: async () => {
+          throw new Error('Protocol history discovery timed out.')
+        },
+        storage: storage(),
+      }),
+    ).rejects.toThrow(/history discovery timed out/i)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('does not turn a transient history RPC failure into a genesis scan', async () => {
+    const transientError = Object.assign(new Error('rate limit exceeded'), {
+      code: -32_005,
+    })
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(20n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getCode') {
+          const [, block] = params as [string, string]
+          if (block === 'latest' || block === toHex(20n)) {
+            return PROTOCOL_RUNTIME_CODE
+          }
+          throw transientError
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, { storage: storage() }),
+    ).rejects.toBe(transientError)
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+  })
+
+  it('discards one fetched range when the history anchor was replaced', async () => {
+    const apply = vi.spyOn(BrowserEventCache.prototype, 'apply')
+    const resolveHistoryBoundary = vi.fn(async () => historyBoundary(3_000n))
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          const blockNumber = BigInt(number)
+          return {
+            hash: blockHash(blockNumber, blockNumber === 5_000n ? 'b' : 'a'),
+            number,
+          }
+        }
+        if (method === 'eth_getLogs') return []
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary,
+        storage: storage(),
+      }),
+    ).rejects.toThrow(/protocol history anchor changed/i)
+    expect(resolveHistoryBoundary).toHaveBeenCalledTimes(1)
+    expect(
+      vi
+        .mocked(provider.request)
+        .mock.calls.filter(([request]) => request.method === 'eth_getLogs'),
+    ).toHaveLength(1)
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('waits without requesting logs or state while confirmation is pending', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5_000n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error('A pending directory must not read group history.')
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary: async () => historyBoundary(4_990n),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 5_000n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: 4_988n,
+      scannedRanges: 0,
+      startBlock: 4_990n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
+  })
+
+  it('stays pending when the safe head only reaches confirmed emptiness', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(21n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error(
+            'Confirmed emptiness is not a confirmed deployment boundary.',
+          )
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary: async () => ({
+          chainId: 1n,
+          codeProbes: 4,
+          confirmedThrough: {
+            blockHash: blockHash(8n),
+            blockNumber: 8n,
+          },
+          head: { blockHash: blockHash(20n), blockNumber: 20n },
+          kind: 'pending-confirmation',
+          preceding: { blockHash: blockHash(8n), blockNumber: 8n },
+          startBlock: 9n,
+        }),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 21n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: 9n,
+      scannedRanges: 0,
+      startBlock: 9n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
+  })
+
+  it('stays pending before the chain has a confirmed head', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error(
+            'A pre-finality directory must not read group history.',
+          )
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeGroupDirectory(provider, 1n, {
+        resolveHistoryBoundary: async () => ({
+          chainId: 1n,
+          codeProbes: 1,
+          head: { blockHash: blockHash(5n), blockNumber: 5n },
+          kind: 'pending-confirmation',
+          startBlock: 0n,
+        }),
+        storage: storage(),
+      }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 5n,
+      historyBoundaryKind: 'pending-confirmation',
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
+  })
+
+  it('keeps a genesis fallback incomplete before a safe head exists', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method, params }) => {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return toHex(5n)
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs' || method === 'eth_call') {
+          throw new Error('A pre-finality fallback has no confirmed history.')
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      }),
+    }
+
+    await expect(
+      synchronizeWithFallback(provider, 1n, { storage: storage() }),
+    ).resolves.toMatchObject({
+      caughtUp: false,
+      groups: [],
+      head: 5n,
+      historyBoundaryKind: 'genesis-fallback',
+      indexedThrough: undefined,
+      safeHead: undefined,
+      scannedRanges: 0,
+      startBlock: 0n,
+    })
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_getLogs' }),
+    )
+    expect(provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'eth_call' }),
+    )
   })
 
   it('returns immutable public groups newest first', async () => {
@@ -199,7 +582,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).resolves.toMatchObject({
@@ -249,7 +632,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, { storage: storage() }),
+      synchronizeWithFallback(provider, 1n, { storage: storage() }),
     ).resolves.toMatchObject({
       caughtUp: true,
       groups: [
@@ -284,7 +667,7 @@ describe('group-directory stream synchronization', () => {
       },
     }
 
-    const snapshot = await synchronizeGroupDirectory(provider, 1n, {
+    const snapshot = await synchronizeWithFallback(provider, 1n, {
       storage: storage(),
     })
 
@@ -318,13 +701,13 @@ describe('group-directory stream synchronization', () => {
     const cacheStorage = storage()
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: cacheStorage,
       }),
     ).rejects.toThrow(/invalid GroupCreated/i)
     valid = true
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
@@ -365,11 +748,11 @@ describe('group-directory stream synchronization', () => {
     const cacheStorage = storage()
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, { storage: cacheStorage }),
+      synchronizeWithFallback(provider, 1n, { storage: cacheStorage }),
     ).rejects.toThrow(/incomplete confirmed group directory/i)
     returnCompleteHistory = true
     await expect(
-      synchronizeGroupDirectory(provider, 1n, { storage: cacheStorage }),
+      synchronizeWithFallback(provider, 1n, { storage: cacheStorage }),
     ).resolves.toMatchObject({
       caughtUp: true,
       groups: [{ groupId: GROUP_B }, { groupId: GROUP_A }],
@@ -428,7 +811,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: cacheStorage,
       }),
     ).resolves.toMatchObject({
@@ -518,7 +901,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).rejects.toThrow(/verified Lifeinvader v1/i)
@@ -542,7 +925,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).rejects.toThrow(/another wallet chain/i)
@@ -567,7 +950,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).rejects.toThrow(/chain changed during group-directory verification/i)
@@ -594,7 +977,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).rejects.toThrow(/head moved behind the confirmed groups/i)
@@ -622,7 +1005,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).resolves.toMatchObject({
@@ -658,7 +1041,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).rejects.toThrow(/confirmed group-directory checkpoint changed/i)
@@ -690,7 +1073,7 @@ describe('group-directory stream synchronization', () => {
     )
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         storage: storage(),
       }),
     ).rejects.toThrow(/cache changed after synchronization/i)
@@ -702,7 +1085,7 @@ describe('group-directory stream synchronization', () => {
     controller.abort()
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         signal: controller.signal,
         storage: storage(),
       }),
@@ -725,7 +1108,7 @@ describe('group-directory stream synchronization', () => {
     }
 
     await expect(
-      synchronizeGroupDirectory(provider, 1n, {
+      synchronizeWithFallback(provider, 1n, {
         signal: controller.signal,
         storage: storage(),
       }),
