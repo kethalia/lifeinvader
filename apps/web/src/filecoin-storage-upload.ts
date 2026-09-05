@@ -55,21 +55,17 @@ import {
   type TransactionReceipt,
   type TransactionSubmitted,
 } from './protocol'
-
 export const FILECOIN_STORAGE_UPLOAD_READ_TIMEOUT_MS = 15_000
 export const FILECOIN_STORAGE_UPLOAD_RECEIPT_TIMEOUT_MS = 180_000
 export const MAX_FILECOIN_STORAGE_UPLOAD_RPC_REQUESTS = 32
-
 export const FILECOIN_STORAGE_DATA_SET_METADATA = Object.freeze({
   source: 'lifeinvader',
   withIPFSIndexing: '',
 })
-
 const STORAGE_DOMAIN_NAME = 'FilecoinWarmStorageService'
 const STORAGE_DOMAIN_VERSION = '1'
 const PIECE_METADATA_KEY = 'ipfsRootCID'
 const PDP_PRODUCT_TYPE = 0n
-
 const EIP712_FIELDS = {
   ...EIP712Types,
   EIP712Domain: [
@@ -79,14 +75,12 @@ const EIP712_FIELDS = {
     { name: 'verifyingContract', type: 'address' },
   ],
 } as const
-
 type PieceDetails<Bytes> = {
   bytes: Bytes
   paddedSize: bigint
   size: number
   text: string
 }
-
 export type FilecoinStorageUploadPlan = {
   account: Address
   carBytes: Uint8Array
@@ -96,9 +90,7 @@ export type FilecoinStorageUploadPlan = {
   piece: PieceDetails<Hex>
   providerId: bigint
 }
-
 export type FilecoinStorageUploadPiece = PieceDetails<Uint8Array>
-
 export type FilecoinStorageUploadCheckpoint = {
   account: Address
   carByteLength: number
@@ -108,12 +100,12 @@ export type FilecoinStorageUploadCheckpoint = {
   piece: PieceDetails<Hex>
   provider: {
     id: bigint
+    payee: Address
     serviceProvider: Address
     serviceUrl: string
   }
   withCDN: false
 }
-
 export type FilecoinStorageUploadExecutorResult = {
   confirmedTxHash?: Hash
   dataSetId: bigint
@@ -121,7 +113,6 @@ export type FilecoinStorageUploadExecutorResult = {
   pieceIds: bigint[]
   txHash: Hash
 }
-
 export type FilecoinStorageUploadExecutor = (input: {
   authorizeCommit(): Promise<void>
   onStored(piece: FilecoinStorageUploadPiece): void
@@ -131,7 +122,6 @@ export type FilecoinStorageUploadExecutor = (input: {
   request(request: ProviderRequest): Promise<unknown>
   signal: AbortSignal
 }) => Promise<FilecoinStorageUploadExecutorResult>
-
 export type FilecoinStorageUploadOptions = {
   executeUpload?: FilecoinStorageUploadExecutor
   expectedAccount: Address
@@ -145,13 +135,11 @@ export type FilecoinStorageUploadOptions = {
   receiptTimeoutMs?: number
   signal?: AbortSignal
 }
-
 export type FilecoinStorageUploadReceipt = {
   dataSetId: bigint
   pieceId: bigint
   receipt: TransactionReceipt
 }
-
 export type FilecoinStorageUploadResult = FilecoinStorageUploadCheckpoint & {
   dataSetId: bigint
   initialTransactionHash: Hash
@@ -160,16 +148,13 @@ export type FilecoinStorageUploadResult = FilecoinStorageUploadCheckpoint & {
   receipt: TransactionReceipt
   transactionHash: Hash
 }
-
 export type FilecoinStorageUploadReceiptOptions = {
   expectedAccount: Address
   expectedChainId: bigint
   pollIntervalMs?: number
   receiptTimeoutMs?: number
 }
-
 class FilecoinStorageUploadError extends Error {}
-
 export class FilecoinStorageSubmissionUnknownError extends Error {
   readonly checkpoint: FilecoinStorageUploadCheckpoint
   readonly transactionHash?: Hash
@@ -189,13 +174,11 @@ export class FilecoinStorageSubmissionUnknownError extends Error {
     this.transactionHash = transactionHash
   }
 }
-
 export function isFilecoinStorageSubmissionUnknownError(
   error: unknown,
 ): error is FilecoinStorageSubmissionUnknownError {
   return error instanceof FilecoinStorageSubmissionUnknownError
 }
-
 function uploadError(reason: string, options?: ErrorOptions) {
   return new FilecoinStorageUploadError(
     `Cannot store media on Filecoin: ${reason}`,
@@ -239,7 +222,6 @@ function assertUnsigned(
     throw uploadError(`the quote has an invalid ${label}.`)
   }
 }
-
 function validTimeout(value: number, maximum: number) {
   return Number.isSafeInteger(value) && value > 0 && value <= maximum
 }
@@ -308,7 +290,6 @@ function validateReadyQuote(
     throw uploadError('the Filecoin Pay account is not ready for this upload.')
   }
 }
-/** Validate, hash-check, and snapshot the exact CAR covered by a ready quote. */
 export async function planFilecoinStorageUpload(
   prepared: PreparedMediaCar,
   quote: FilecoinStorageQuote,
@@ -402,6 +383,7 @@ function normalizeProvider(
     value.serviceProvider,
     'provider service account',
   )
+  const payee = parseAddress(value.payee, 'provider payee')
   // FWSS fixes the payment token in the preflighted contract graph. Current
   // provider registrations may use the zero-address sentinel for this
   // informational capability, so only its encoding is checked here.
@@ -419,6 +401,7 @@ function normalizeProvider(
   }
   return Object.freeze({
     id: plan.providerId,
+    payee,
     serviceProvider,
     serviceUrl: normalizeServiceUrl(value.pdp.serviceURL),
   })
@@ -482,6 +465,7 @@ function makeCheckpoint(
     piece,
     provider: Object.freeze({
       id: provider.id,
+      payee: provider.payee,
       serviceProvider: provider.serviceProvider,
       serviceUrl: provider.serviceUrl,
     }),
@@ -612,7 +596,7 @@ function validateCreateAuthorization(
     !exactKeys(message, ['clientDataSetId', 'metadata', 'payee']) ||
     !sameAddress(
       parseAddress(message.payee, 'data-set payee'),
-      provider.serviceProvider,
+      provider.payee,
     ) ||
     !exactMetadata(message.metadata, [
       { key: 'source', value: FILECOIN_STORAGE_DATA_SET_METADATA.source },
@@ -933,7 +917,6 @@ function canonicalEventLogs(
     }
   })
 }
-/** Authenticate one fresh data set and its one root-CID-tagged CAR piece. */
 export function assertFilecoinStorageUploadReceipt(
   logs: unknown,
   receipt: TransactionReceipt,
@@ -987,7 +970,7 @@ export function assertFilecoinStorageUploadReceipt(
       dataSetArgs.serviceProvider,
       checkpoint.provider.serviceProvider,
     ) ||
-    !sameAddress(dataSetArgs.payee, checkpoint.provider.serviceProvider) ||
+    !sameAddress(dataSetArgs.payee, checkpoint.provider.payee) ||
     dataSetArgs.metadataKeys.length !== 2 ||
     dataSetArgs.metadataKeys[0] !== 'source' ||
     dataSetArgs.metadataKeys[1] !== 'withIPFSIndexing' ||
@@ -1077,6 +1060,7 @@ function normalizeCheckpoint(
   }
   const provider = Object.freeze({
     id: value.provider.id,
+    payee: parseAddress(value.provider.payee, 'checkpoint provider payee'),
     serviceProvider: parseAddress(
       value.provider.serviceProvider,
       'checkpoint provider',
@@ -1123,7 +1107,6 @@ function normalizeCheckpoint(
     withCDN: false as const,
   })
 }
-
 async function waitForUploadReceipt(
   provider: Eip1193Provider,
   hash: Hash,
@@ -1131,16 +1114,12 @@ async function waitForUploadReceipt(
   guard: Awaited<ReturnType<typeof createTransactionGuard>>,
   options: Pick<
     FilecoinStorageUploadOptions,
-    'pollIntervalMs' | 'receiptTimeoutMs'
-  > & { assertActive?: () => void },
+    'pollIntervalMs' | 'receiptTimeoutMs' | 'signal'
+  >,
 ): Promise<FilecoinStorageUploadReceipt> {
   let eventResult: { dataSetId: bigint; pieceId: bigint } | undefined
   const receipt = await waitForTransactionReceipt(provider, hash, {
-    assertCurrentChain: async () => {
-      options.assertActive?.()
-      await guard.assertSubmission()
-      options.assertActive?.()
-    },
+    assertCurrentChain: guard.assertSubmission,
     assertReceiptLogs: (logs, candidate) => {
       eventResult = assertFilecoinStorageUploadReceipt(
         logs,
@@ -1148,13 +1127,10 @@ async function waitForUploadReceipt(
         checkpoint,
       )
     },
-    assertUnchanged: () => {
-      options.assertActive?.()
-      guard.assertUnchanged()
-      options.assertActive?.()
-    },
+    assertUnchanged: guard.assertUnchanged,
     pollIntervalMs: options.pollIntervalMs,
     selectedChainId: checkpoint.chainId,
+    signal: options.signal,
     timeoutMs:
       options.receiptTimeoutMs ?? FILECOIN_STORAGE_UPLOAD_RECEIPT_TIMEOUT_MS,
   })
@@ -1163,7 +1139,6 @@ async function waitForUploadReceipt(
   }
   return { ...eventResult, receipt }
 }
-
 export async function checkFilecoinStorageUploadReceipt(
   provider: Eip1193Provider,
   hash: Hash,
@@ -1204,13 +1179,7 @@ export async function checkFilecoinStorageUploadReceipt(
     guard.release()
   }
 }
-
-/**
- * Store one validated CAR with one explicit provider, authorize a fresh data
- * set, and accept success only after the provider-submitted transaction has a
- * canonical receipt containing the exact root-CID metadata. This requests IPFS
- * indexing; it does not prove that indexing or public retrieval has completed.
- */
+/** Store one CAR and trust success only after its exact canonical receipt. */
 export async function uploadFilecoinStorage(
   wallet: Eip1193Provider,
   prepared: PreparedMediaCar,
@@ -1596,9 +1565,9 @@ export async function uploadFilecoinStorage(
         checkpoint,
         guard,
         {
-          assertActive: assertOperationActive,
           pollIntervalMs: options.pollIntervalMs,
           receiptTimeoutMs,
+          signal: operationController.signal,
         },
       )
       if (

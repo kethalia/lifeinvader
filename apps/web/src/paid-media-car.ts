@@ -383,10 +383,7 @@ export async function validatePreparedMediaCar(
   if (reachable.size !== blocks.length) {
     throw invalidPreparedCar('the archive contains an unreachable block.')
   }
-  const fileSize = fileBlocks.reduce(
-    (total, { bytes }) => total + bytes.byteLength,
-    0,
-  )
+  const fileSize = fileBlocks.reduce((n, b) => n + b.bytes.length, 0)
   if (fileSize !== value.file.size) {
     throw invalidPreparedCar('the archive file size is inconsistent.')
   }
@@ -394,11 +391,7 @@ export async function validatePreparedMediaCar(
   try {
     imported = await importByteStream(
       fileBlocks.map(({ bytes }) => bytes),
-      {
-        async put(cid) {
-          return cid
-        },
-      },
+      { put: (cid) => Promise.resolve(cid) },
       { profile: LIFEINVADER_UNIXFS_PROFILE },
     )
   } catch (cause) {

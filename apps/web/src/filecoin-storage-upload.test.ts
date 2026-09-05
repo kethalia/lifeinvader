@@ -35,9 +35,9 @@ import {
 } from './filecoin-storage'
 import type { FilecoinStorageQuote } from './filecoin-storage-quote'
 import { preparePaidMediaCar, type PreparedMediaCar } from './paid-media-car'
-
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const OTHER_ACCOUNT = '0x000000000000000000000000000000000000b0bb'
+const PAYEE = '0x000000000000000000000000000000000000FEE1'
 const SERVICE_PROVIDER = '0x0000000000000000000000000000000000005e11'
 const PROVIDER_ID = 17n
 const DATA_SET_ID = 29n
@@ -133,7 +133,7 @@ function createAuthorization(overrides: Record<string, unknown> = {}) {
         { key: 'source', value: 'lifeinvader' },
         { key: 'withIPFSIndexing', value: '' },
       ],
-      payee: SERVICE_PROVIDER,
+      payee: PAYEE,
       ...overrides,
     },
     primaryType: 'CreateDataSet',
@@ -169,6 +169,7 @@ function providerDetails(overrides: Record<string, unknown> = {}) {
     maxPieceSizeInBytes: 32n * 1024n * 1024n,
     minPieceSizeInBytes: 127n,
     paymentTokenAddress: CALIBRATION.contracts.usdfc,
+    payee: PAYEE,
     providerId: PROVIDER_ID,
     serviceProvider: SERVICE_PROVIDER,
     serviceUrl: 'https://provider.example/pdp',
@@ -210,7 +211,7 @@ function providerReadResult(overrides: Record<string, unknown> = {}) {
         description: 'Fixture provider',
         isActive: provider.isActive,
         name: 'Fixture',
-        payee: provider.serviceProvider as `0x${string}`,
+        payee: provider.payee as `0x${string}`,
         serviceProvider: provider.serviceProvider as `0x${string}`,
       },
     },
@@ -223,6 +224,7 @@ function storageLogs(
     dataSetId?: bigint
     dataSetMetadataValues?: string[]
     mediaCid?: string
+    payee?: `0x${string}`
     pieceCid?: Hex
     pieceId?: bigint
     providerId?: bigint
@@ -259,7 +261,7 @@ function storageLogs(
           overrides.cdnRailId ?? 0n,
           ACCOUNT,
           serviceProvider,
-          serviceProvider,
+          overrides.payee ?? PAYEE,
           ['source', 'withIPFSIndexing'],
           overrides.dataSetMetadataValues ?? ['lifeinvader', ''],
         ],
@@ -572,6 +574,7 @@ describe('Filecoin storage upload execution', () => {
       pieceId: PIECE_ID,
       provider: {
         id: PROVIDER_ID,
+        payee: PAYEE,
         serviceProvider: SERVICE_PROVIDER,
         serviceUrl: 'https://provider.example/pdp/',
       },
@@ -796,20 +799,18 @@ describe('Filecoin storage upload execution', () => {
   })
   it('cancels receipt polling with its submitted recovery hash', async () => {
     const requested = deferred<void>()
-    const response = deferred<null>()
     const controller = new AbortController()
     const pending = runUpload(successfulExecutor(), {
       provider: walletProvider({
         receiptRequest() {
           requested.resolve(undefined)
-          return response.promise
+          return new Promise(() => undefined)
         },
       }),
       signal: controller.signal,
     })
     await requested.promise
     controller.abort(new DOMException('Stop upload.', 'AbortError'))
-    response.resolve(null)
     await expect(pending).rejects.toMatchObject(recoveryFailure(/cancelled/i))
   })
   it('returns a recovery checkpoint when provider submission is uncertain', async () => {
@@ -912,6 +913,7 @@ describe('Filecoin storage receipt authentication', () => {
       [{ dataSetMetadataValues: ['another-app', ''] }, /data-set event/i],
       [{ cdnRailId: 1n }, /data-set event/i],
       [{ mediaCid: 'bafkqaaa' }, /piece event/i],
+      [{ payee: OTHER_ACCOUNT }, /data-set event/i],
       [{ serviceProvider: OTHER_ACCOUNT }, /data-set event/i],
     ]
     for (const [overrides, message] of changed) {

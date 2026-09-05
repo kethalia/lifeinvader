@@ -533,10 +533,16 @@ export async function verifyLocalChain(
   provider: Eip1193Provider,
   localProvider: Eip1193Provider = LOCAL_RPC_PROVIDER,
   timeoutMs = WALLET_READ_TIMEOUT_MS,
+  signal?: AbortSignal,
 ) {
   const deadline = Date.now() + timeoutMs
   const read = (source: Eip1193Provider, request: ProviderRequest) =>
-    beforeDeadline(() => source.request(request), deadline, localChainMismatch)
+    beforeDeadline(
+      () => source.request(request),
+      deadline,
+      localChainMismatch,
+      signal,
+    )
   const walletChainId = parseRpcQuantity(
     await read(provider, { method: 'eth_chainId' }),
     'wallet chain identifier',
@@ -1231,16 +1237,22 @@ export async function waitForTransactionReceipt(
     localProvider?: Eip1193Provider
     pollIntervalMs?: number
     selectedChainId?: bigint
+    signal?: AbortSignal
     timeoutMs?: number
   } = {},
 ): Promise<TransactionReceipt> {
   const pollIntervalMs = options.pollIntervalMs ?? 1_000
   const timeoutMs = options.timeoutMs ?? 120_000
   const deadline = Date.now() + timeoutMs
+  const cancelled = () => new Error('Receipt polling was cancelled.')
   const assertCurrentContext = () =>
     options.assertCurrentChain
-      ? beforeDeadline(options.assertCurrentChain, deadline, () =>
-          receiptUnavailableError(hash),
+      ? beforeDeadline(
+          options.assertCurrentChain,
+          deadline,
+          () => receiptUnavailableError(hash),
+          options.signal,
+          cancelled,
         )
       : Promise.resolve()
   while (true) {
@@ -1253,6 +1265,8 @@ export async function waitForTransactionReceipt(
         }),
       deadline,
       () => receiptUnavailableError(hash),
+      options.signal,
+      cancelled,
     )
     await assertCurrentContext()
     const parsedReceipt = parseReceipt(receiptValue, hash)
@@ -1264,12 +1278,19 @@ export async function waitForTransactionReceipt(
           provider,
           options.localProvider,
           Math.max(1, deadline - Date.now()),
+          options.signal,
         )
       }
       let protocolCode: Hex | undefined
       if (!reverted && options.expectProtocol) {
         const address = PROTOCOL_ADDRESS
-        protocolCode = await getCode(provider, address, deadline, blockTag)
+        protocolCode = await getCode(
+          provider,
+          address,
+          deadline,
+          blockTag,
+          options.signal,
+        )
       }
       await assertCurrentContext()
       const blockValue = await beforeDeadline(
@@ -1280,6 +1301,8 @@ export async function waitForTransactionReceipt(
           }),
         deadline,
         () => receiptUnavailableError(hash),
+        options.signal,
+        cancelled,
       )
       options.assertUnchanged?.()
       if (blockValue !== null) {
@@ -1348,7 +1371,13 @@ export async function waitForTransactionReceipt(
     if (Date.now() >= deadline) {
       throw receiptUnavailableError(hash)
     }
-    await delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())))
+    await beforeDeadline(
+      () => delay(Math.min(pollIntervalMs, deadline - Date.now())),
+      deadline,
+      () => receiptUnavailableError(hash),
+      options.signal,
+      cancelled,
+    )
   }
 }
 export async function deployProtocol(
