@@ -12,6 +12,10 @@ import { join, resolve } from 'node:path'
 import { decodeEventLog, getAddress, keccak256, type Hex } from 'viem'
 import type { Eip1193Provider } from '../src/ethereum'
 import {
+  assertPinnedAnvilFork,
+  ETHEREUM_WALLET_FORK_FIXTURE,
+} from '../src/test-local-fork'
+import {
   COMMENT_PUBLISHED_EVENT_ABI,
   COMMENT_PUBLISHED_TOPIC,
   FACTORY_ADDRESS,
@@ -289,6 +293,16 @@ test('deploys, posts, comments, and reacts through MetaMask on Anvil', async ({}
 
   const appUrl = loopbackUrl('LIFEINVADER_APP_URL', 'http://127.0.0.1:4173/')
   const rpcUrl = LOCAL_RPC_URL
+  const forkMode = process.env.LIFEINVADER_METAMASK_FORK
+  if (forkMode !== undefined) {
+    expect(forkMode, 'Only the pinned Ethereum wallet fork is supported.').toBe(
+      'ethereum',
+    )
+    await assertPinnedAnvilFork(
+      (method, params) => rpc(rpcUrl, method, [...(params ?? [])]),
+      ETHEREUM_WALLET_FORK_FIXTURE,
+    )
+  }
   expect(await rpc(rpcUrl, 'web3_clientVersion')).toMatch(/^anvil\//i)
   expect(await rpc(rpcUrl, 'eth_chainId')).toBe(LOCAL_CHAIN_ID_HEX)
   const accounts = await rpc(rpcUrl, 'eth_accounts')

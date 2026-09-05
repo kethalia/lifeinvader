@@ -1,6 +1,6 @@
 // @vitest-environment node
 /// <reference types="node" />
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import {
   custom,
   decodeFunctionResult,
@@ -18,8 +18,14 @@ import {
 import { fundFilecoinStorage } from './filecoin-storage-funding'
 import { quoteFilecoinStorage } from './filecoin-storage-quote'
 import { bindFilecoinStorageSynapseChain } from './filecoin-storage-synapse'
+import {
+  assertPinnedAnvilFork,
+  CALIBRATION_FORK_FIXTURE,
+  createLocalTestRpc,
+} from './test-local-fork'
 
 const forkRpcUrl = process.env.LIFEINVADER_FILECOIN_FORK_RPC_URL
+const forkRpc = forkRpcUrl ? createLocalTestRpc(forkRpcUrl) : undefined
 const describeFork = forkRpcUrl ? describe : describe.skip
 const UNUSED_QUOTE_ACCOUNT = getAddress(
   '0x000000000000000000000000000000000000a11c',
@@ -57,29 +63,14 @@ const USDFC_FIXTURE_ABI = [
   },
 ] as const
 
-type JsonRpcResponse = {
-  error?: { code?: number; message?: string }
-  result?: unknown
-}
-
 async function rpc(
   url: string,
   method: string,
   params: readonly unknown[] = [],
 ) {
-  const response = await fetch(url, {
-    body: JSON.stringify({ id: 1, jsonrpc: '2.0', method, params }),
-    headers: { 'content-type': 'application/json' },
-    method: 'POST',
-  })
-  if (!response.ok) {
-    throw new Error(`Local fork RPC returned HTTP ${response.status}.`)
-  }
-  const payload = (await response.json()) as JsonRpcResponse
-  if (payload.error) {
-    throw new Error(payload.error.message ?? 'Local fork RPC request failed.')
-  }
-  return payload.result
+  if (url !== forkRpcUrl || !forkRpc)
+    throw new Error('Local fork is not configured.')
+  return await forkRpc(method, params)
 }
 
 async function readUsdfcBalance(url: string, account: Address) {
@@ -175,40 +166,25 @@ function httpProvider(
   methods: string[] = [],
   selectedAccount?: Address,
 ): Eip1193Provider {
-  let requestId = 0
   return {
     async request({ method, params }: ProviderRequest) {
       methods.push(method)
       if (method === 'eth_accounts' && selectedAccount) {
         return [selectedAccount]
       }
-      const response = await fetch(url, {
-        body: JSON.stringify({
-          id: ++requestId,
-          jsonrpc: '2.0',
-          method,
-          params: params ?? [],
-        }),
-        headers: { 'content-type': 'application/json' },
-        method: 'POST',
-      })
-      if (!response.ok) {
-        throw new Error(`Local fork RPC returned HTTP ${response.status}.`)
+      if (params !== undefined && !Array.isArray(params)) {
+        throw new Error('Local test RPC requires positional parameters.')
       }
-      const payload = (await response.json()) as JsonRpcResponse
-      if (payload.error) {
-        const error = new Error(
-          payload.error.message ?? 'Local fork RPC request failed.',
-        )
-        Object.assign(error, { code: payload.error.code })
-        throw error
-      }
-      return payload.result
+      return await rpc(url, method, params as readonly unknown[] | undefined)
     },
   }
 }
 
 describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
+  beforeAll(async () => {
+    if (forkRpc) await assertPinnedAnvilFork(forkRpc, CALIBRATION_FORK_FIXTURE)
+  }, 30_000)
+
   it('verifies the live Calibration deployment graph', async () => {
     if (!forkRpcUrl) return
     const provider = httpProvider(forkRpcUrl)
@@ -312,7 +288,9 @@ describeFork('Filecoin storage inspection on a pinned Anvil fork', () => {
   }, 30_000)
 
   it('funds and approves one quote through an authenticated transaction', async () => {
-    if (!forkRpcUrl) return
+    if (!forkRpcUrl || !forkRpc) return
+    // Recheck immediately before any snapshot, impersonation, or transaction.
+    await assertPinnedAnvilFork(forkRpc, CALIBRATION_FORK_FIXTURE)
     const snapshot = await rpc(forkRpcUrl, 'evm_snapshot')
     if (typeof snapshot !== 'string' || !/^0x[0-9a-f]+$/i.test(snapshot)) {
       throw new Error('Local fork RPC returned an invalid snapshot identifier.')
