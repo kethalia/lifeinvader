@@ -162,6 +162,7 @@ export type FilecoinStorageUploadReceiptOptions = {
   expectedChainId: bigint
   pollIntervalMs?: number
   receiptTimeoutMs?: number
+  signal?: AbortSignal
 }
 class FilecoinStorageUploadError extends Error {}
 export class FilecoinStorageSubmissionUnknownError extends Error {
@@ -1222,6 +1223,7 @@ export async function checkFilecoinStorageUploadReceipt(
     provider,
     normalized.account,
     normalized.chainId,
+    options.signal,
   )
   try {
     return await waitForUploadReceipt(
@@ -1232,6 +1234,7 @@ export async function checkFilecoinStorageUploadReceipt(
       {
         pollIntervalMs: options.pollIntervalMs,
         receiptTimeoutMs,
+        signal: options.signal,
       },
     )
   } finally {

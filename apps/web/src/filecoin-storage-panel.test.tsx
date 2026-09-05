@@ -23,6 +23,7 @@ import {
   FILECOIN_STORAGE_NETWORKS,
 } from './filecoin-storage'
 import type { FilecoinStorageQuote } from './filecoin-storage-quote'
+import type { FilecoinStorageUploader } from './filecoin-storage-upload-panel'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
 import {
@@ -147,6 +148,74 @@ async function renderFundingQuote({
 afterEach(cleanup)
 
 describe('FilecoinStoragePanel', () => {
+  it('shares one write lock between funding controls and provider upload', async () => {
+    const readyQuote = {
+      ...quote,
+      depositNeeded: 0n,
+      needsServiceApproval: false,
+      ready: true,
+    }
+    const completion = deferred<void>()
+    const started = deferred<void>()
+    const uploadStorage = vi.fn<FilecoinStorageUploader>(async () => {
+      started.resolve(undefined)
+      await completion.promise
+      throw new Error('Fixture upload stopped.')
+    })
+    const onWriteLockChange = vi.fn()
+    render(
+      <FilecoinStoragePanel
+        inspectStorage={vi.fn<FilecoinStorageInspector>(async () => ({
+          kind: 'ready',
+          network: CALIBRATION,
+        }))}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quoteStorage={vi.fn(async () => readyQuote)}
+        session={connectedSession()}
+        uploadStorage={uploadStorage}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /^check Filecoin contracts$/i }),
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: /quote one Filecoin copy/i }),
+    )
+    await screen.findByRole('heading', {
+      name: /independent Filecoin provider/i,
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: /provider ID/i }), {
+      target: { value: '17' },
+    })
+    fireEvent.click(
+      screen.getByRole('checkbox', {
+        name: /provider receives these public bytes/i,
+      }),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /upload and authorize one copy/i }),
+    )
+    await started.promise
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(true),
+    )
+    expect(
+      (
+        screen.getByRole('button', {
+          name: /check Filecoin contracts again/i,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true)
+    await act(async () => completion.resolve(undefined))
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /fixture upload stopped/i,
+    )
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+  })
+
   it('renders only for a prepared CAR and requires a connected wallet', () => {
     const inspectStorage = vi.fn<FilecoinStorageInspector>()
     const { rerender } = render(
