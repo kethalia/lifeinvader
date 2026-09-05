@@ -13,6 +13,7 @@ import type { Eip1193Provider } from './ethereum'
 import type { FilecoinStorageQuote } from './filecoin-storage-quote'
 import {
   FilecoinStorageUploadPanel,
+  type FilecoinStorageUploadRecoveryJournal,
   type FilecoinStorageUploader,
   type FilecoinStorageUploadReceiptChecker,
 } from './filecoin-storage-upload-panel'
@@ -141,14 +142,24 @@ function submissionUnknown(hash?: Hash) {
   return error
 }
 
+function recoveryJournal(): FilecoinStorageUploadRecoveryJournal {
+  return {
+    markSubmitted: vi.fn(async () => undefined),
+    remove: vi.fn(async () => undefined),
+    stage: vi.fn(async () => undefined),
+  }
+}
+
 function renderUpload({
   checkReceipt,
+  journal = recoveryJournal(),
   onWriteLockChange,
   session = connectedSession(),
   storageQuote = quote,
   uploadStorage,
 }: {
   checkReceipt?: FilecoinStorageUploadReceiptChecker
+  journal?: FilecoinStorageUploadRecoveryJournal
   onWriteLockChange?(locked: boolean): void
   session?: WalletSession
   storageQuote?: FilecoinStorageQuote
@@ -160,6 +171,7 @@ function renderUpload({
       onWriteLockChange={onWriteLockChange}
       prepared={prepared}
       quote={storageQuote}
+      recoveryJournal={journal}
       session={session}
       uploadStorage={uploadStorage}
     />,
@@ -245,7 +257,8 @@ describe('FilecoinStorageUploadPanel', () => {
       },
     )
     const onWriteLockChange = vi.fn()
-    const view = renderUpload({ onWriteLockChange, uploadStorage })
+    const journal = recoveryJournal()
+    const view = renderUpload({ journal, onWriteLockChange, uploadStorage })
     authorizeUpload()
     const options = await started.promise
     expect(uploadStorage).toHaveBeenCalledWith(
@@ -265,11 +278,20 @@ describe('FilecoinStorageUploadPanel', () => {
 
     act(() => options.onProgress?.(136, 273))
     expect(screen.getByText(/136 B of 273 B/i)).toBeTruthy()
-    act(() => options.onStored?.(checkpoint))
+    await act(async () => {
+      await options.onStored?.(checkpoint)
+    })
+    expect(journal.stage).toHaveBeenCalledWith(checkpoint)
     expect(
       screen.getByText(/first signature can create and charge/i),
     ).toBeTruthy()
-    act(() => options.onSubmitted?.(TRANSACTION_HASH))
+    await act(async () => {
+      await options.onSubmitted?.(TRANSACTION_HASH)
+    })
+    expect(journal.markSubmitted).toHaveBeenCalledWith(
+      checkpoint,
+      TRANSACTION_HASH,
+    )
     expect(screen.getByTitle(TRANSACTION_HASH)).toBeTruthy()
 
     await act(async () => pendingResult.resolve(result))
@@ -282,6 +304,7 @@ describe('FilecoinStorageUploadPanel', () => {
     const endpoint = screen.getByRole('link') as HTMLAnchorElement
     expect(endpoint.href).toBe(result.providerPieceUrl)
     expect(endpoint.rel).toBe('noreferrer')
+    expect(journal.remove).toHaveBeenCalledWith(UPLOAD_ID)
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
     )
@@ -314,23 +337,38 @@ describe('FilecoinStorageUploadPanel', () => {
   })
 
   it('distinguishes a pre-signature rejection from no-hash ambiguity', async () => {
-    const rejected = vi.fn<FilecoinStorageUploader>(async () => {
-      throw Object.assign(new Error('No thanks.'), { code: 4001 })
-    })
+    const rejected = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        await options.onStored?.(checkpoint)
+        throw Object.assign(new Error('No thanks.'), { code: 4001 })
+      },
+    )
     const rejectedLock = vi.fn()
-    renderUpload({ onWriteLockChange: rejectedLock, uploadStorage: rejected })
+    const rejectedJournal = recoveryJournal()
+    renderUpload({
+      journal: rejectedJournal,
+      onWriteLockChange: rejectedLock,
+      uploadStorage: rejected,
+    })
     authorizeUpload()
     expect((await screen.findByRole('alert')).textContent).toMatch(
       /wallet request was rejected/i,
     )
     await waitFor(() => expect(rejectedLock).toHaveBeenLastCalledWith(false))
+    expect(rejectedJournal.stage).toHaveBeenCalledWith(checkpoint)
+    expect(rejectedJournal.remove).toHaveBeenCalledWith(UPLOAD_ID)
 
     cleanup()
-    const ambiguous = vi.fn<FilecoinStorageUploader>(async () => {
-      throw submissionUnknown()
-    })
+    const ambiguous = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        await options.onStored?.(checkpoint)
+        throw submissionUnknown()
+      },
+    )
     const ambiguousLock = vi.fn()
+    const ambiguousJournal = recoveryJournal()
     renderUpload({
+      journal: ambiguousJournal,
       onWriteLockChange: ambiguousLock,
       uploadStorage: ambiguous,
     })
@@ -341,6 +379,68 @@ describe('FilecoinStorageUploadPanel', () => {
     await waitFor(() => expect(ambiguousLock).toHaveBeenLastCalledWith(true))
     fireEvent.click(screen.getByRole('button', { name: /clear storage lock/i }))
     await waitFor(() => expect(ambiguousLock).toHaveBeenLastCalledWith(false))
+    expect(ambiguousJournal.remove).toHaveBeenCalledWith(UPLOAD_ID)
+  })
+
+  it('keeps an unresolved write lock when explicit journal removal fails', async () => {
+    const journal = recoveryJournal()
+    vi.mocked(journal.remove).mockRejectedValue(
+      new Error('IndexedDB removal was denied.'),
+    )
+    const uploadStorage = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        await options.onStored?.(checkpoint)
+        await options.onSubmitted?.(TRANSACTION_HASH)
+        throw submissionUnknown(TRANSACTION_HASH)
+      },
+    )
+    const onWriteLockChange = vi.fn()
+    renderUpload({ journal, onWriteLockChange, uploadStorage })
+    authorizeUpload()
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /checked this storage hash.*clear lock/i,
+      }),
+    )
+    expect(
+      await screen.findByText(/local recovery entry could not be cleared/i),
+    ).toBeTruthy()
+    expect(screen.getByText(/IndexedDB removal was denied/i)).toBeTruthy()
+    expect(journal.remove).toHaveBeenCalledWith(UPLOAD_ID)
+    expect(journal.markSubmitted).toHaveBeenCalledWith(
+      checkpoint,
+      TRANSACTION_HASH,
+    )
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
+  })
+
+  it('discloses terminal journal cleanup failure without hiding success', async () => {
+    const journal = recoveryJournal()
+    vi.mocked(journal.remove).mockRejectedValue(
+      new Error('IndexedDB cleanup failed.'),
+    )
+    const uploadStorage = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        await options.onStored?.(checkpoint)
+        await options.onSubmitted?.(TRANSACTION_HASH)
+        return result
+      },
+    )
+    const onWriteLockChange = vi.fn()
+    renderUpload({ journal, onWriteLockChange, uploadStorage })
+    authorizeUpload()
+
+    expect(
+      await screen.findByText(/storage confirmed in block 42.*piece 41/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/browser could not clear the local recovery entry/i),
+    ).toBeTruthy()
+    expect(screen.getByText(/IndexedDB cleanup failed/i)).toBeTruthy()
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
   })
 
   it('recovers a standalone paid data set without claiming storage', async () => {
@@ -355,8 +455,10 @@ describe('FilecoinStorageUploadPanel', () => {
       }),
     )
     const onWriteLockChange = vi.fn()
+    const journal = recoveryJournal()
     const view = renderUpload({
       checkReceipt,
+      journal,
       onWriteLockChange,
       uploadStorage,
     })
@@ -386,6 +488,7 @@ describe('FilecoinStorageUploadPanel', () => {
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
     )
+    expect(journal.remove).toHaveBeenCalledWith(UPLOAD_ID)
     view.rerender(
       <FilecoinStorageUploadPanel
         checkReceipt={checkReceipt}
@@ -495,7 +598,7 @@ describe('FilecoinStorageUploadPanel', () => {
     const uploadStorage = vi.fn<FilecoinStorageUploader>(
       async (_provider, _prepared, _quote, _providerId, options) => {
         uploadSignal = options.signal
-        options.onStored?.(checkpoint)
+        await options.onStored?.(checkpoint)
         return await new Promise<FilecoinStorageUploadResult>(
           (_resolve, reject) => {
             options.signal?.addEventListener(
