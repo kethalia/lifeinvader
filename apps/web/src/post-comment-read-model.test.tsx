@@ -1,13 +1,21 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Eip1193Provider } from './ethereum'
+import { DeferredEventCacheCorruptionError } from './event-cache'
 import type { PostCommentProjectionReadPage } from './post-comment-projection'
 import {
   usePostCommentReadModel,
   type PostCommentProjectionReader,
   type PostCommentReadTarget,
 } from './post-comment-read-model'
-import type { PostCommentProjectionRunSnapshot } from './post-comment-projection-run'
+import type {
+  PostCommentProjectionResumeState,
+  PostCommentProjectionRunSnapshot,
+} from './post-comment-projection-run'
+import {
+  getPostCommentResumeScope,
+  type PostCommentResumeStore,
+} from './post-comment-resume-store'
 import type {
   PostCommentProjectionAnchor,
   PostCommentStreamSnapshot,
@@ -20,7 +28,11 @@ const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const ANCHOR = { chainId: 1n, safeHead: 8n } as PostCommentProjectionAnchor
 const BLOCK_HASH = `0x${'11'.repeat(32)}` as const
 const REPLACEMENT_BLOCK_HASH = `0x${'22'.repeat(32)}` as const
+const SECOND_BLOCK_HASH = `0x${'44'.repeat(32)}` as const
 const TRANSACTION_HASH = `0x${'33'.repeat(32)}` as const
+const RESUME = {
+  marker: 'comment-resume',
+} as unknown as PostCommentProjectionResumeState
 const COMMENT_PAGE = {
   comments: [],
   complete: true,
@@ -29,7 +41,9 @@ const COMMENT_PAGE = {
 
 function target(
   postId: bigint,
-  blockHash: PostCommentReadTarget['blockHash'] = BLOCK_HASH,
+  blockHash: PostCommentReadTarget['blockHash'] = postId === 7n
+    ? BLOCK_HASH
+    : SECOND_BLOCK_HASH,
 ): PostCommentReadTarget {
   return {
     blockHash,
@@ -37,6 +51,10 @@ function target(
     logIndex: Number(postId),
     postId,
   }
+}
+
+function scope(...targets: PostCommentReadTarget[]) {
+  return getPostCommentResumeScope(targets)
 }
 
 function feedSnapshot(
@@ -96,6 +114,7 @@ function stream(
 
 function projection(
   phase: PostCommentProjectionRunSnapshot['phase'],
+  startBlock = 0n,
 ): PostCommentProjectionRunSnapshot {
   const complete = phase === 'complete'
   return {
@@ -106,7 +125,7 @@ function projection(
     pagesScanned: 1n,
     phase,
     safeHead: 8n,
-    startBlock: 0n,
+    startBlock,
   }
 }
 
@@ -117,8 +136,20 @@ function reader(
     advance: vi.fn(),
     close: vi.fn(),
     readComments: vi.fn().mockReturnValue(COMMENT_PAGE),
+    resumeState: RESUME,
     snapshot: projection('comments'),
     trackedPostIds: [7n, 8n],
+    ...overrides,
+  }
+}
+
+function resumeStore(
+  overrides: Partial<PostCommentResumeStore> = {},
+): PostCommentResumeStore {
+  return {
+    load: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
+    save: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   }
 }
@@ -136,10 +167,12 @@ function deferred<T>() {
 afterEach(cleanup)
 
 describe('usePostCommentReadModel', () => {
-  it('does no comment RPC work without a connected wallet and visible post', () => {
+  it('does no RPC or local-cache work without a connected wallet and visible post', () => {
     const synchronize = vi.fn()
+    const store = resumeStore()
     const disconnected = renderHook(() =>
       usePostCommentReadModel({ status: 'disconnected' }, [target(7n)], {
+        resumeStore: store,
         synchronize,
       }),
     )
@@ -149,14 +182,18 @@ describe('usePostCommentReadModel', () => {
 
     const provider = { request: vi.fn() } as Eip1193Provider
     const empty = renderHook(() =>
-      usePostCommentReadModel(connectedSession(provider), [], { synchronize }),
+      usePostCommentReadModel(connectedSession(provider), [], {
+        resumeStore: store,
+        synchronize,
+      }),
     )
     act(() => empty.result.current.loadNextRange())
     expect(empty.result.current.state).toEqual({ phase: 'idle' })
     expect(synchronize).not.toHaveBeenCalled()
+    expect(store.load).not.toHaveBeenCalled()
   })
 
-  it('performs one bounded synchronization before opening the selected scope', async () => {
+  it('resumes only after comment catchup and exact post-scope authentication', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const synchronize = vi
       .fn()
@@ -164,17 +201,17 @@ describe('usePostCommentReadModel', () => {
       .mockResolvedValueOnce(stream(ANCHOR))
     const run = reader()
     const openProjection = vi.fn().mockResolvedValue(run)
-    const synchronizePosts = postSynchronizer(target(7n), target(8n))
+    const pendingFeed = deferred<PostFeedSnapshot>()
+    const synchronizePosts = vi.fn().mockReturnValue(pendingFeed.promise)
+    const store = resumeStore({ load: vi.fn().mockResolvedValue(RESUME) })
+    const targets = [target(8n), target(7n)]
     const { result } = renderHook(() =>
-      usePostCommentReadModel(
-        connectedSession(provider),
-        [target(8n), target(7n)],
-        {
-          openProjection,
-          synchronize,
-          synchronizePosts,
-        },
-      ),
+      usePostCommentReadModel(connectedSession(provider), targets, {
+        openProjection,
+        resumeStore: store,
+        synchronize,
+        synchronizePosts,
+      }),
     )
 
     expect(synchronize).not.toHaveBeenCalled()
@@ -188,8 +225,14 @@ describe('usePostCommentReadModel', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
     expect(openProjection).not.toHaveBeenCalled()
+    expect(store.load).not.toHaveBeenCalled()
 
     act(() => result.current.loadNextRange())
+    await waitFor(() => expect(synchronizePosts).toHaveBeenCalledTimes(1))
+    expect(store.load).not.toHaveBeenCalled()
+    await act(async () =>
+      pendingFeed.resolve(feedSnapshot([target(7n), target(8n)])),
+    )
     await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
     expect(synchronize).toHaveBeenCalledTimes(2)
     expect(synchronizePosts).toHaveBeenCalledWith(
@@ -197,7 +240,12 @@ describe('usePostCommentReadModel', () => {
       1n,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
-    expect(openProjection).toHaveBeenCalledWith(ANCHOR, [7n, 8n])
+    expect(store.load).toHaveBeenCalledWith(1n, scope(...targets))
+    expect(openProjection).toHaveBeenCalledWith(ANCHOR, [7n, 8n], RESUME)
+    expect(result.current.state).toMatchObject({
+      phase: 'projecting',
+      resumed: true,
+    })
     expect(run.advance).not.toHaveBeenCalled()
   })
 
@@ -212,9 +260,11 @@ describe('usePostCommentReadModel', () => {
         .mockResolvedValueOnce(projection('complete')),
       readComments,
     })
+    const save = vi.fn().mockResolvedValue(undefined)
     const { result } = renderHook(() =>
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection: vi.fn().mockResolvedValue(run),
+        resumeStore: resumeStore({ save }),
         synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
         synchronizePosts: postSynchronizer(target(7n)),
       }),
@@ -237,6 +287,166 @@ describe('usePostCommentReadModel', () => {
     expect(result.current.readComments(7n, options)).toBe(COMMENT_PAGE)
     expect(readComments).toHaveBeenCalledWith(7n, options)
     expect(run.advance).toHaveBeenCalledTimes(2)
+    expect(save).toHaveBeenCalledWith(1n, scope(target(7n)), RESUME)
+    expect(result.current.state).toMatchObject({
+      phase: 'complete',
+      resumeSaved: true,
+      resumed: false,
+    })
+    expect(run.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards a rejected exact-scope resume and opens a fresh projection', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const store = resumeStore({ load: vi.fn().mockResolvedValue(RESUME) })
+    const run = reader()
+    const openProjection = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Derived state binding changed.'))
+      .mockResolvedValueOnce(run)
+    const selectedScope = scope(target(7n))
+    const { result } = renderHook(() =>
+      usePostCommentReadModel(connectedSession(provider), [target(7n)], {
+        openProjection,
+        resumeStore: store,
+        synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronizePosts: postSynchronizer(target(7n)),
+      }),
+    )
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+
+    expect(openProjection).toHaveBeenNthCalledWith(1, ANCHOR, [7n], RESUME)
+    expect(openProjection).toHaveBeenNthCalledWith(2, ANCHOR, [7n])
+    expect(store.remove).toHaveBeenCalledWith(1n, selectedScope)
+    expect(result.current.state).toMatchObject({
+      notice: expect.stringMatching(/discarded and rebuilt/i),
+      phase: 'projecting',
+      resumed: false,
+    })
+  })
+
+  it('rebuilds unreadable progress and keeps completed comments usable when saving fails', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const store = resumeStore({
+      load: vi.fn().mockRejectedValue(new Error('IndexedDB unavailable.')),
+      remove: vi.fn().mockRejectedValue(new Error('IndexedDB unavailable.')),
+      save: vi.fn().mockRejectedValue(new Error('Quota exceeded.')),
+    })
+    const readComments = vi.fn().mockReturnValue(COMMENT_PAGE)
+    const run = reader({
+      readComments,
+      snapshot: projection('complete'),
+    })
+    const openProjection = vi.fn().mockResolvedValue(run)
+    const selectedScope = scope(target(7n))
+    const { result } = renderHook(() =>
+      usePostCommentReadModel(connectedSession(provider), [target(7n)], {
+        openProjection,
+        resumeStore: store,
+        synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronizePosts: postSynchronizer(target(7n)),
+      }),
+    )
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('complete'))
+
+    expect(openProjection).toHaveBeenCalledWith(ANCHOR, [7n], undefined)
+    expect(store.remove).toHaveBeenCalledWith(1n, selectedScope)
+    expect(store.save).toHaveBeenCalledWith(1n, selectedScope, RESUME)
+    expect(result.current.state).toMatchObject({
+      notice: expect.stringMatching(/could not be saved/i),
+      phase: 'complete',
+      resumeSaved: false,
+      resumed: false,
+    })
+    expect(result.current.readComments(7n)).toBe(COMMENT_PAGE)
+    expect(readComments).toHaveBeenCalledWith(7n, undefined)
+  })
+
+  it('resets deferred cache corruption and bypasses the rejected resume', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const resetCache = vi.fn().mockResolvedValue(undefined)
+    const store = resumeStore({
+      load: vi.fn().mockResolvedValue(RESUME),
+      remove: vi.fn().mockRejectedValue(new Error('Resume store unavailable.')),
+    })
+    const corruptedRun = reader({
+      advance: vi
+        .fn()
+        .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+      snapshot: projection('comments', 123n),
+    })
+    const nextRun = reader()
+    const openProjection = vi
+      .fn()
+      .mockResolvedValueOnce(corruptedRun)
+      .mockResolvedValueOnce(nextRun)
+    const synchronize = vi.fn().mockResolvedValue(stream(ANCHOR))
+    const synchronizePosts = postSynchronizer(target(7n))
+    const selectedScope = scope(target(7n))
+    const { result } = renderHook(() =>
+      usePostCommentReadModel(connectedSession(provider), [target(7n)], {
+        openProjection,
+        resetCache,
+        resumeStore: store,
+        synchronize,
+        synchronizePosts,
+      }),
+    )
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+
+    act(() => result.current.advanceProjection())
+    await waitFor(() => expect(result.current.state.phase).toBe('failed'))
+
+    expect(resetCache).toHaveBeenCalledWith(1n, 123n)
+    expect(store.remove).toHaveBeenCalledWith(1n, selectedScope)
+    expect(result.current.state).toMatchObject({
+      message: expect.stringMatching(/corrupt local comment cache was reset/i),
+      phase: 'failed',
+      retryable: true,
+    })
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+    expect(synchronize).toHaveBeenCalledTimes(2)
+    expect(synchronizePosts).toHaveBeenCalledTimes(2)
+    expect(openProjection).toHaveBeenNthCalledWith(2, ANCHOR, [7n], undefined)
+    expect(store.load).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not offer a futile retry when bounded corruption cleanup fails', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const run = reader({
+      advance: vi
+        .fn()
+        .mockRejectedValue(new DeferredEventCacheCorruptionError()),
+    })
+    const { result } = renderHook(() =>
+      usePostCommentReadModel(connectedSession(provider), [target(7n)], {
+        openProjection: vi.fn().mockResolvedValue(run),
+        resetCache: vi
+          .fn()
+          .mockRejectedValue(new Error('Repair limit exceeded.')),
+        resumeStore: resumeStore(),
+        synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+        synchronizePosts: postSynchronizer(target(7n)),
+      }),
+    )
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(result.current.state.phase).toBe('projecting'))
+
+    act(() => result.current.advanceProjection())
+    await waitFor(() => expect(result.current.state.phase).toBe('failed'))
+
+    expect(result.current.state).toMatchObject({
+      message: expect.stringMatching(/clear this site’s browser data/i),
+      phase: 'failed',
+      retryable: false,
+    })
   })
 
   it('surfaces synchronization and projection failures for explicit retry', async () => {
@@ -251,6 +461,7 @@ describe('usePostCommentReadModel', () => {
     const { result } = renderHook(() =>
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection: vi.fn().mockResolvedValue(run),
+        resumeStore: resumeStore(),
         synchronize,
         synchronizePosts: postSynchronizer(target(7n)),
       }),
@@ -280,6 +491,7 @@ describe('usePostCommentReadModel', () => {
     const { result } = renderHook(() =>
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection: vi.fn().mockResolvedValue(run),
+        resumeStore: resumeStore(),
         synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
         synchronizePosts: postSynchronizer(target(7n)),
       }),
@@ -303,12 +515,13 @@ describe('usePostCommentReadModel', () => {
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise)
     const openProjection = vi.fn()
+    const store = resumeStore()
     const { rerender, result } = renderHook(
       ({ chainId, postId }) =>
         usePostCommentReadModel(
           connectedSession(provider, chainId),
           [target(postId)],
-          { openProjection, synchronize },
+          { openProjection, resumeStore: store, synchronize },
         ),
       { initialProps: { chainId: 1n, postId: 7n } },
     )
@@ -334,9 +547,11 @@ describe('usePostCommentReadModel', () => {
   it('refuses to publish comments beneath a post replaced on the authenticated feed', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
     const openProjection = vi.fn()
+    const store = resumeStore()
     const { result } = renderHook(() =>
       usePostCommentReadModel(connectedSession(provider), [target(7n)], {
         openProjection,
+        resumeStore: store,
         synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
         synchronizePosts: postSynchronizer(target(7n, REPLACEMENT_BLOCK_HASH)),
       }),
@@ -356,10 +571,12 @@ describe('usePostCommentReadModel', () => {
     const pendingFeed = deferred<PostFeedSnapshot>()
     const synchronizePosts = vi.fn().mockReturnValue(pendingFeed.promise)
     const openProjection = vi.fn()
+    const store = resumeStore()
     const { rerender, result } = renderHook(
       ({ postId }) =>
         usePostCommentReadModel(connectedSession(provider), [target(postId)], {
           openProjection,
+          resumeStore: store,
           synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
           synchronizePosts,
         }),
@@ -376,11 +593,13 @@ describe('usePostCommentReadModel', () => {
     expect(openProjection).not.toHaveBeenCalled()
   })
 
-  it('closes a late run when the canonical event for the same post ID changes', async () => {
+  it('ignores a late resume read after the canonical post event changes', async () => {
     const provider = { request: vi.fn() } as Eip1193Provider
-    const pendingOpen = deferred<PostCommentProjectionReader>()
-    const openProjection = vi.fn().mockReturnValue(pendingOpen.promise)
-    const run = reader()
+    const pendingLoad = deferred<PostCommentProjectionResumeState | undefined>()
+    const store = resumeStore({
+      load: vi.fn().mockReturnValue(pendingLoad.promise),
+    })
+    const openProjection = vi.fn()
     const { rerender, result } = renderHook(
       ({ replaced }) =>
         usePostCommentReadModel(
@@ -388,6 +607,70 @@ describe('usePostCommentReadModel', () => {
           [target(7n, replaced ? REPLACEMENT_BLOCK_HASH : BLOCK_HASH)],
           {
             openProjection,
+            resumeStore: store,
+            synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+            synchronizePosts: postSynchronizer(target(7n)),
+          },
+        ),
+      { initialProps: { replaced: false } },
+    )
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(store.load).toHaveBeenCalledTimes(1))
+    rerender({ replaced: true })
+    await act(async () => pendingLoad.resolve(RESUME))
+
+    expect(result.current.state).toEqual({ phase: 'idle' })
+    expect(openProjection).not.toHaveBeenCalled()
+  })
+
+  it('does not publish a completed run after its exact-scope save becomes stale', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const pendingSave = deferred<void>()
+    const store = resumeStore({
+      save: vi.fn().mockReturnValue(pendingSave.promise),
+    })
+    const run = reader({ snapshot: projection('complete') })
+    const { rerender, result } = renderHook(
+      ({ replaced }) =>
+        usePostCommentReadModel(
+          connectedSession(provider),
+          [target(7n, replaced ? REPLACEMENT_BLOCK_HASH : BLOCK_HASH)],
+          {
+            openProjection: vi.fn().mockResolvedValue(run),
+            resumeStore: store,
+            synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
+            synchronizePosts: postSynchronizer(target(7n)),
+          },
+        ),
+      { initialProps: { replaced: false } },
+    )
+
+    act(() => result.current.loadNextRange())
+    await waitFor(() => expect(store.save).toHaveBeenCalledTimes(1))
+    rerender({ replaced: true })
+    await waitFor(() => expect(result.current.state).toEqual({ phase: 'idle' }))
+    await act(async () => pendingSave.resolve())
+
+    expect(result.current.state).toEqual({ phase: 'idle' })
+    expect(result.current.readComments(7n)).toBeUndefined()
+    expect(run.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes a late run when the canonical event for the same post ID changes', async () => {
+    const provider = { request: vi.fn() } as Eip1193Provider
+    const pendingOpen = deferred<PostCommentProjectionReader>()
+    const openProjection = vi.fn().mockReturnValue(pendingOpen.promise)
+    const run = reader()
+    const store = resumeStore()
+    const { rerender, result } = renderHook(
+      ({ replaced }) =>
+        usePostCommentReadModel(
+          connectedSession(provider),
+          [target(7n, replaced ? REPLACEMENT_BLOCK_HASH : BLOCK_HASH)],
+          {
+            openProjection,
+            resumeStore: store,
             synchronize: vi.fn().mockResolvedValue(stream(ANCHOR)),
             synchronizePosts: postSynchronizer(target(7n)),
           },
@@ -416,12 +699,18 @@ describe('usePostCommentReadModel', () => {
       .fn()
       .mockResolvedValueOnce(feedSnapshot([target(7n)]))
       .mockResolvedValueOnce(feedSnapshot([target(8n)]))
+    const store = resumeStore()
     const { rerender, result } = renderHook(
       ({ chainId, postId }) =>
         usePostCommentReadModel(
           connectedSession(provider, chainId),
           [target(postId)],
-          { openProjection, synchronize, synchronizePosts },
+          {
+            openProjection,
+            resumeStore: store,
+            synchronize,
+            synchronizePosts,
+          },
         ),
       { initialProps: { chainId: 1n, postId: 7n } },
     )

@@ -15,10 +15,11 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
-import { BrowserEventCache } from './event-cache'
-import type { IndexedEventLog } from './event-indexer'
+import { BrowserEventCache, openEventCache } from './event-cache'
+import { createEventCursor, type IndexedEventLog } from './event-indexer'
 import { openPostCommentProjectionRun } from './post-comment-projection-run'
 import {
+  resetPostCommentStreamCache,
   synchronizePostCommentStream,
   type PostCommentStreamStorageOptions,
 } from './post-comment-stream'
@@ -85,6 +86,16 @@ function cachedPost(): IndexedEventLog {
   }
 }
 
+function cachedComment(blockNumber: bigint): IndexedEventLog {
+  const comment = rawComment(blockNumber, 1n, 7n, 'Cached public comment.')
+  return {
+    ...comment,
+    blockNumber,
+    logIndex: 0,
+    transactionIndex: 0,
+  } as IndexedEventLog
+}
+
 function storage(factory = new IDBFactory()): PostCommentStreamStorageOptions {
   return {
     databaseName: `post-comments-${crypto.randomUUID()}`,
@@ -114,6 +125,57 @@ afterEach(() => {
 })
 
 describe('post comment stream synchronization', () => {
+  it('clears the comment scope for a bounded projection-corruption repair', async () => {
+    const cacheStorage = storage()
+    const startBlock = 123n
+    const seed = createEventCursor({
+      chainId: 1n,
+      filter: PUBLISHED_COMMENT_FILTER,
+      finalityDepth: 12n,
+      startBlock,
+    })
+    const cache = await openEventCache({
+      ...cacheStorage,
+      filter: PUBLISHED_COMMENT_FILTER,
+    })
+    try {
+      const cursor = {
+        ...seed,
+        checkpoints: [
+          { blockHash: blockHash(startBlock), blockNumber: startBlock },
+        ],
+        nextBlock: startBlock + 1n,
+      }
+      await cache.apply(await cache.readLatest(seed), {
+        caughtUp: true,
+        cursor,
+        head: startBlock + 12n,
+        logs: [cachedComment(startBlock)],
+        safeHead: startBlock,
+        scannedRanges: 1,
+      })
+    } finally {
+      cache.close()
+    }
+
+    await resetPostCommentStreamCache(1n, cacheStorage, startBlock)
+
+    const reopened = await openEventCache({
+      ...cacheStorage,
+      filter: PUBLISHED_COMMENT_FILTER,
+    })
+    try {
+      await expect(reopened.readLatest(seed)).resolves.toMatchObject({
+        cursor: seed,
+        logs: [],
+        reset: false,
+        revision: 2n,
+      })
+    } finally {
+      reopened.close()
+    }
+  })
+
   it('resumes one global stream through exactly one bounded range per call', async () => {
     const logQueries: Array<{
       address: Address

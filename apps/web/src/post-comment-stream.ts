@@ -72,6 +72,11 @@ export type PostCommentStreamSynchronizer = (
   options?: SynchronizePostCommentStreamOptions,
 ) => Promise<PostCommentStreamSnapshot>
 
+export type PostCommentStreamCacheResetter = (
+  chainId: bigint,
+  startBlock: bigint,
+) => Promise<void>
+
 type IssuedPostCommentProjectionAnchor = {
   chainId: bigint
   checkpoint?: EventCheckpoint
@@ -342,6 +347,28 @@ function sameCursor(first: EventCursor, second: EventCursor) {
         checkpoint.blockNumber === second.checkpoints[index]?.blockNumber,
     )
   )
+}
+
+export async function resetPostCommentStreamCache(
+  chainId: bigint,
+  storage: PostCommentStreamStorageOptions = {},
+  startBlock = POST_COMMENT_EVENT_START_BLOCK,
+) {
+  const seed = createEventCursor({
+    chainId,
+    filter: PUBLISHED_COMMENT_FILTER,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock,
+  })
+  const cache = await openEventCache({
+    ...storage,
+    filter: PUBLISHED_COMMENT_FILTER,
+  })
+  try {
+    await cache.clear(seed)
+  } finally {
+    cache.close()
+  }
 }
 
 export const synchronizePostCommentStream: PostCommentStreamSynchronizer =

@@ -11,7 +11,11 @@ import type { Hex } from 'viem'
 import type { Eip1193Provider } from './ethereum'
 import { parseMediaCid } from './media-cid'
 import type { PostCommentProjectionReader } from './post-comment-read-model'
-import type { PostCommentProjectionRunSnapshot } from './post-comment-projection-run'
+import type {
+  PostCommentProjectionResumeState,
+  PostCommentProjectionRunSnapshot,
+} from './post-comment-projection-run'
+import type { PostCommentResumeStore } from './post-comment-resume-store'
 import type {
   PostCommentProjectionAnchor,
   PostCommentStreamSnapshot,
@@ -48,15 +52,24 @@ const COMMENT_ANCHOR = {
   chainId: 1n,
   safeHead: 18n,
 } as PostCommentProjectionAnchor
+const COMMENT_RESUME = {
+  marker: 'comment-resume',
+} as unknown as PostCommentProjectionResumeState
 const REACTION_ANCHOR = { chainId: 1n } as PostReactionProjectionAnchor
 const REACTION_RESUME = {
   marker: 'reaction-resume',
 } as unknown as PostReactionProjectionResumeState
 
+function postBlockHash(postId: bigint): PublishedPost['blockHash'] {
+  return postId === 1n
+    ? BLOCK_HASH
+    : (`0x${postId.toString(16).padStart(64, '0')}` as const)
+}
+
 function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
   return {
     author: ACCOUNT,
-    blockHash: BLOCK_HASH,
+    blockHash: postBlockHash(postId),
     blockNumber: postId + 10n,
     body,
     logIndex: Number(postId),
@@ -543,6 +556,7 @@ describe('PostFeedPanel', () => {
         .mockResolvedValueOnce(commentProjection('complete')),
       close: vi.fn(),
       readComments,
+      resumeState: COMMENT_RESUME,
       snapshot: commentProjection('comments'),
       trackedPostIds: [1n, 2n],
     } satisfies PostCommentProjectionReader
@@ -550,6 +564,7 @@ describe('PostFeedPanel', () => {
       advance: vi.fn(),
       close: vi.fn(),
       readComments,
+      resumeState: COMMENT_RESUME,
       snapshot: commentProjection('complete'),
       trackedPostIds: [1n, 2n],
     } satisfies PostCommentProjectionReader
@@ -562,9 +577,15 @@ describe('PostFeedPanel', () => {
       .fn()
       .mockResolvedValueOnce(run)
       .mockResolvedValueOnce(refreshedRun)
+    const commentResumeStore = {
+      load: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+      save: vi.fn().mockResolvedValue(undefined),
+    } satisfies PostCommentResumeStore
 
     render(
       <PostFeedPanel
+        commentResumeStore={commentResumeStore}
         openCommentProjection={openCommentProjection}
         session={connectedSession(provider)}
         synchronize={vi
@@ -600,7 +621,11 @@ describe('PostFeedPanel', () => {
       }),
     ).toBeTruthy()
     expect(synchronizePostComments).toHaveBeenCalledTimes(2)
-    expect(openCommentProjection).toHaveBeenCalledWith(COMMENT_ANCHOR, [1n, 2n])
+    expect(openCommentProjection).toHaveBeenCalledWith(
+      COMMENT_ANCHOR,
+      [1n, 2n],
+      undefined,
+    )
     expect(run.advance).not.toHaveBeenCalled()
 
     for (let step = 1; step <= 2; step += 1) {
@@ -622,6 +647,11 @@ describe('PostFeedPanel', () => {
         name: /check for newer comments/i,
       }),
     ).toBeTruthy()
+    expect(commentResumeStore.save).toHaveBeenCalledWith(
+      1n,
+      expect.any(String),
+      COMMENT_RESUME,
+    )
     expect(
       screen.getByText(
         /comment histories are exact from block 0 through confirmed block 18/i,
@@ -666,7 +696,7 @@ describe('PostFeedPanel', () => {
       expect(firstPostCalls.at(-1)?.[1]).toEqual({ limit: 10, offset: 0 })
     })
     expect(screen.getByText('Public comment 1.')).toBeTruthy()
-    expect(run.close).toHaveBeenCalledTimes(1)
+    expect(run.close).toHaveBeenCalledTimes(2)
   })
 
   it('explains when comment history starts after the confirmed head', async () => {

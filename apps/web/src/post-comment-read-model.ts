@@ -1,17 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
+import { isDeferredEventCacheCorruptionError } from './event-cache'
 import type {
   PostCommentProjectionReadOptions,
   PostCommentProjectionReadPage,
 } from './post-comment-projection'
 import {
   openPostCommentProjectionRun,
+  type PostCommentProjectionResumeState,
   type PostCommentProjectionRun,
   type PostCommentProjectionRunSnapshot,
 } from './post-comment-projection-run'
 import {
+  createPostCommentResumeStore,
+  getPostCommentResumeScope,
+  type PostCommentResumeStore,
+} from './post-comment-resume-store'
+import {
+  resetPostCommentStreamCache,
   synchronizePostCommentStream,
   type PostCommentProjectionAnchor,
+  type PostCommentStreamCacheResetter,
   type PostCommentStreamSnapshot,
   type PostCommentStreamSynchronizer,
 } from './post-comment-stream'
@@ -25,12 +34,18 @@ import type { WalletSession } from './wallet-session'
 
 export type PostCommentProjectionReader = Pick<
   PostCommentProjectionRun,
-  'advance' | 'close' | 'readComments' | 'snapshot' | 'trackedPostIds'
+  | 'advance'
+  | 'close'
+  | 'readComments'
+  | 'resumeState'
+  | 'snapshot'
+  | 'trackedPostIds'
 >
 
 export type PostCommentProjectionOpener = (
   anchor: PostCommentProjectionAnchor,
   postIds: readonly bigint[],
+  resume?: PostCommentProjectionResumeState,
 ) => Promise<PostCommentProjectionReader>
 
 export type PostCommentReadModelState =
@@ -39,14 +54,19 @@ export type PostCommentReadModelState =
   | { phase: 'catchup'; stream: PostCommentStreamSnapshot }
   | {
       busy: boolean
+      notice?: string
       phase: 'projecting'
       projection: PostCommentProjectionRunSnapshot
+      resumed: boolean
     }
   | {
+      notice?: string
       phase: 'complete'
       projection: PostCommentProjectionRunSnapshot
+      resumeSaved: boolean
+      resumed: boolean
     }
-  | { message: string; phase: 'failed' }
+  | { message: string; phase: 'failed'; retryable: boolean }
 
 type ScopedReadModelState = {
   chainId: bigint
@@ -55,8 +75,16 @@ type ScopedReadModelState = {
   state: PostCommentReadModelState
 }
 
+type ActiveProjection = {
+  notice?: string
+  resumed: boolean
+  run: PostCommentProjectionReader
+}
+
 export type UsePostCommentReadModelOptions = {
   openProjection?: PostCommentProjectionOpener
+  resetCache?: PostCommentStreamCacheResetter
+  resumeStore?: PostCommentResumeStore
   synchronize?: PostCommentStreamSynchronizer
   synchronizePosts?: PostFeedSynchronizer
 }
@@ -67,15 +95,21 @@ export type PostCommentReadTarget = Pick<
 >
 
 const IDLE_STATE = { phase: 'idle' } as const
+const defaultResumeStore = createPostCommentResumeStore()
+
+const defaultProjectionOpener: PostCommentProjectionOpener = (
+  anchor,
+  postIds,
+  resume,
+) => openPostCommentProjectionRun(anchor, postIds, { resume })
+
+const defaultCacheResetter: PostCommentStreamCacheResetter = (
+  chainId,
+  startBlock,
+) => resetPostCommentStreamCache(chainId, {}, startBlock)
 
 function getPostScope(posts: readonly PostCommentReadTarget[]) {
-  return posts
-    .map(
-      (post) =>
-        `${post.postId.toString(16)},${post.blockNumber.toString(16)},${post.blockHash.toLowerCase()},${post.logIndex.toString(16)}`,
-    )
-    .toSorted()
-    .join(';')
+  return posts.length === 0 ? '' : getPostCommentResumeScope(posts)
 }
 
 function getScopedPosts(postScope: string): PostCommentReadTarget[] {
@@ -126,12 +160,17 @@ function assertAuthenticatedPostScope(
 
 function stateForProjection(
   projection: PostCommentProjectionRunSnapshot,
+  resumed: boolean,
+  notice?: string,
 ): PostCommentReadModelState {
-  if (projection.phase === 'complete') {
-    return { phase: 'complete', projection }
-  }
   if (projection.phase === 'comments' || projection.phase === 'authenticate') {
-    return { busy: false, phase: 'projecting', projection }
+    return {
+      busy: false,
+      notice,
+      phase: 'projecting',
+      projection,
+      resumed,
+    }
   }
   throw new Error('The local comment projection became unavailable.')
 }
@@ -140,15 +179,18 @@ export function usePostCommentReadModel(
   session: WalletSession,
   posts: readonly PostCommentReadTarget[],
   {
-    openProjection = openPostCommentProjectionRun,
+    openProjection = defaultProjectionOpener,
+    resetCache = defaultCacheResetter,
+    resumeStore = defaultResumeStore,
     synchronize = synchronizePostCommentStream,
     synchronizePosts = synchronizePostFeed,
   }: UsePostCommentReadModelOptions = {},
 ) {
   const [scopedState, setScopedState] = useState<ScopedReadModelState>()
   const activeController = useRef<AbortController | undefined>(undefined)
-  const activeRun = useRef<PostCommentProjectionReader | undefined>(undefined)
+  const activeProjection = useRef<ActiveProjection | undefined>(undefined)
   const busy = useRef(false)
+  const ignoreSavedResume = useRef(false)
   const requestSequence = useRef(0)
   const connected =
     session.status === 'connected' &&
@@ -171,19 +213,65 @@ export function usePostCommentReadModel(
     requestSequence.current += 1
     activeController.current?.abort()
     activeController.current = undefined
-    activeRun.current?.close()
-    activeRun.current = undefined
+    activeProjection.current?.run.close()
+    activeProjection.current = undefined
     busy.current = false
+    ignoreSavedResume.current = false
     setScopedState(undefined)
     return () => {
       requestSequence.current += 1
       activeController.current?.abort()
       activeController.current = undefined
-      activeRun.current?.close()
-      activeRun.current = undefined
+      activeProjection.current?.run.close()
+      activeProjection.current = undefined
       busy.current = false
+      ignoreSavedResume.current = false
     }
   }, [chainId, connected, postScope, provider])
+
+  const publishCompletedRun = useCallback(
+    async (
+      active: ActiveProjection,
+      projection: PostCommentProjectionRunSnapshot,
+      context: {
+        chainId: bigint
+        postScope: string
+        provider: Eip1193Provider
+        requestId: number
+      },
+    ) => {
+      const { chainId, postScope, provider, requestId } = context
+      const resume = active.run.resumeState
+      let notice = active.notice
+      let resumeSaved = true
+      try {
+        await resumeStore.save(chainId, postScope, resume)
+      } catch {
+        resumeSaved = false
+        notice =
+          'Confirmed comment histories are available, but resumable local progress could not be saved.'
+      }
+      if (requestSequence.current !== requestId) return
+      if (resumeSaved) ignoreSavedResume.current = false
+      // A completed run keeps its immutable projection after close, so retain
+      // it for bounded pagination while releasing the IndexedDB connection.
+      active.run.close()
+      activeProjection.current = active
+      setScopedState({
+        chainId,
+        postScope,
+        provider,
+        state: {
+          notice,
+          phase: 'complete',
+          projection,
+          resumeSaved,
+          resumed: active.resumed,
+        },
+      })
+    },
+    [resumeStore],
+  )
 
   const loadNextRange = useCallback(() => {
     if (
@@ -199,8 +287,8 @@ export function usePostCommentReadModel(
     activeController.current?.abort()
     const controller = new AbortController()
     activeController.current = controller
-    activeRun.current?.close()
-    activeRun.current = undefined
+    activeProjection.current?.run.close()
+    activeProjection.current = undefined
     setScopedState({
       chainId,
       postScope,
@@ -236,10 +324,57 @@ export function usePostCommentReadModel(
           scopedPosts,
           authenticatedFeed,
         )
-        openedRun = await openProjection(
-          stream.projectionAnchor,
-          scopedPosts.map((post) => post.postId),
-        )
+        const postIds = scopedPosts.map((post) => post.postId)
+        let notice: string | undefined
+        let resume: PostCommentProjectionResumeState | undefined
+        let resumeReadFailed = false
+        if (ignoreSavedResume.current) {
+          notice =
+            'Previously rejected comment progress is being bypassed while the canonical projection is rebuilt.'
+        } else {
+          try {
+            resume = await resumeStore.load(chainId, postScope)
+          } catch {
+            resumeReadFailed = true
+            notice =
+              'Saved comment progress was unreadable and will not be trusted. Rebuilding from canonical events.'
+            try {
+              await resumeStore.remove(chainId, postScope)
+            } catch {
+              // A disposable acceleration cache may be unavailable. A fresh
+              // projection remains correct without it.
+            }
+          }
+        }
+        if (controller.signal.aborted || requestSequence.current !== requestId)
+          return
+        if (resumeReadFailed) ignoreSavedResume.current = true
+        let resumed = resume !== undefined
+        try {
+          openedRun = await openProjection(
+            stream.projectionAnchor,
+            postIds,
+            resume,
+          )
+        } catch (error) {
+          if (!resume) throw error
+          ignoreSavedResume.current = true
+          notice =
+            'Saved comment progress no longer matched the authenticated event cache. It was discarded and rebuilt.'
+          try {
+            await resumeStore.remove(chainId, postScope)
+          } catch {
+            // The invalid tuple has already been rejected by the projection.
+          }
+          if (
+            controller.signal.aborted ||
+            requestSequence.current !== requestId
+          ) {
+            return
+          }
+          resumed = false
+          openedRun = await openProjection(stream.projectionAnchor, postIds)
+        }
         if (
           controller.signal.aborted ||
           requestSequence.current !== requestId
@@ -248,19 +383,30 @@ export function usePostCommentReadModel(
           openedRun = undefined
           return
         }
-        const projectionState = stateForProjection(openedRun.snapshot)
-        activeRun.current = openedRun
-        setScopedState({
-          chainId,
-          postScope,
-          provider,
-          state: projectionState,
-        })
+        const active = { notice, resumed, run: openedRun }
+        activeProjection.current = active
         openedRun = undefined
+        if (active.run.snapshot.phase === 'complete') {
+          await publishCompletedRun(active, active.run.snapshot, {
+            chainId,
+            postScope,
+            provider,
+            requestId,
+          })
+        } else {
+          setScopedState({
+            chainId,
+            postScope,
+            provider,
+            state: stateForProjection(active.run.snapshot, resumed, notice),
+          })
+        }
       } catch (error) {
         openedRun?.close()
         if (controller.signal.aborted || requestSequence.current !== requestId)
           return
+        activeProjection.current?.run.close()
+        activeProjection.current = undefined
         setScopedState({
           chainId,
           postScope,
@@ -271,6 +417,7 @@ export function usePostCommentReadModel(
               'The public comment history could not be synchronized.',
             ),
             phase: 'failed',
+            retryable: true,
           },
         })
       } finally {
@@ -285,7 +432,9 @@ export function usePostCommentReadModel(
     openProjection,
     postScope,
     provider,
+    publishCompletedRun,
     readable,
+    resumeStore,
     synchronize,
     synchronizePosts,
   ])
@@ -300,8 +449,8 @@ export function usePostCommentReadModel(
     ) {
       return
     }
-    const run = activeRun.current
-    if (!run) return
+    const active = activeProjection.current
+    if (!active) return
     busy.current = true
     const requestId = ++requestSequence.current
     setScopedState({
@@ -310,38 +459,82 @@ export function usePostCommentReadModel(
       provider,
       state: { ...state, busy: true },
     })
-    void run
+    void active.run
       .advance()
-      .then((projection) => {
+      .then(async (projection) => {
         if (requestSequence.current !== requestId) return
+        if (projection.phase === 'complete') {
+          await publishCompletedRun(active, projection, {
+            chainId,
+            postScope,
+            provider,
+            requestId,
+          })
+          return
+        }
         setScopedState({
           chainId,
           postScope,
           provider,
-          state: stateForProjection(projection),
+          state: stateForProjection(projection, active.resumed, active.notice),
         })
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (requestSequence.current !== requestId) return
-        run.close()
-        activeRun.current = undefined
+        const startBlock = active.run.snapshot.startBlock
+        active.run.close()
+        activeProjection.current = undefined
+        let message = describeRpcError(
+          error,
+          'The local comment projection could not be completed.',
+        )
+        let retryable = true
+        if (isDeferredEventCacheCorruptionError(error)) {
+          try {
+            await resetCache(chainId, startBlock)
+            if (requestSequence.current !== requestId) return
+            ignoreSavedResume.current = true
+            try {
+              await resumeStore.remove(chainId, postScope)
+            } catch {
+              // A stale resume is independently rejected on the next open.
+            }
+            message =
+              'The corrupt local comment cache was reset. Retry to rebuild it from confirmed chain events.'
+          } catch (resetError) {
+            const detail = describeRpcError(
+              resetError,
+              'The corrupt local comment cache could not be reset.',
+            )
+            message = `${detail} Clear this site’s browser data and reload.`
+            retryable = false
+          }
+        }
+        if (requestSequence.current !== requestId) return
         setScopedState({
           chainId,
           postScope,
           provider,
           state: {
-            message: describeRpcError(
-              error,
-              'The local comment projection could not be completed.',
-            ),
+            message,
             phase: 'failed',
+            retryable,
           },
         })
       })
       .finally(() => {
         if (requestSequence.current === requestId) busy.current = false
       })
-  }, [chainId, postScope, provider, readable, state])
+  }, [
+    chainId,
+    postScope,
+    provider,
+    publishCompletedRun,
+    readable,
+    resetCache,
+    resumeStore,
+    state,
+  ])
 
   const readComments = useCallback(
     (
@@ -349,7 +542,7 @@ export function usePostCommentReadModel(
       options?: PostCommentProjectionReadOptions,
     ): PostCommentProjectionReadPage | undefined => {
       if (!readable || state.phase !== 'complete') return undefined
-      return activeRun.current?.readComments(postId, options)
+      return activeProjection.current?.run.readComments(postId, options)
     },
     [readable, state.phase],
   )
