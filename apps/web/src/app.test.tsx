@@ -274,6 +274,7 @@ describe('App', () => {
     const recoveryJournal: FilecoinStorageRecoveryJournalReader = {
       list: vi.fn(async () => [record]),
       removeIfUnchanged: vi.fn(async () => true),
+      subscribe: vi.fn(() => () => undefined),
     }
 
     render(
@@ -787,6 +788,7 @@ describe('App', () => {
     )
     const textarea = await screen.findByLabelText(/permanent public statement/i)
     fireEvent.change(textarea, { target: { value: 'Submitted on chain A.' } })
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
     await waitFor(() => expect(publishPostAction).toHaveBeenCalledTimes(1))
 

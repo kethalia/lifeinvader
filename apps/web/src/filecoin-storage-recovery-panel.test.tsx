@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -29,6 +30,7 @@ const HASH_A = `0x${'12'.repeat(32)}` as Hash
 const HASH_B = `0x${'23'.repeat(32)}` as Hash
 const BLOCK_HASH = `0x${'34'.repeat(32)}` as Hash
 const UPLOAD_ID = `0x${'45'.repeat(32)}` as Hex
+const OTHER_UPLOAD_ID = `0x${'56'.repeat(32)}` as Hex
 const PIECE_BYTES = `0x${'01'.repeat(32)}` as Hex
 const MEDIA_CID = 'bafkreiciqd2dbfh6pw7j4t2hgvbafrboumt5lmqiqixkj4jlhmjrmszugm'
 const provider: Eip1193Provider = {
@@ -62,13 +64,22 @@ const receipt: TransactionReceipt = {
 
 function recoveryRecord(
   transactionHashes: readonly Hash[] = [],
+  savedCheckpoint = checkpoint,
 ): FilecoinStorageRecoveryRecord {
   return Object.freeze({
-    checkpoint,
+    checkpoint: savedCheckpoint,
     createdAtMs: Date.parse('2026-09-05T00:00:00.000Z'),
     transactionHashes: Object.freeze([...transactionHashes]),
     updatedAtMs: Date.parse('2026-09-05T00:01:00.000Z'),
   })
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next) => {
+    resolve = next
+  })
+  return { promise, resolve }
 }
 
 function recoveryJournal(
@@ -77,6 +88,7 @@ function recoveryJournal(
   return {
     list: vi.fn(async () => records),
     removeIfUnchanged: vi.fn(async () => true),
+    subscribe: vi.fn(() => () => undefined),
   }
 }
 
@@ -131,6 +143,76 @@ describe('FilecoinStorageRecoveryPanel', () => {
       screen.queryByRole('heading', { name: /saved Filecoin/i }),
     ).toBeNull()
     expect(onWriteLockChange).toHaveBeenCalledWith(true)
+  })
+
+  it('invalidates an empty snapshot when another tab changes the journal', async () => {
+    let records: readonly FilecoinStorageRecoveryRecord[] = []
+    let notify: (() => void) | undefined
+    const journal: FilecoinStorageRecoveryJournalReader = {
+      list: vi.fn(async () => records),
+      removeIfUnchanged: vi.fn(async () => true),
+      subscribe: vi.fn((listener) => {
+        notify = listener
+        return () => undefined
+      }),
+    }
+    const onWriteLockChange = vi.fn()
+    renderRecovery({ journal, onWriteLockChange })
+    await waitFor(() =>
+      expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
+    )
+    expect(
+      screen.queryByRole('heading', { name: /saved Filecoin/i }),
+    ).toBeNull()
+
+    records = [recoveryRecord()]
+    act(() => notify?.())
+
+    expect(
+      await screen.findByText(/no transaction hash was returned/i),
+    ).toBeTruthy()
+    expect(journal.list).toHaveBeenCalledTimes(2)
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
+  })
+
+  it('replays a journal invalidation received during a recovery action', async () => {
+    const first = recoveryRecord()
+    const second = recoveryRecord([], {
+      ...checkpoint,
+      uploadId: OTHER_UPLOAD_ID,
+    })
+    let records: readonly FilecoinStorageRecoveryRecord[] = [first]
+    let notify: (() => void) | undefined
+    const removal = deferred<boolean>()
+    const journal: FilecoinStorageRecoveryJournalReader = {
+      list: vi.fn(async () => records),
+      removeIfUnchanged: vi.fn(async () => removal.promise),
+      subscribe: vi.fn((listener) => {
+        notify = listener
+        return () => undefined
+      }),
+    }
+    const onWriteLockChange = vi.fn()
+    renderRecovery({ journal, onWriteLockChange })
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /checked wallet and provider activity.*discard/i,
+      }),
+    )
+    await waitFor(() =>
+      expect(journal.removeIfUnchanged).toHaveBeenCalledOnce(),
+    )
+
+    records = [second]
+    act(() => notify?.())
+    await act(async () => {
+      removal.resolve(true)
+      await removal.promise
+    })
+
+    expect(await screen.findByTitle(OTHER_UPLOAD_ID)).toBeTruthy()
+    expect(journal.list).toHaveBeenCalledTimes(2)
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
   })
 
   it('keeps a no-hash recovery locked until explicit removal succeeds', async () => {
@@ -304,6 +386,52 @@ describe('FilecoinStorageRecoveryPanel', () => {
     expect(
       screen.getByRole('button', { name: /dismiss recovered result/i }),
     ).toBeTruthy()
+  })
+
+  it('does not apply an authenticated outcome to a refreshed replacement hash', async () => {
+    const stale = recoveryRecord([HASH_A])
+    const latest = recoveryRecord([HASH_A, HASH_B])
+    const journal = recoveryJournal([stale])
+    vi.mocked(journal.removeIfUnchanged).mockRejectedValueOnce(
+      new Error('Cleanup was blocked.'),
+    )
+    const checkReceipt = vi.fn<FilecoinStorageUploadReceiptChecker>(
+      async () => ({
+        dataSetId: 29n,
+        kind: 'piece-added',
+        pieceId: 41n,
+        receipt: { ...receipt, hash: HASH_A },
+      }),
+    )
+    const onWriteLockChange = vi.fn()
+    renderRecovery({ checkReceipt, journal, onWriteLockChange })
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /check newest storage receipt/i,
+      }),
+    )
+    expect(await screen.findByText(/Cleanup was blocked/i)).toBeTruthy()
+    expect(
+      screen.getByRole('button', {
+        name: /retry clearing authenticated recovery/i,
+      }),
+    ).toBeTruthy()
+
+    vi.mocked(journal.list).mockResolvedValue([latest])
+    fireEvent.click(
+      screen.getByRole('button', { name: /refresh saved recoveries/i }),
+    )
+
+    expect(await screen.findByTitle(HASH_B)).toBeTruthy()
+    expect(
+      screen.queryByRole('button', {
+        name: /retry clearing authenticated recovery/i,
+      }),
+    ).toBeNull()
+    expect(
+      screen.getByRole('button', { name: /check newest storage receipt/i }),
+    ).toBeTruthy()
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
   })
 
   it('revalidates the wallet session immediately after the receipt check', async () => {

@@ -22,7 +22,7 @@ import type { WalletSession } from './wallet-session'
 
 export type FilecoinStorageRecoveryJournalReader = Pick<
   FilecoinStorageRecoveryJournal,
-  'list' | 'removeIfUnchanged'
+  'list' | 'removeIfUnchanged' | 'subscribe'
 >
 
 const RECOVERY_RECEIPT_POLL_INTERVAL_MS = 3_000
@@ -158,11 +158,20 @@ export function FilecoinStorageRecoveryPanel({
   const loadSequence = useRef(0)
   const actionSequence = useRef(0)
   const actionActive = useRef(false)
+  const journalChangePending = useRef(false)
+  const loadRecoveriesRef = useRef<() => void>(() => undefined)
   const activeController = useRef<AbortController | undefined>(undefined)
   const activeJournal = useRef<
     FilecoinStorageRecoveryJournalReader | undefined
   >(recoveryJournal)
   const latestSession = useRef(session)
+  const journalSubscription = useRef<
+    | {
+        journal: FilecoinStorageRecoveryJournalReader
+        unsubscribe: () => void
+      }
+    | undefined
+  >(undefined)
   const [loadState, setLoadState] = useState<LoadState>({ kind: 'loading' })
   const [action, setAction] = useState<ActionState>()
   const [outcome, setOutcome] = useState<RecoveryOutcome>()
@@ -173,7 +182,9 @@ export function FilecoinStorageRecoveryPanel({
   const outcomeAwaitingCleanup =
     outcome !== undefined &&
     records.some(
-      (record) => record.checkpoint.uploadId === outcome.checkpoint.uploadId,
+      (record) =>
+        record.checkpoint.uploadId === outcome.checkpoint.uploadId &&
+        record.transactionHashes.at(-1) === outcome.hash,
     )
 
   useLayoutEffect(() => {
@@ -181,7 +192,10 @@ export function FilecoinStorageRecoveryPanel({
   }, [session])
 
   const loadRecoveries = useCallback(() => {
-    if (actionActive.current) return
+    if (actionActive.current) {
+      journalChangePending.current = true
+      return
+    }
     const operationId = ++loadSequence.current
     setLoadState({ kind: 'loading' })
     setProblem(undefined)
@@ -194,6 +208,21 @@ export function FilecoinStorageRecoveryPanel({
           (
             await import('./filecoin-storage-recovery-journal')
           ).createFilecoinStorageRecoveryJournal()
+        if (journalSubscription.current?.journal !== journal) {
+          const unsubscribe = journal.subscribe(() => {
+            if (actionActive.current) {
+              journalChangePending.current = true
+              return
+            }
+            loadRecoveriesRef.current()
+          })
+          if (operationId !== loadSequence.current) {
+            unsubscribe()
+            return
+          }
+          journalSubscription.current?.unsubscribe()
+          journalSubscription.current = { journal, unsubscribe }
+        }
         const nextRecords = await journal.list()
         if (operationId !== loadSequence.current) return
         activeJournal.current = journal
@@ -210,6 +239,10 @@ export function FilecoinStorageRecoveryPanel({
       }
     })()
   }, [recoveryJournal])
+
+  useLayoutEffect(() => {
+    loadRecoveriesRef.current = loadRecoveries
+  }, [loadRecoveries])
 
   useEffect(() => {
     activeJournal.current = recoveryJournal
@@ -237,10 +270,23 @@ export function FilecoinStorageRecoveryPanel({
       )
       activeController.current = undefined
       actionActive.current = false
+      journalChangePending.current = false
+      journalSubscription.current?.unsubscribe()
+      journalSubscription.current = undefined
       onWriteLockChange?.(false)
     },
     [onWriteLockChange],
   )
+
+  const finishAction = (operationId: number) => {
+    if (operationId !== actionSequence.current) return
+    actionActive.current = false
+    setAction(undefined)
+    if (journalChangePending.current) {
+      journalChangePending.current = false
+      loadRecoveriesRef.current()
+    }
+  }
 
   const removeRecord = (
     record: FilecoinStorageRecoveryRecord,
@@ -316,10 +362,7 @@ export function FilecoinStorageRecoveryPanel({
           uploadId: record.checkpoint.uploadId,
         })
       } finally {
-        if (operationId === actionSequence.current) {
-          actionActive.current = false
-          setAction(undefined)
-        }
+        finishAction(operationId)
       }
     })()
   }
@@ -422,10 +465,7 @@ export function FilecoinStorageRecoveryPanel({
           uploadId: record.checkpoint.uploadId,
         })
       } finally {
-        if (operationId === actionSequence.current) {
-          actionActive.current = false
-          setAction(undefined)
-        }
+        finishAction(operationId)
         if (activeController.current === controller) {
           activeController.current = undefined
         }
@@ -489,7 +529,8 @@ export function FilecoinStorageRecoveryPanel({
         const recordAction =
           action?.uploadId === checkpoint.uploadId ? action : undefined
         const recordOutcome =
-          outcome?.checkpoint.uploadId === checkpoint.uploadId
+          outcome?.checkpoint.uploadId === checkpoint.uploadId &&
+          outcome.hash === latestHash
             ? outcome
             : undefined
         const recordProblem =

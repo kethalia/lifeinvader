@@ -5,8 +5,12 @@ import {
 } from './filecoin-storage-upload'
 
 const DEFAULT_DATABASE_NAME = 'lifeinvader-filecoin-storage-recovery'
+const RECOVERY_DATABASE_VERSION = 2
 const RECOVERY_SCHEMA_VERSION = 1
 const RECOVERY_STORE = 'recoveries'
+const RECOVERY_TOMBSTONE_STORE = 'discarded-recoveries'
+const RECOVERY_NOTIFICATION_PREFIX = 'lifeinvader:filecoin-storage-recovery:'
+const RECOVERY_NOTIFICATION_MESSAGE = 'journal-changed-v1'
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 const MAX_RECORD_BYTES = 8_192
 const HASH_CAPACITY_SENTINELS = [
@@ -35,11 +39,18 @@ export type FilecoinStorageRecoveryJournal = {
   stage(
     checkpoint: FilecoinStorageUploadCheckpoint,
   ): Promise<FilecoinStorageRecoveryRecord>
+  subscribe(listener: () => void): () => void
+}
+
+export type FilecoinStorageRecoveryNotifications = {
+  publish(databaseName: string): void
+  subscribe(databaseName: string, listener: () => void): () => void
 }
 
 export type FilecoinStorageRecoveryJournalOptions = {
   databaseName?: string
   factory?: IDBFactory
+  notifications?: FilecoinStorageRecoveryNotifications
   now?: () => number
 }
 
@@ -77,6 +88,18 @@ type StoredRecoveryEnvelope = {
   schemaVersion: typeof RECOVERY_SCHEMA_VERSION
   uploadId: Hex
 }
+
+type StoredRecoveryTombstone = {
+  schemaVersion: typeof RECOVERY_SCHEMA_VERSION
+  uploadId: Hex
+}
+
+type NativeNotificationHub = {
+  channel: BroadcastChannel
+  listeners: Set<() => void>
+}
+
+const nativeNotificationHubs = new Map<string, NativeNotificationHub>()
 
 export class FilecoinStorageRecoveryJournalError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -380,6 +403,25 @@ function decodeEnvelope(value: unknown, expectedUploadId?: Hex) {
   return decodeRecord(value.raw, uploadId)
 }
 
+function encodeTombstone(uploadId: Hex): StoredRecoveryTombstone {
+  return { schemaVersion: RECOVERY_SCHEMA_VERSION, uploadId }
+}
+
+function decodeTombstone(value: unknown, expectedUploadId: Hex) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['schemaVersion', 'uploadId']) ||
+    value.schemaVersion !== RECOVERY_SCHEMA_VERSION
+  ) {
+    throw journalError('discard marker is invalid')
+  }
+  const uploadId = normalizeUploadId(value.uploadId)
+  if (value.uploadId !== uploadId || uploadId !== expectedUploadId) {
+    throw journalError('discard marker key is invalid')
+  }
+  return uploadId
+}
+
 function currentTime(now: () => number) {
   let value: unknown
   try {
@@ -390,15 +432,8 @@ function currentTime(now: () => number) {
   return normalizeTimestamp(value, 'clock value')
 }
 
-function openDatabase(options: FilecoinStorageRecoveryJournalOptions) {
-  let factory: IDBFactory | undefined
-  try {
-    factory = options.factory ?? globalThis.indexedDB
-  } catch (cause) {
-    throw journalError('is unavailable in this browser', cause)
-  }
+function recoveryDatabaseName(options: FilecoinStorageRecoveryJournalOptions) {
   const databaseName = options.databaseName ?? DEFAULT_DATABASE_NAME
-  if (!factory) throw journalError('is unavailable in this browser')
   if (
     typeof databaseName !== 'string' ||
     databaseName.length === 0 ||
@@ -406,10 +441,72 @@ function openDatabase(options: FilecoinStorageRecoveryJournalOptions) {
   ) {
     throw journalError('database name is invalid')
   }
+  return databaseName
+}
+
+function nativeNotificationHub(databaseName: string) {
+  const existing = nativeNotificationHubs.get(databaseName)
+  if (existing) return existing
+  if (typeof globalThis.BroadcastChannel !== 'function') {
+    throw journalError('cross-tab notifications are unavailable')
+  }
+  let channel: BroadcastChannel
+  try {
+    channel = new globalThis.BroadcastChannel(
+      `${RECOVERY_NOTIFICATION_PREFIX}${databaseName}`,
+    )
+  } catch (cause) {
+    throw journalError('cross-tab notifications are unavailable', cause)
+  }
+  const hub = { channel, listeners: new Set<() => void>() }
+  channel.addEventListener('message', (event) => {
+    if (event.data !== RECOVERY_NOTIFICATION_MESSAGE) return
+    for (const listener of [...hub.listeners]) {
+      try {
+        listener()
+      } catch {
+        // One mounted client cannot prevent the others from invalidating.
+      }
+    }
+  })
+  nativeNotificationHubs.set(databaseName, hub)
+  return hub
+}
+
+const nativeNotifications: FilecoinStorageRecoveryNotifications = {
+  publish(databaseName) {
+    const hub = nativeNotificationHub(databaseName)
+    for (const listener of [...hub.listeners]) {
+      try {
+        listener()
+      } catch {
+        // Mutation persistence has already succeeded; notify every listener.
+      }
+    }
+    hub.channel.postMessage(RECOVERY_NOTIFICATION_MESSAGE)
+  },
+  subscribe(databaseName, listener) {
+    const hub = nativeNotificationHub(databaseName)
+    hub.listeners.add(listener)
+    return () => {
+      hub.listeners.delete(listener)
+    }
+  },
+}
+
+function openDatabase(options: FilecoinStorageRecoveryJournalOptions) {
+  let factory: IDBFactory | undefined
+  try {
+    factory = options.factory ?? globalThis.indexedDB
+  } catch (cause) {
+    throw journalError('is unavailable in this browser', cause)
+  }
+  const databaseName = recoveryDatabaseName(options)
+  if (!factory) throw journalError('is unavailable in this browser')
   return new Promise<IDBDatabase>((resolve, reject) => {
     let request: IDBOpenDBRequest
     try {
-      request = factory.open(databaseName, RECOVERY_SCHEMA_VERSION)
+      request = factory.open(databaseName, RECOVERY_DATABASE_VERSION)
     } catch (cause) {
       reject(journalError('could not open', cause))
       return
@@ -426,10 +523,14 @@ function openDatabase(options: FilecoinStorageRecoveryJournalOptions) {
         return
       }
       const database = request.result
-      if (database.objectStoreNames.contains(RECOVERY_STORE)) {
-        database.deleteObjectStore(RECOVERY_STORE)
+      if (!database.objectStoreNames.contains(RECOVERY_STORE)) {
+        database.createObjectStore(RECOVERY_STORE, { keyPath: 'uploadId' })
       }
-      database.createObjectStore(RECOVERY_STORE, { keyPath: 'uploadId' })
+      if (!database.objectStoreNames.contains(RECOVERY_TOMBSTONE_STORE)) {
+        database.createObjectStore(RECOVERY_TOMBSTONE_STORE, {
+          keyPath: 'uploadId',
+        })
+      }
     }
     request.onerror = () => fail(request.error, 'could not open')
     request.onblocked = () => fail(undefined, 'is blocked by another tab')
@@ -507,8 +608,13 @@ function mutateRecord(
   transactionHash?: Hash,
 ) {
   return new Promise<FilecoinStorageRecoveryRecord>((resolve, reject) => {
-    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    const transaction = database.transaction(
+      [RECOVERY_STORE, RECOVERY_TOMBSTONE_STORE],
+      'readwrite',
+    )
     const store = transaction.objectStore(RECOVERY_STORE)
+    const tombstones = transaction.objectStore(RECOVERY_TOMBSTONE_STORE)
+    const tombstoneRequest = tombstones.get(checkpoint.uploadId)
     const getRequest = store.get(checkpoint.uploadId)
     let failure: unknown
     let result: FilecoinStorageRecoveryRecord | undefined
@@ -561,6 +667,10 @@ function mutateRecord(
     }
     getRequest.onsuccess = () => {
       try {
+        if (tombstoneRequest.result !== undefined) {
+          decodeTombstone(tombstoneRequest.result, checkpoint.uploadId)
+          throw journalError('upload ID was explicitly discarded')
+        }
         if (getRequest.result === undefined) {
           checkCapacityAndCreate()
           return
@@ -591,6 +701,14 @@ function mutateRecord(
         fail(error, 'record update failed')
       }
     }
+    tombstoneRequest.onerror = () => {
+      if (failure === undefined) {
+        failure = asJournalError(
+          tombstoneRequest.error,
+          'discard marker read failed',
+        )
+      }
+    }
     getRequest.onerror = () => {
       if (failure === undefined) {
         failure = asJournalError(getRequest.error, 'record read failed')
@@ -612,13 +730,26 @@ function deleteRecords(
   uploadId?: Hex,
 ) {
   return new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    const transaction = database.transaction(
+      mode === 'all'
+        ? [RECOVERY_STORE, RECOVERY_TOMBSTONE_STORE]
+        : RECOVERY_STORE,
+      'readwrite',
+    )
     let failure: unknown
     try {
       const store = transaction.objectStore(RECOVERY_STORE)
-      const request = mode === 'all' ? store.clear() : store.delete(uploadId!)
-      request.onerror = () => {
-        failure = request.error
+      const requests =
+        mode === 'all'
+          ? [
+              store.clear(),
+              transaction.objectStore(RECOVERY_TOMBSTONE_STORE).clear(),
+            ]
+          : [store.delete(uploadId!)]
+      for (const request of requests) {
+        request.onerror = () => {
+          failure = request.error
+        }
       }
     } catch (error) {
       failure = error
@@ -636,8 +767,12 @@ function deleteRecordIfUnchanged(
   expected: FilecoinStorageRecoveryRecord,
 ) {
   return new Promise<boolean>((resolve, reject) => {
-    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    const transaction = database.transaction(
+      [RECOVERY_STORE, RECOVERY_TOMBSTONE_STORE],
+      'readwrite',
+    )
     const store = transaction.objectStore(RECOVERY_STORE)
+    const tombstones = transaction.objectStore(RECOVERY_TOMBSTONE_STORE)
     const getRequest = store.get(expected.checkpoint.uploadId)
     let failure: unknown
     let removed: boolean | undefined
@@ -649,10 +784,21 @@ function deleteRecordIfUnchanged(
         reject(asJournalError(failure, fallback))
       }
     }
+    const markDiscarded = () => {
+      const request = tombstones.put(
+        encodeTombstone(expected.checkpoint.uploadId),
+      )
+      request.onerror = () => {
+        if (failure === undefined) {
+          failure = asJournalError(request.error, 'discard marker write failed')
+        }
+      }
+      removed = true
+    }
     getRequest.onsuccess = () => {
       try {
         if (getRequest.result === undefined) {
-          removed = true
+          markDiscarded()
           return
         }
         const current = decodeEnvelope(
@@ -672,6 +818,7 @@ function deleteRecordIfUnchanged(
             failure = asJournalError(deleteRequest.error, 'delete failed')
           }
         }
+        markDiscarded()
       } catch (error) {
         fail(error, 'conditional delete failed')
       }
@@ -695,9 +842,12 @@ export function createFilecoinStorageRecoveryJournal(
   options: FilecoinStorageRecoveryJournalOptions = {},
 ): FilecoinStorageRecoveryJournal {
   const now = options.now ?? Date.now
+  const notifications = options.notifications ?? nativeNotifications
+  const notify = () => notifications.publish(recoveryDatabaseName(options))
   return {
     async clear() {
       await withDatabase(options, (database) => deleteRecords(database, 'all'))
+      notify()
     },
     async list() {
       return withDatabase(options, listRecords)
@@ -706,28 +856,41 @@ export function createFilecoinStorageRecoveryJournal(
       const normalized = normalizeCheckpoint(checkpoint)
       const normalizedHash = normalizeHash(transactionHash)
       assertHashCapacity(normalized)
-      return withDatabase(options, (database) =>
+      const record = await withDatabase(options, (database) =>
         mutateRecord(database, normalized, now, normalizedHash),
       )
+      notify()
+      return record
     },
     async remove(uploadId) {
       const normalized = normalizeUploadId(uploadId)
       await withDatabase(options, (database) =>
         deleteRecords(database, 'one', normalized),
       )
+      notify()
     },
     async removeIfUnchanged(record) {
       const normalized = normalizeRecord(record)
-      return withDatabase(options, (database) =>
+      const removed = await withDatabase(options, (database) =>
         deleteRecordIfUnchanged(database, normalized),
       )
+      if (removed) notify()
+      return removed
     },
     async stage(checkpoint) {
       const normalized = normalizeCheckpoint(checkpoint)
       assertHashCapacity(normalized)
-      return withDatabase(options, (database) =>
+      const record = await withDatabase(options, (database) =>
         mutateRecord(database, normalized, now),
       )
+      notify()
+      return record
+    },
+    subscribe(listener) {
+      if (typeof listener !== 'function') {
+        throw journalError('change listener is invalid')
+      }
+      return notifications.subscribe(recoveryDatabaseName(options), listener)
     },
   }
 }
