@@ -1,6 +1,8 @@
 import {
   openEventCache,
+  validateEventCacheScanBaseline,
   type BrowserEventCache,
+  type EventCacheDerivedStateBinding,
   type EventCachePosition,
   type EventCacheScanBaseline,
   type EventCacheScanCursor,
@@ -13,6 +15,7 @@ import {
 } from './event-indexer'
 import { POST_FEED_CONFIRMATION_DEPTH } from './post-feed-confirmation'
 import {
+  getPostReactionProjectionSnapshotDigest,
   PostReactionProjection,
   type PostReactionProjectionSnapshot,
   type PostReactionSummary,
@@ -58,9 +61,21 @@ export type PostReactionProjectionBaselines = {
   reposts: EventCacheScanBaseline
 }
 
+export type PostReactionProjectionBindings = {
+  likes: EventCacheDerivedStateBinding
+  reposts: EventCacheDerivedStateBinding
+}
+
+export type PostReactionProjectionResumeState = {
+  baselines: PostReactionProjectionBaselines
+  bindings: PostReactionProjectionBindings
+  projection: PostReactionProjectionSnapshot
+}
+
 export type OpenPostReactionProjectionRunOptions =
   PostReactionStreamStorageOptions & {
     pageSize?: number
+    resume?: PostReactionProjectionResumeState
   }
 
 type NormalizedProjectionAnchor = {
@@ -77,6 +92,12 @@ type MutableStreamProgress = {
   complete: boolean
   logsProcessed: bigint
   pagesScanned: bigint
+}
+
+type NormalizedProjectionResume = {
+  baselines: PostReactionProjectionBaselines
+  bindings: PostReactionProjectionBindings
+  projection: PostReactionProjection
 }
 
 function projectionRunError(message: string) {
@@ -143,6 +164,19 @@ function sameCachePosition(
     first.generation === second.generation &&
     first.revision === second.revision &&
     sameCursor(first.cursor, second.cursor)
+  )
+}
+
+function sameCheckpoint(
+  first: { blockHash: string; blockNumber: bigint } | undefined,
+  second: { blockHash: string; blockNumber: bigint } | undefined,
+) {
+  return (
+    first === second ||
+    (first !== undefined &&
+      second !== undefined &&
+      first.blockHash === second.blockHash &&
+      first.blockNumber === second.blockNumber)
   )
 }
 
@@ -260,6 +294,149 @@ function copyBaseline(baseline: EventCacheScanBaseline) {
   }
 }
 
+function copyBinding(binding: EventCacheDerivedStateBinding) {
+  return { ...binding }
+}
+
+function copyBaselines(
+  baselines: PostReactionProjectionBaselines,
+): PostReactionProjectionBaselines {
+  return {
+    likes: copyBaseline(baselines.likes),
+    reposts: copyBaseline(baselines.reposts),
+  }
+}
+
+function copyBindings(
+  bindings: PostReactionProjectionBindings,
+): PostReactionProjectionBindings {
+  return {
+    likes: copyBinding(bindings.likes),
+    reposts: copyBinding(bindings.reposts),
+  }
+}
+
+function normalizeBinding(value: unknown, label: string) {
+  if (!isRecord(value)) throw projectionRunError(`${label} resume binding`)
+  const { digest, proof } = value
+  if (
+    typeof digest !== 'string' ||
+    !/^0x[0-9a-f]{64}$/.test(digest) ||
+    typeof proof !== 'string' ||
+    !/^0x[0-9a-f]{64}$/.test(proof)
+  ) {
+    throw projectionRunError(`${label} resume binding`)
+  }
+  return { digest, proof } as EventCacheDerivedStateBinding
+}
+
+function normalizeResumeBaseline(
+  value: unknown,
+  anchor: EventCachePosition,
+  label: string,
+) {
+  let baseline: EventCacheScanBaseline
+  try {
+    baseline = validateEventCacheScanBaseline(value, getSeed(anchor))
+  } catch {
+    throw projectionRunError(`${label} resume baseline`)
+  }
+  if (
+    baseline.generation !== anchor.generation ||
+    baseline.revision > anchor.revision ||
+    baseline.cursor.nextBlock > anchor.cursor.nextBlock ||
+    (baseline.revision === anchor.revision &&
+      !sameCursor(baseline.cursor, anchor.cursor))
+  ) {
+    throw projectionRunError(`${label} resume baseline`)
+  }
+  return baseline
+}
+
+function assertResumeTail(
+  baseline: EventCacheScanBaseline,
+  position: { blockNumber: bigint; logIndex: number } | undefined,
+  label: string,
+) {
+  if (
+    baseline.last === undefined
+      ? position !== undefined
+      : position === undefined ||
+        baseline.last.blockNumber !== position.blockNumber ||
+        baseline.last.logIndex !== position.logIndex
+  ) {
+    throw projectionRunError(`${label} resume tail`)
+  }
+}
+
+function normalizeResume(
+  value: unknown,
+  anchor: NormalizedProjectionAnchor,
+): NormalizedProjectionResume | undefined {
+  if (value === undefined) return undefined
+  if (
+    !isRecord(value) ||
+    !isRecord(value.baselines) ||
+    !isRecord(value.bindings)
+  ) {
+    throw projectionRunError('resume state')
+  }
+  let projection: PostReactionProjection
+  try {
+    projection = PostReactionProjection.fromSnapshot(value.projection)
+  } catch {
+    throw projectionRunError('resume projection')
+  }
+  const baselines = {
+    likes: normalizeResumeBaseline(value.baselines.likes, anchor.likes, 'like'),
+    reposts: normalizeResumeBaseline(
+      value.baselines.reposts,
+      anchor.reposts,
+      'repost',
+    ),
+  }
+  const bindings = {
+    likes: normalizeBinding(value.bindings.likes, 'like'),
+    reposts: normalizeBinding(value.bindings.reposts, 'repost'),
+  }
+  const projectionSnapshot = projection.snapshot
+  const digest = getPostReactionProjectionSnapshotDigest(projectionSnapshot)
+  if (bindings.likes.digest !== digest || bindings.reposts.digest !== digest) {
+    throw projectionRunError('resume projection digest')
+  }
+  if (baselines.likes.cursor.nextBlock !== baselines.reposts.cursor.nextBlock) {
+    throw projectionRunError('resume shared boundary')
+  }
+  const atStart =
+    baselines.likes.cursor.nextBlock === baselines.likes.cursor.startBlock
+  const likeCheckpoint = baselines.likes.cursor.checkpoints.at(-1)
+  const repostCheckpoint = baselines.reposts.cursor.checkpoints.at(-1)
+  const confirmedThrough = projectionSnapshot.confirmedThrough
+  if (
+    atStart
+      ? likeCheckpoint !== undefined ||
+        repostCheckpoint !== undefined ||
+        confirmedThrough !== undefined
+      : !likeCheckpoint ||
+        !repostCheckpoint ||
+        likeCheckpoint.blockNumber !== baselines.likes.cursor.nextBlock - 1n ||
+        !sameCheckpoint(likeCheckpoint, repostCheckpoint) ||
+        !sameCheckpoint(likeCheckpoint, confirmedThrough) ||
+        !anchor.likes.cursor.checkpoints.some((checkpoint) =>
+          sameCheckpoint(checkpoint, likeCheckpoint),
+        ) ||
+        !anchor.reposts.cursor.checkpoints.some((checkpoint) =>
+          sameCheckpoint(checkpoint, repostCheckpoint),
+        )
+  ) {
+    throw projectionRunError('resume confirmation')
+  }
+  const progress = projection.progress
+  assertResumeTail(baselines.likes, progress.likes, 'like')
+  assertResumeTail(baselines.reposts, progress.reposts, 'repost')
+  return { baselines, bindings, projection }
+}
+
 function copyProgress(
   progress: MutableStreamProgress,
 ): PostReactionProjectionRunStreamProgress {
@@ -281,13 +458,15 @@ function assertPageShape(page: EventCacheScanPage) {
 
 export class PostReactionProjectionRun {
   readonly #anchor: NormalizedProjectionAnchor
+  readonly #initialLogCounts: Record<ProjectionStream, number>
   readonly #pageSize: number
-  readonly #projection = new PostReactionProjection()
+  readonly #projection: PostReactionProjection
   readonly #progress: Record<ProjectionStream, MutableStreamProgress> = {
     likes: { complete: false, logsProcessed: 0n, pagesScanned: 0n },
     reposts: { complete: false, logsProcessed: 0n, pagesScanned: 0n },
   }
   #advancing = false
+  #bindings?: PostReactionProjectionBindings
   #failure?: Error
   readonly #interruption = new AbortController()
   #likeBaseline?: EventCacheScanBaseline
@@ -297,17 +476,27 @@ export class PostReactionProjectionRun {
   #repostBaseline?: EventCacheScanBaseline
   #repostCache?: BrowserEventCache
   #repostContinuation?: EventCacheScanCursor
+  readonly #scanBaselines: Partial<
+    Record<ProjectionStream, EventCacheScanBaseline>
+  >
 
   private constructor(
     anchor: NormalizedProjectionAnchor,
     pageSize: number,
     likeCache: BrowserEventCache,
     repostCache: BrowserEventCache,
+    resume?: NormalizedProjectionResume,
   ) {
     this.#anchor = anchor
+    this.#initialLogCounts = {
+      likes: resume?.baselines.likes.logCount ?? 0,
+      reposts: resume?.baselines.reposts.logCount ?? 0,
+    }
     this.#pageSize = pageSize
+    this.#projection = resume?.projection ?? new PostReactionProjection()
     this.#likeCache = likeCache
     this.#repostCache = repostCache
+    this.#scanBaselines = resume ? copyBaselines(resume.baselines) : {}
   }
 
   static async open(
@@ -326,6 +515,7 @@ export class PostReactionProjectionRun {
     ) {
       throw projectionRunError('page size')
     }
+    const resume = normalizeResume(optionsValue.resume, anchor)
     const storage = {
       databaseName: optionsValue.databaseName,
       factory: optionsValue.factory,
@@ -340,12 +530,28 @@ export class PostReactionProjectionRun {
         ...storage,
         filter: PUBLISHED_REPOST_FILTER,
       })
-      return new PostReactionProjectionRun(
-        anchor,
-        pageSize,
-        likeCache,
-        repostCache,
-      )
+      try {
+        if (resume) {
+          await likeCache.authenticateDerivedState(
+            resume.baselines.likes,
+            resume.bindings.likes,
+          )
+          await repostCache.authenticateDerivedState(
+            resume.baselines.reposts,
+            resume.bindings.reposts,
+          )
+        }
+        return new PostReactionProjectionRun(
+          anchor,
+          pageSize,
+          likeCache,
+          repostCache,
+          resume,
+        )
+      } catch (error) {
+        repostCache.close()
+        throw error
+      }
     } catch (error) {
       likeCache.close()
       throw error
@@ -383,6 +589,25 @@ export class PostReactionProjectionRun {
       throw new Error('The post reaction projection is not complete.')
     }
     return this.#projection.snapshot
+  }
+
+  get resumeState(): PostReactionProjectionResumeState {
+    if (
+      this.#phase !== 'complete' ||
+      !this.#likeBaseline ||
+      !this.#repostBaseline ||
+      !this.#bindings
+    ) {
+      throw new Error('The post reaction projection is not complete.')
+    }
+    return {
+      baselines: {
+        likes: copyBaseline(this.#likeBaseline),
+        reposts: copyBaseline(this.#repostBaseline),
+      },
+      bindings: copyBindings(this.#bindings),
+      projection: this.#projection.snapshot,
+    }
   }
 
   getSummary(postId: unknown, account?: unknown): PostReactionSummary {
@@ -423,6 +648,7 @@ export class PostReactionProjectionRun {
     this.#advancing = true
     try {
       const page = await cache.scan(getSeed(this.#anchor[stream]), {
+        baseline: continuation ? undefined : this.#scanBaselines[stream],
         continuation,
         limit: this.#pageSize,
         resetOnCorruption: false,
@@ -453,10 +679,13 @@ export class PostReactionProjectionRun {
     this.#phase = 'closed'
     this.#interruption.abort()
     this.#projection.reset()
+    this.#bindings = undefined
     this.#likeBaseline = undefined
     this.#repostBaseline = undefined
     this.#likeContinuation = undefined
     this.#repostContinuation = undefined
+    delete this.#scanBaselines.likes
+    delete this.#scanBaselines.reposts
     this.#closeCaches()
   }
 
@@ -467,6 +696,7 @@ export class PostReactionProjectionRun {
     }
     if (stream === 'likes') this.#projection.applyLikeLogs(page.logs)
     else this.#projection.applyRepostLogs(page.logs)
+    delete this.#scanBaselines[stream]
     const progress = this.#progress[stream]
     const logsProcessed = progress.logsProcessed + BigInt(page.logs.length)
     progress.logsProcessed = logsProcessed
@@ -479,7 +709,8 @@ export class PostReactionProjectionRun {
     const baseline = page.baseline!
     if (
       !sameCachePosition(baseline, this.#anchor[stream]) ||
-      BigInt(baseline.logCount) !== logsProcessed
+      BigInt(baseline.logCount) !==
+        BigInt(this.#initialLogCounts[stream]) + logsProcessed
     ) {
       throw projectionRunError(`${stream} completed baseline`)
     }
@@ -502,20 +733,19 @@ export class PostReactionProjectionRun {
     }
     this.#repostBaseline = copyBaseline(baseline)
     this.#repostContinuation = undefined
-    this.#repostCache?.close()
-    this.#repostCache = undefined
     this.#phase = 'authenticate'
   }
 
   async #authenticateBaselines() {
-    const cache = this.#likeCache
+    const likeCache = this.#likeCache
+    const repostCache = this.#repostCache
     const likeBaseline = this.#likeBaseline
     const repostBaseline = this.#repostBaseline
-    if (!cache || !likeBaseline || !repostBaseline) {
+    if (!likeCache || !repostCache || !likeBaseline || !repostBaseline) {
       throw projectionRunError('baseline authentication state')
     }
     const authenticateCache = () =>
-      cache.authenticateBaselines([
+      likeCache.authenticateBaselines([
         {
           baseline: likeBaseline,
           filter: POST_LIKE_SET_FILTER,
@@ -528,9 +758,37 @@ export class PostReactionProjectionRun {
         },
       ])
     await authenticateCache()
+    if (this.#anchor.safeHead !== undefined) {
+      const checkpoint = this.#anchor.likes.cursor.checkpoints.at(-1)
+      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
+        throw projectionRunError('confirmed projection boundary')
+      }
+      this.#projection.confirmThrough(checkpoint)
+    }
+    const digest = getPostReactionProjectionSnapshotDigest(
+      this.#projection.snapshot,
+    )
+    let bindings: PostReactionProjectionBindings | undefined
     await authenticateIssuedPostReactionProjectionAnchor(
       this.#anchor.issued,
-      authenticateCache,
+      async () => {
+        if (this.#readPhase() !== 'authenticate') {
+          throw new Error('The post reaction projection run is closed.')
+        }
+        const likes = await likeCache.bindDerivedState(likeBaseline, digest)
+        if (this.#readPhase() !== 'authenticate') {
+          throw new Error('The post reaction projection run is closed.')
+        }
+        const reposts = await repostCache.bindDerivedState(
+          repostBaseline,
+          digest,
+        )
+        if (this.#readPhase() !== 'authenticate') {
+          throw new Error('The post reaction projection run is closed.')
+        }
+        await authenticateCache()
+        bindings = { likes, reposts }
+      },
       this.#interruption.signal,
     )
     const currentPhase = this.#readPhase()
@@ -540,15 +798,9 @@ export class PostReactionProjectionRun {
     if (currentPhase !== 'authenticate') {
       throw projectionRunError('phase')
     }
-    if (this.#anchor.safeHead !== undefined) {
-      const checkpoint = this.#anchor.likes.cursor.checkpoints.at(-1)
-      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
-        throw projectionRunError('confirmed projection boundary')
-      }
-      this.#projection.confirmThrough(checkpoint)
-    }
-    cache.close()
-    this.#likeCache = undefined
+    if (!bindings) throw projectionRunError('derived state bindings')
+    this.#bindings = copyBindings(bindings)
+    this.#closeCaches()
     this.#phase = 'complete'
   }
 
@@ -557,10 +809,13 @@ export class PostReactionProjectionRun {
     this.#phase = 'failed'
     this.#interruption.abort()
     this.#projection.reset()
+    this.#bindings = undefined
     this.#likeBaseline = undefined
     this.#repostBaseline = undefined
     this.#likeContinuation = undefined
     this.#repostContinuation = undefined
+    delete this.#scanBaselines.likes
+    delete this.#scanBaselines.reposts
     this.#closeCaches()
   }
 

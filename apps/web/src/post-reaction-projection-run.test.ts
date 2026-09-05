@@ -26,7 +26,10 @@ import {
   openPostReactionProjectionRun,
   type OpenPostReactionProjectionRunOptions,
 } from './post-reaction-projection-run'
-import { PostReactionProjection } from './post-reaction-projection'
+import {
+  getPostReactionProjectionSnapshotDigest,
+  PostReactionProjection,
+} from './post-reaction-projection'
 import {
   POST_REACTION_EVENT_START_BLOCK,
   synchronizePostReactionStream,
@@ -247,6 +250,47 @@ async function populateStream(
   }
 }
 
+async function appendStream(
+  storageOptions: TestStorage,
+  filter: EventLogFilter,
+  logs: readonly IndexedEventLog[],
+  head: bigint,
+  safeHead: bigint,
+) {
+  const seed = seedCursor(filter)
+  const cache = await openEventCache({ ...storageOptions, filter })
+  try {
+    const current = await cache.readLatest(seed)
+    const cursor = {
+      ...current.cursor,
+      checkpoints: [
+        ...current.cursor.checkpoints,
+        { blockHash: blockHash(safeHead), blockNumber: safeHead },
+      ],
+      nextBlock: safeHead + 1n,
+    } satisfies EventCursor
+    await cache.apply(current, {
+      caughtUp: true,
+      cursor,
+      head,
+      logs,
+      safeHead,
+      scannedRanges: 1,
+    })
+  } finally {
+    cache.close()
+  }
+}
+
+async function completeRun(
+  run: Awaited<ReturnType<typeof openPostReactionProjectionRun>>,
+) {
+  for (let steps = 0; run.snapshot.phase !== 'complete'; steps += 1) {
+    if (steps >= 16) throw new Error('The projection did not complete.')
+    await run.advance()
+  }
+}
+
 async function prepareProjection(
   likes: readonly IndexedEventLog[],
   reposts: readonly IndexedEventLog[],
@@ -297,6 +341,7 @@ describe('post reaction projection run', () => {
     expect(() => run.getSummary(7n)).toThrow(/not complete/i)
     expect(() => run.baselines).toThrow(/not complete/i)
     expect(() => run.projectionSnapshot).toThrow(/not complete/i)
+    expect(() => run.resumeState).toThrow(/not complete/i)
 
     await run.advance()
     expect(run.snapshot).toMatchObject({
@@ -342,6 +387,12 @@ describe('post reaction projection run', () => {
       blockNumber: SAFE_HEAD,
     })
     expect(run.projectionSnapshot.blockHashes).toEqual([])
+    const resume = run.resumeState
+    const digest = getPostReactionProjectionSnapshotDigest(resume.projection)
+    expect(resume.bindings.likes.digest).toBe(digest)
+    expect(resume.bindings.reposts.digest).toBe(digest)
+    expect(resume.baselines.likes.logCount).toBe(3)
+    expect(resume.baselines.reposts.logCount).toBe(2)
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
     expect(run.getSummary(7n).repostCount).toBe(2n)
@@ -413,6 +464,10 @@ describe('post reaction projection run', () => {
     const baselines = run.baselines
     baselines.likes.cursor.checkpoints[0]!.blockNumber = 99n
     baselines.likes.last!.logIndex = 99
+    const resume = run.resumeState
+    resume.baselines.reposts.logCount = 99
+    resume.bindings.likes.proof = hash('mutated binding')
+    resume.projection.repostCounts[0]!.count = 99n
     expect(run.snapshot.likes.logsProcessed).toBe(1n)
     expect(run.baselines.likes.cursor.checkpoints[0]!.blockNumber).toBe(
       SAFE_HEAD,
@@ -421,6 +476,11 @@ describe('post reaction projection run', () => {
       blockNumber: 1n,
       logIndex: 0,
     })
+    expect(run.resumeState.baselines.reposts.logCount).toBe(1)
+    expect(run.resumeState.bindings.likes.proof).not.toBe(
+      hash('mutated binding'),
+    )
+    expect(run.resumeState.projection.repostCounts[0]?.count).toBe(1n)
 
     const likeCache = await openEventCache({
       ...prepared.storage,
@@ -435,6 +495,190 @@ describe('post reaction projection run', () => {
     } finally {
       likeCache.close()
     }
+  })
+
+  it('authenticates a saved projection and scans only appended reactions', async () => {
+    const prepared = await prepareProjection(
+      [likeLog(1n), likeLog(2n, { account: ACCOUNT_B })],
+      [repostLog(3n)],
+    )
+    const first = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await completeRun(first)
+    const resume = first.resumeState
+
+    const nextHead = 19n
+    const nextSafeHead = nextHead - FINALITY_DEPTH
+    await appendStream(
+      prepared.storage,
+      POST_LIKE_SET_FILTER,
+      [likeLog(6n, { liked: false })],
+      nextHead,
+      nextSafeHead,
+    )
+    await appendStream(
+      prepared.storage,
+      PUBLISHED_REPOST_FILTER,
+      [repostLog(7n, { account: ACCOUNT_B })],
+      nextHead,
+      nextSafeHead,
+    )
+    prepared.control.head = nextHead
+    const synchronized = await synchronizePostReactionStream(
+      prepared.provider,
+      1n,
+      {
+        resolveHistoryBoundary: unsupportedHistory,
+        storage: prepared.storage,
+      },
+    )
+    if (!synchronized.projectionAnchor) {
+      throw new Error('The updated streams did not issue a projection anchor.')
+    }
+
+    const resumed = await openPostReactionProjectionRun(
+      synchronized.projectionAnchor,
+      { ...prepared.storage, pageSize: 1, resume },
+    )
+    expect(resumed.snapshot).toMatchObject({
+      likes: { complete: false, logsProcessed: 0n, pagesScanned: 0n },
+      phase: 'likes',
+      reposts: { complete: false, logsProcessed: 0n, pagesScanned: 0n },
+      safeHead: nextSafeHead,
+    })
+    expect(() => resumed.getSummary(7n, ACCOUNT_A)).toThrow(/not complete/i)
+
+    await resumed.advance()
+    expect(resumed.snapshot).toMatchObject({
+      likes: { complete: true, logsProcessed: 1n, pagesScanned: 1n },
+      phase: 'reposts',
+    })
+    await resumed.advance()
+    expect(resumed.snapshot).toMatchObject({
+      phase: 'authenticate',
+      reposts: { complete: true, logsProcessed: 1n, pagesScanned: 1n },
+    })
+    await resumed.advance()
+
+    expect(resumed.getSummary(7n, ACCOUNT_A)).toEqual({
+      likeCount: 1n,
+      likedByAccount: false,
+      repostCount: 2n,
+    })
+    expect(resumed.getSummary(7n, ACCOUNT_B)).toEqual({
+      likeCount: 1n,
+      likedByAccount: true,
+      repostCount: 2n,
+    })
+    expect(resumed.baselines.likes.logCount).toBe(3)
+    expect(resumed.baselines.reposts.logCount).toBe(2)
+    expect(resumed.projectionSnapshot.confirmedThrough).toEqual({
+      blockHash: blockHash(nextSafeHead),
+      blockNumber: nextSafeHead,
+    })
+    expect(resumed.resumeState.bindings.likes.digest).not.toBe(
+      resume.bindings.likes.digest,
+    )
+  })
+
+  it('reauthenticates an unchanged saved projection without replaying logs', async () => {
+    const prepared = await prepareProjection([likeLog(1n)], [repostLog(2n)])
+    const first = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await completeRun(first)
+    const resume = first.resumeState
+
+    const resumed = await openPostReactionProjectionRun(prepared.anchor, {
+      ...prepared.storage,
+      resume,
+    })
+    await resumed.advance()
+    await resumed.advance()
+    expect(resumed.snapshot).toMatchObject({
+      likes: { complete: true, logsProcessed: 0n, pagesScanned: 1n },
+      phase: 'authenticate',
+      reposts: { complete: true, logsProcessed: 0n, pagesScanned: 1n },
+    })
+    await resumed.advance()
+
+    expect(resumed.getSummary(7n, ACCOUNT_A)).toEqual({
+      likeCount: 1n,
+      likedByAccount: true,
+      repostCount: 1n,
+    })
+    expect(resumed.resumeState.bindings.likes.digest).toBe(
+      resume.bindings.likes.digest,
+    )
+    expect(resumed.resumeState.bindings.reposts.digest).toBe(
+      resume.bindings.reposts.digest,
+    )
+  })
+
+  it('rejects edited or mismatched saved reaction projections', async () => {
+    const prepared = await prepareProjection([likeLog(1n)], [repostLog(2n)])
+    const run = await openPostReactionProjectionRun(
+      prepared.anchor,
+      prepared.storage,
+    )
+    await completeRun(run)
+    const resume = run.resumeState
+    const editedProjection = {
+      ...resume.projection,
+      repostCounts: [{ count: 99n, postId: 7n }],
+    }
+    const editedDigest =
+      getPostReactionProjectionSnapshotDigest(editedProjection)
+
+    await expect(
+      openPostReactionProjectionRun(prepared.anchor, {
+        ...prepared.storage,
+        resume: { ...resume, projection: editedProjection },
+      }),
+    ).rejects.toThrow(/resume projection digest/i)
+    await expect(
+      openPostReactionProjectionRun(prepared.anchor, {
+        ...prepared.storage,
+        resume: {
+          ...resume,
+          bindings: {
+            likes: { ...resume.bindings.likes, digest: editedDigest },
+            reposts: { ...resume.bindings.reposts, digest: editedDigest },
+          },
+          projection: editedProjection,
+        },
+      }),
+    ).rejects.toThrow(/derived state binding changed or is corrupt/i)
+    await expect(
+      openPostReactionProjectionRun(prepared.anchor, {
+        ...prepared.storage,
+        resume: {
+          ...resume,
+          bindings: {
+            ...resume.bindings,
+            likes: {
+              ...resume.bindings.likes,
+              proof: hash('edited like proof'),
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(/derived state binding changed or is corrupt/i)
+    await expect(
+      openPostReactionProjectionRun(prepared.anchor, {
+        ...prepared.storage,
+        resume: {
+          ...resume,
+          baselines: {
+            likes: resume.baselines.reposts,
+            reposts: resume.baselines.likes,
+          },
+        },
+      }),
+    ).rejects.toThrow(/like resume baseline/i)
   })
 
   it('fails closed when the cache moved beyond the verified anchor', async () => {
