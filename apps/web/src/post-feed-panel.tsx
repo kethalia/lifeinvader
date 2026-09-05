@@ -23,7 +23,11 @@ import {
   type PostCommentProjectionOpener,
   type PostCommentReadModelState,
 } from './post-comment-read-model'
-import type { PostCommentStreamSynchronizer } from './post-comment-stream'
+import type { PostCommentResumeStore } from './post-comment-resume-store'
+import type {
+  PostCommentStreamCacheResetter,
+  PostCommentStreamSynchronizer,
+} from './post-comment-stream'
 import {
   synchronizePostFeed,
   type PostFeedSnapshot,
@@ -164,12 +168,19 @@ function commentStatus(state: PostCommentReadModelState) {
     return `More confirmed comment history remains. Indexed through block ${indexedThrough} of confirmed head ${state.stream.safeHead?.toString() ?? 'unknown'}.`
   }
   if (state.phase === 'projecting') {
-    return `Local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()}: ${state.projection.logsProcessed.toString()} events across ${state.projection.pagesScanned.toString()} bounded pages; ${state.projection.commentsRetained.toString()} visible comments retained.`
+    const resumed = state.resumed ? 'Authenticated saved progress; ' : ''
+    return `${resumed}local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()}: ${state.projection.logsProcessed.toString()} delta events across ${state.projection.pagesScanned.toString()} bounded pages; ${state.projection.commentsRetained.toString()} visible comments retained.`
   }
   if (state.phase === 'complete') {
-    return state.projection.safeHead === undefined
-      ? `Comment histories are exact from block ${state.projection.startBlock.toString()} for the currently confirmed empty range.`
-      : `Comment histories are exact from block ${state.projection.startBlock.toString()} through confirmed block ${state.projection.safeHead.toString()}.`
+    const boundary =
+      state.projection.safeHead === undefined
+        ? 'for the currently confirmed empty range'
+        : `through confirmed block ${state.projection.safeHead.toString()}`
+    return `Comment histories are exact from block ${state.projection.startBlock.toString()} ${boundary}. ${
+      state.resumeSaved
+        ? 'Authenticated progress is saved locally for the next delta.'
+        : 'The next check may need to rebuild local projection work.'
+    }`
   }
   return state.message
 }
@@ -188,7 +199,11 @@ function commentButtonLabel(state: PostCommentReadModelState) {
       : 'Process next local comment page'
   }
   if (state.phase === 'complete') return 'Check for newer comments'
-  if (state.phase === 'failed') return 'Retry comment histories'
+  if (state.phase === 'failed') {
+    return state.retryable
+      ? 'Retry comment histories'
+      : 'Clear site data and reload'
+  }
   return 'Load comment histories'
 }
 
@@ -382,12 +397,14 @@ function sameCommentDraftRevision(first: CommentDraft, second: CommentDraft) {
 }
 
 export function PostFeedPanel({
+  commentResumeStore,
   includedPost,
   openCommentProjection,
   openReactionProjection,
   publishCommentAction = publishComment,
   publishRepostAction = publishRepost,
   readProvider,
+  resetCommentCache,
   retrieveMedia,
   session,
   setPostLikeAction = setPostLike,
@@ -397,12 +414,14 @@ export function PostFeedPanel({
   waitForActionReceipt = waitForTransactionReceipt,
   waitForConfirmation = waitForPostFeedConfirmation,
 }: {
+  commentResumeStore?: PostCommentResumeStore
   includedPost?: IncludedPost
   openCommentProjection?: PostCommentProjectionOpener
   openReactionProjection?: PostReactionProjectionOpener
   publishCommentAction?: typeof publishComment
   publishRepostAction?: typeof publishRepost
   readProvider?: Eip1193Provider
+  resetCommentCache?: PostCommentStreamCacheResetter
   retrieveMedia?: MediaRetriever
   session: WalletSession
   setPostLikeAction?: typeof setPostLike
@@ -509,6 +528,8 @@ export function PostFeedPanel({
   const visiblePosts = snapshot?.posts ?? []
   const commentModel = usePostCommentReadModel(historySession, visiblePosts, {
     openProjection: openCommentProjection,
+    resetCache: resetCommentCache,
+    resumeStore: commentResumeStore,
     synchronize: synchronizePostComments,
     synchronizePosts: synchronize,
   })
@@ -550,6 +571,11 @@ export function PostFeedPanel({
     reactionModel.state.phase === 'projecting' ||
     reactionModel.state.phase === 'complete'
       ? reactionModel.state.notice
+      : undefined
+  const commentNotice =
+    commentModel.state.phase === 'projecting' ||
+    commentModel.state.phase === 'complete'
+      ? commentModel.state.notice
       : undefined
   const loading =
     connected &&
@@ -1196,10 +1222,13 @@ export function PostFeedPanel({
             >
               {commentStatus(commentModel.state)}
             </p>
+            {commentNotice ? <p role="status">{commentNotice}</p> : null}
           </div>
           <button
             disabled={
               commentModel.state.phase === 'synchronizing' ||
+              (commentModel.state.phase === 'failed' &&
+                !commentModel.state.retryable) ||
               (commentModel.state.phase === 'projecting' &&
                 commentModel.state.busy)
             }
