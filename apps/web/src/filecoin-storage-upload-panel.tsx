@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { maxUint256, type Address, type Hash } from 'viem'
 import {
   describeRpcError,
@@ -93,6 +93,11 @@ type UploadState =
       kind: 'data-set-only'
       receipt: TransactionReceipt
       recoveryWarning?: string
+    }
+  | {
+      checkpoint: FilecoinStorageUploadCheckpoint
+      kind: 'cleanup'
+      message: string
     }
   | {
       context: UploadContext
@@ -231,6 +236,7 @@ function FilecoinUploadStatus({
   onClearAmbiguous,
   onClearUnknown,
   onReset,
+  onRetryRecoveryCleanup,
   onRetryReceipt,
   state,
 }: {
@@ -239,6 +245,7 @@ function FilecoinUploadStatus({
   onClearAmbiguous(): void
   onClearUnknown(): void
   onReset(): void
+  onRetryRecoveryCleanup(): void
   onRetryReceipt(): void
   state: UploadState
 }) {
@@ -311,8 +318,14 @@ function FilecoinUploadStatus({
           available through a gateway. Publishing the CID is still separate.
         </p>
         {state.recoveryWarning ? <p>{state.recoveryWarning}</p> : null}
-        <button disabled={disabled} onClick={onReset} type="button">
-          Prepare another storage attempt
+        <button
+          disabled={disabled}
+          onClick={state.recoveryWarning ? onRetryRecoveryCleanup : onReset}
+          type="button"
+        >
+          {state.recoveryWarning
+            ? 'Retry cleanup, then prepare another attempt'
+            : 'Prepare another storage attempt'}
         </button>
       </div>
     )
@@ -330,8 +343,32 @@ function FilecoinUploadStatus({
           completion, pinning, indexing, or publication.
         </p>
         {state.recoveryWarning ? <p>{state.recoveryWarning}</p> : null}
-        <button disabled={disabled} onClick={onReset} type="button">
-          Clear incomplete attempt
+        <button
+          disabled={disabled}
+          onClick={state.recoveryWarning ? onRetryRecoveryCleanup : onReset}
+          type="button"
+        >
+          {state.recoveryWarning
+            ? 'Retry cleanup, then clear incomplete attempt'
+            : 'Clear incomplete attempt'}
+        </button>
+      </div>
+    )
+  }
+  if (state.kind === 'cleanup') {
+    return (
+      <div className="filecoin-storage-upload-problem" role="alert">
+        <p>{state.message}</p>
+        <p>
+          Retry clearing this browser-only entry before preparing another
+          storage attempt. No blockchain transaction is sent by this cleanup.
+        </p>
+        <button
+          disabled={disabled}
+          onClick={onRetryRecoveryCleanup}
+          type="button"
+        >
+          Retry clearing local recovery entry
         </button>
       </div>
     )
@@ -418,12 +455,21 @@ export function FilecoinStorageUploadPanel({
   const activeJournal = useRef<
     FilecoinStorageUploadRecoveryJournal | undefined
   >(undefined)
+  const latestPrepared = useRef(prepared)
+  const latestSession = useRef(session)
+  useLayoutEffect(() => {
+    latestPrepared.current = prepared
+    latestSession.current = session
+  }, [prepared, session])
   const [providerIdInput, setProviderIdInput] = useState('')
   const [acknowledged, setAcknowledged] = useState(false)
   const [dismissalPending, setDismissalPending] = useState(false)
   const [state, setState] = useState<UploadState>({ kind: 'idle' })
   const writeLocked = stateLocksWrites(state)
-  const settled = state.kind === 'confirmed' || state.kind === 'data-set-only'
+  const settled =
+    state.kind === 'confirmed' ||
+    state.kind === 'data-set-only' ||
+    state.kind === 'cleanup'
   const providerId = parseProviderId(providerIdInput)
   const ready = quoteMatches(quote, prepared, session)
   useEffect(() => {
@@ -440,12 +486,23 @@ export function FilecoinStorageUploadPanel({
   useEffect(() => {
     setAcknowledged(false)
     setState((current) => {
-      if (
-        (current.kind === 'confirmed' || current.kind === 'data-set-only') &&
-        (!walletContextMatches(current.context, session) ||
-          !mediaContextMatches(current.context, prepared))
-      ) {
-        return { kind: 'idle' }
+      if (current.kind === 'confirmed' || current.kind === 'data-set-only') {
+        if (
+          !walletContextMatches(current.context, session) ||
+          !mediaContextMatches(current.context, prepared)
+        ) {
+          if (current.recoveryWarning) {
+            return {
+              checkpoint:
+                current.kind === 'confirmed'
+                  ? current.confirmation.checkpoint
+                  : current.checkpoint,
+              kind: 'cleanup',
+              message: current.recoveryWarning,
+            }
+          }
+          return { kind: 'idle' }
+        }
       }
       return current
     })
@@ -523,6 +580,9 @@ export function FilecoinStorageUploadPanel({
     let checkpoint: FilecoinStorageUploadCheckpoint | undefined
     let journal: FilecoinStorageUploadRecoveryJournal | undefined
     let journalStaged = false
+    const contextStillCurrent = () =>
+      walletContextMatches(context, latestSession.current) &&
+      mediaContextMatches(context, latestPrepared.current)
 
     void (async () => {
       try {
@@ -564,27 +624,41 @@ export function FilecoinStorageUploadPanel({
           signal: controller.signal,
         })
         if (operationId !== operationSequence.current) return
+        const confirmation = completedConfirmation(result)
         const recoveryWarning = await clearRecovery(
           operationJournal,
           checkpoint?.uploadId ?? result.uploadId,
         )
         if (operationId !== operationSequence.current) return
         if (!recoveryWarning) activeJournal.current = undefined
+        if (!contextStillCurrent()) {
+          setState(
+            recoveryWarning
+              ? {
+                  checkpoint: confirmation.checkpoint,
+                  kind: 'cleanup',
+                  message: recoveryWarning,
+                }
+              : { kind: 'idle' },
+          )
+          return
+        }
         setState({
-          confirmation: completedConfirmation(result),
+          confirmation,
           context,
           kind: 'confirmed',
           ...(recoveryWarning ? { recoveryWarning } : {}),
         })
       } catch (error) {
-        if (operationId !== operationSequence.current) return
         const submissionUnknown = isSubmissionUnknown(error)
         let recoveryWarning: string | undefined
         if (!submissionUnknown && journalStaged && checkpoint && journal) {
           recoveryWarning = await clearRecovery(journal, checkpoint.uploadId)
-          if (operationId !== operationSequence.current) return
-          if (!recoveryWarning) activeJournal.current = undefined
+          if (operationId === operationSequence.current && !recoveryWarning) {
+            activeJournal.current = undefined
+          }
         }
+        if (operationId !== operationSequence.current) return
         if (submissionUnknown) {
           setState(
             error.transactionHash
@@ -603,15 +677,25 @@ export function FilecoinStorageUploadPanel({
                 },
           )
         } else {
-          setState({
-            context,
-            kind: getRpcErrorCode(error) === 4001 ? 'rejected' : 'error',
-            message:
-              describeRpcError(
-                error,
-                'The Filecoin storage attempt did not complete.',
-              ) + (recoveryWarning ? ` ${recoveryWarning}` : ''),
-          })
+          const message = describeRpcError(
+            error,
+            'The Filecoin storage attempt did not complete.',
+          )
+          if (recoveryWarning && checkpoint) {
+            setState({
+              checkpoint,
+              kind: 'cleanup',
+              message: `${message} ${recoveryWarning}`,
+            })
+          } else if (!contextStillCurrent()) {
+            setState({ kind: 'idle' })
+          } else {
+            setState({
+              context,
+              kind: getRpcErrorCode(error) === 4001 ? 'rejected' : 'error',
+              message,
+            })
+          }
         }
       } finally {
         if (operationId === operationSequence.current) {
@@ -635,6 +719,9 @@ export function FilecoinStorageUploadPanel({
     )
       return
     const previous = state
+    const contextStillCurrent = () =>
+      walletContextMatches(previous.context, latestSession.current) &&
+      mediaContextMatches(previous.context, latestPrepared.current)
     const operationId = ++operationSequence.current
     const controller = new AbortController()
     activeController.current = controller
@@ -669,6 +756,18 @@ export function FilecoinStorageUploadPanel({
           : 'The local recovery journal is unavailable; its entry could not be cleared.'
         if (operationId !== operationSequence.current) return
         if (!recoveryWarning) activeJournal.current = undefined
+        if (!contextStillCurrent()) {
+          setState(
+            recoveryWarning
+              ? {
+                  checkpoint: previous.checkpoint,
+                  kind: 'cleanup',
+                  message: recoveryWarning,
+                }
+              : { kind: 'idle' },
+          )
+          return
+        }
         if (recovered.kind === 'piece-added') {
           setState({
             confirmation: recoveredConfirmation(
@@ -725,6 +824,65 @@ export function FilecoinStorageUploadPanel({
     setState({ kind: 'idle' })
   }
 
+  const retryRecoveryCleanup = () => {
+    if (
+      disabled ||
+      dismissalActive.current ||
+      operationActive.current ||
+      (state.kind !== 'confirmed' &&
+        state.kind !== 'data-set-only' &&
+        state.kind !== 'cleanup')
+    )
+      return
+    const previous = state
+    const checkpoint =
+      previous.kind === 'confirmed'
+        ? previous.confirmation.checkpoint
+        : previous.checkpoint
+    const journal = activeJournal.current
+    const unavailable =
+      'The local recovery journal is unavailable. Its entry was not cleared.'
+    if (!journal) {
+      setState(
+        previous.kind === 'cleanup'
+          ? { ...previous, message: unavailable }
+          : { ...previous, recoveryWarning: unavailable },
+      )
+      return
+    }
+    const operationId = ++operationSequence.current
+    dismissalActive.current = true
+    setDismissalPending(true)
+    void (async () => {
+      try {
+        await journal.remove(checkpoint.uploadId)
+        if (operationId !== operationSequence.current) return
+        activeJournal.current = undefined
+        activeController.current = undefined
+        activeContext.current = undefined
+        operationActive.current = false
+        setAcknowledged(false)
+        setState({ kind: 'idle' })
+      } catch (error) {
+        if (operationId !== operationSequence.current) return
+        const warning = `The local recovery entry could not be cleared. ${describeRpcError(
+          error,
+          'Browser storage is unavailable.',
+        )}`
+        setState(
+          previous.kind === 'cleanup'
+            ? { ...previous, message: warning }
+            : { ...previous, recoveryWarning: warning },
+        )
+      } finally {
+        if (operationId === operationSequence.current) {
+          dismissalActive.current = false
+          setDismissalPending(false)
+        }
+      }
+    })()
+  }
+
   const dismissRecovery = () => {
     if (
       disabled ||
@@ -775,7 +933,9 @@ export function FilecoinStorageUploadPanel({
   }
 
   const contextCurrent =
-    state.kind !== 'idle' && walletContextMatches(state.context, session)
+    state.kind !== 'idle' &&
+    state.kind !== 'cleanup' &&
+    walletContextMatches(state.context, session)
   const buttonLabel =
     state.kind === 'preparing'
       ? 'Preparing storage attempt…'
@@ -884,6 +1044,7 @@ export function FilecoinStorageUploadPanel({
         onClearAmbiguous={dismissRecovery}
         onClearUnknown={dismissRecovery}
         onReset={reset}
+        onRetryRecoveryCleanup={retryRecoveryCleanup}
         onRetryReceipt={retryReceipt}
         state={state}
       />

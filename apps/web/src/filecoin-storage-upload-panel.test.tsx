@@ -415,11 +415,11 @@ describe('FilecoinStorageUploadPanel', () => {
     expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
   })
 
-  it('discloses terminal journal cleanup failure without hiding success', async () => {
+  it('retains a retry after terminal journal cleanup fails', async () => {
     const journal = recoveryJournal()
-    vi.mocked(journal.remove).mockRejectedValue(
-      new Error('IndexedDB cleanup failed.'),
-    )
+    vi.mocked(journal.remove)
+      .mockRejectedValueOnce(new Error('IndexedDB cleanup failed.'))
+      .mockResolvedValueOnce(undefined)
     const uploadStorage = vi.fn<FilecoinStorageUploader>(
       async (_provider, _prepared, _quote, _providerId, options) => {
         await options.onStored?.(checkpoint)
@@ -441,6 +441,62 @@ describe('FilecoinStorageUploadPanel', () => {
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
     )
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /retry cleanup.*prepare another attempt/i,
+      }),
+    )
+    await waitFor(() => expect(journal.remove).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.queryByText(/storage confirmed in block/i)).toBeNull(),
+    )
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: /provider ID/i,
+        }) as HTMLInputElement
+      ).disabled,
+    ).toBe(false)
+  })
+
+  it('does not restore an old confirmation after context changes during cleanup', async () => {
+    const cleanupPending = deferred<void>()
+    const journal = recoveryJournal()
+    vi.mocked(journal.remove).mockImplementation(
+      async () => await cleanupPending.promise,
+    )
+    const uploadStorage = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        await options.onStored?.(checkpoint)
+        await options.onSubmitted?.(TRANSACTION_HASH)
+        return result
+      },
+    )
+    const view = renderUpload({ journal, uploadStorage })
+    authorizeUpload()
+    await waitFor(() => expect(journal.remove).toHaveBeenCalledWith(UPLOAD_ID))
+
+    view.rerender(
+      <FilecoinStorageUploadPanel
+        prepared={replacementPrepared}
+        quote={quote}
+        recoveryJournal={journal}
+        session={connectedSession()}
+        uploadStorage={uploadStorage}
+      />,
+    )
+    await act(async () => cleanupPending.resolve())
+
+    await waitFor(() =>
+      expect(screen.queryByText(/storage confirmed in block/i)).toBeNull(),
+    )
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: /provider ID/i,
+        }) as HTMLInputElement
+      ).disabled,
+    ).toBe(false)
   })
 
   it('recovers a standalone paid data set without claiming storage', async () => {
@@ -645,5 +701,33 @@ describe('FilecoinStorageUploadPanel', () => {
     await waitFor(() => expect(uploadSignal).toBeDefined())
     view.unmount()
     expect(uploadSignal?.aborted).toBe(true)
+  })
+
+  it('cleans a safely staged recovery after the panel unmounts', async () => {
+    const journal = recoveryJournal()
+    let uploadSignal: AbortSignal | undefined
+    const uploadStorage = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        uploadSignal = options.signal
+        await options.onStored?.(checkpoint)
+        return await new Promise<FilecoinStorageUploadResult>(
+          (_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => reject(options.signal?.reason),
+              { once: true },
+            )
+          },
+        )
+      },
+    )
+    const view = renderUpload({ journal, uploadStorage })
+    authorizeUpload()
+    await screen.findByText(/provider has the CAR/i)
+
+    view.unmount()
+
+    expect(uploadSignal?.aborted).toBe(true)
+    await waitFor(() => expect(journal.remove).toHaveBeenCalledWith(UPLOAD_ID))
   })
 })
