@@ -9,6 +9,8 @@ node_modules/
 
 apps/web/coverage/
 apps/web/dist/
+apps/web/playwright-report/
+apps/web/test-results/
 
 packages/contracts/broadcast/
 packages/contracts/cache/
