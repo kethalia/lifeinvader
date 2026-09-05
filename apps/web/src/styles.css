@@ -2141,6 +2141,7 @@ h1 span {
 }
 
 .post-actions button,
+.comment-actions button,
 .feed-feedback button {
   min-height: 38px;
   padding: 0.45rem 0.7rem;
@@ -2154,6 +2155,8 @@ h1 span {
 
 .post-actions button:hover:not(:disabled),
 .post-actions button:focus-visible,
+.comment-actions button:hover:not(:disabled),
+.comment-actions button:focus-visible,
 .feed-feedback button:hover:not(:disabled),
 .feed-feedback button:focus-visible {
   color: var(--paper);
@@ -2172,6 +2175,7 @@ h1 span {
 }
 
 .post-actions button:disabled,
+.comment-actions button:disabled,
 .feed-feedback button:disabled {
   cursor: wait;
   opacity: 0.45;
@@ -2249,6 +2253,13 @@ h1 span {
 
 .comment-list .post-media-commitment {
   margin-top: 0.75rem;
+}
+
+.comment-actions {
+  display: flex;
+  margin-top: 0.75rem;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .empty-comments {

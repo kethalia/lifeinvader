@@ -3,15 +3,21 @@ import {
   expect,
   test,
   type BrowserContext,
+  type Locator,
   type Page,
 } from '@playwright/test'
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { decodeEventLog, getAddress, keccak256, type Hex } from 'viem'
+import type { Eip1193Provider } from '../src/ethereum'
 import {
+  COMMENT_PUBLISHED_EVENT_ABI,
+  COMMENT_PUBLISHED_TOPIC,
   FACTORY_ADDRESS,
   FACTORY_CODE_HASH,
+  LIKE_SET_EVENT_ABI,
+  LIKE_SET_TOPIC,
   LOCAL_RPC_URL,
   POST_PUBLISHED_EVENT_ABI,
   POST_PUBLISHED_TOPIC,
@@ -25,6 +31,7 @@ const LOCAL_MNEMONIC =
   'test test test test test test test test test test test junk'
 const TEST_PASSWORD = 'lifeinvader-local-only'
 const POST_BODY = 'MetaMask smoke: privacy was a bug.'
+const COMMENT_BODY = 'MetaMask comment: this is also permanently public.'
 
 type JsonRpcResponse = {
   error?: { code?: number; message?: string }
@@ -143,6 +150,32 @@ async function waitForConnectedWallet(app: Page) {
   throw new Error('Lifeinvader did not connect MetaMask after one retry.')
 }
 
+async function confirmLocalTransaction(
+  wallet: Page,
+  extensionId: string,
+  trigger: Locator,
+) {
+  await expect(trigger).toBeEnabled()
+  const beforeRequest = wallet.url()
+  await trigger.click({ noWaitAfter: true })
+  const approval = await waitForSidePanelRequest(
+    wallet,
+    extensionId,
+    'confirm-transaction',
+    beforeRequest,
+  )
+  const confirmation = approval.getByTestId('parent-selector-confirmation-page')
+  await expect(confirmation).toBeVisible({ timeout: 30_000 })
+  await expect(confirmation).toContainText('Lifeinvader Local (Anvil)')
+  const confirm = approval.getByTestId('confirm-footer-button')
+  await expect(confirm).toBeEnabled()
+  const requestUrl = approval.url()
+  await confirm.click()
+  await approval.waitForURL((url) => url.toString() !== requestUrl, {
+    timeout: 30_000,
+  })
+}
+
 function parseRpcLog(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Local RPC returned a malformed log.')
@@ -191,7 +224,57 @@ function parseReceiptBlockNumber(value: unknown) {
   )
 }
 
-test('deploys Lifeinvader and publishes a post through MetaMask on Anvil', async ({}, testInfo) => {
+async function mineConfirmations(app: Page, rpcUrl: string) {
+  await rpc(rpcUrl, 'anvil_mine', ['0xc'])
+  const head = parseRpcQuantity(await rpc(rpcUrl, 'eth_blockNumber'), 'head')
+  // MetaMask caches its head independently of direct Anvil RPC reads.
+  await expect
+    .poll(
+      () =>
+        app.evaluate(async () => {
+          const wallet = (window as Window & { ethereum?: Eip1193Provider })
+            .ethereum
+          if (!wallet) throw new Error('MetaMask is no longer injected.')
+          return await wallet.request({ method: 'eth_blockNumber' })
+        }),
+      { intervals: [1_000, 2_000], timeout: 30_000 },
+    )
+    .toBe(head)
+}
+
+async function includedActionLog(
+  rpcUrl: string,
+  feedback: Locator,
+  topic: Hex,
+) {
+  const match = (await feedback.textContent())?.match(
+    /included in block (\d+)\./i,
+  )
+  if (!match) throw new Error('The app did not render an inclusion block.')
+  const blockNumber = `0x${BigInt(match[1]).toString(16)}` as Hex
+  const logs = await rpc(rpcUrl, 'eth_getLogs', [
+    {
+      address: PROTOCOL_ADDRESS,
+      fromBlock: blockNumber,
+      toBlock: blockNumber,
+      topics: [topic],
+    },
+  ])
+  if (!Array.isArray(logs)) {
+    throw new Error('Local RPC returned a malformed log collection.')
+  }
+  expect(logs).toHaveLength(1)
+  const log = parseRpcLog(logs[0])
+  expect(log.address).toBe(getAddress(PROTOCOL_ADDRESS))
+  expect(
+    parseReceiptBlockNumber(
+      await rpc(rpcUrl, 'eth_getTransactionReceipt', [log.transactionHash]),
+    ),
+  ).toBe(blockNumber)
+  return log
+}
+
+test('deploys, posts, comments, and reacts through MetaMask on Anvil', async ({}, testInfo) => {
   const extensionPathValue = process.env.LIFEINVADER_METAMASK_EXTENSION_PATH
   test.skip(
     !extensionPathValue,
@@ -456,6 +539,87 @@ test('deploys Lifeinvader and publishes a post through MetaMask on Anvil', async
     expect(decoded.args.author).toBe(getAddress(LOCAL_ACCOUNT))
     expect(decoded.args.body).toBe(POST_BODY)
     expect(decoded.args.mediaCid).toBe('0x')
+
+    await mineConfirmations(app, rpcUrl)
+    const refreshFeed = app.locator('.feed-controls').getByRole('button')
+    await expect(refreshFeed).toBeEnabled()
+    await refreshFeed.click()
+    await expect(app.locator('.post-body')).toHaveText(POST_BODY)
+    await app
+      .getByRole('button', { name: 'Write comment for post 1', exact: true })
+      .click()
+    await app
+      .getByLabel('Permanent public comment', { exact: true })
+      .fill(COMMENT_BODY)
+    await confirmLocalTransaction(
+      walletHome,
+      extensionId,
+      app.getByRole('button', { name: 'Publish comment on-chain' }),
+    )
+    const actionFeedback = app.locator('.post-action-complete')
+    await expect(actionFeedback).toContainText(
+      /Comment for post #1 was included in block \d+\./,
+      { timeout: 30_000 },
+    )
+    const commentLog = await includedActionLog(
+      rpcUrl,
+      actionFeedback,
+      COMMENT_PUBLISHED_TOPIC,
+    )
+    const commentEvent = decodeEventLog({
+      abi: COMMENT_PUBLISHED_EVENT_ABI,
+      data: commentLog.data,
+      topics: commentLog.topics,
+    })
+    expect(commentEvent.args).toEqual({
+      author: getAddress(LOCAL_ACCOUNT),
+      body: COMMENT_BODY,
+      commentId: 1n,
+      mediaCid: '0x',
+      postId: 1n,
+    })
+
+    await mineConfirmations(app, rpcUrl)
+    await app.getByRole('button', { name: 'Load comment histories' }).click()
+    const advanceComments = app.getByRole('button', {
+      name: 'Process next local comment page',
+    })
+    // One bounded cache page, then one separate authentication step.
+    await advanceComments.click()
+    await advanceComments.click()
+    await expect(app.getByText(COMMENT_BODY, { exact: true })).toBeVisible()
+
+    for (const liked of [true, false]) {
+      const action = liked ? 'like' : 'unlike'
+      await confirmLocalTransaction(
+        walletHome,
+        extensionId,
+        app.getByRole('button', {
+          name: `Record ${action} for comment 1`,
+          exact: true,
+        }),
+      )
+      await expect(actionFeedback).toContainText(
+        new RegExp(`^${liked ? 'Like' : 'Unlike'} for comment #1 was included`),
+        { timeout: 30_000 },
+      )
+      const reactionLog = await includedActionLog(
+        rpcUrl,
+        actionFeedback,
+        LIKE_SET_TOPIC,
+      )
+      const reaction = decodeEventLog({
+        abi: LIKE_SET_EVENT_ABI,
+        data: reactionLog.data,
+        topics: reactionLog.topics,
+      })
+      expect(reaction.args).toEqual({
+        account: getAddress(LOCAL_ACCOUNT),
+        contentId: 1n,
+        contentKind: 1,
+        liked,
+      })
+    }
     await app.screenshot({
       fullPage: true,
       path: testInfo.outputPath('lifeinvader-confirmed.png'),

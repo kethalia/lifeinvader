@@ -344,6 +344,7 @@ const MAX_RECEIPT_EVENT_DATA_BYTES =
   32 +
   MAX_MEDIA_CID_BYTES
 export const POST_CONTENT_KIND = 0
+export const COMMENT_CONTENT_KIND = 1
 export type ProtocolInspection =
   | { kind: 'ready' }
   | { kind: 'deployable' }
@@ -884,6 +885,12 @@ export type ExpectedPostAction =
       postId: bigint
     })
   | { account: Address; kind: 'like'; liked: boolean; postId: bigint }
+  | {
+      account: Address
+      commentId: bigint
+      kind: 'comment-like'
+      liked: boolean
+    }
   | { account: Address; kind: 'repost'; postId: bigint }
 
 function normalizeDirectMessageAccount(value: unknown, label: string) {
@@ -1187,6 +1194,27 @@ export function assertExpectedPostAction(
   receipt: TransactionReceipt,
 ) {
   const account = expectedTopic(expected.account)
+  if (expected.kind === 'comment-like') {
+    assertCommentId(expected.commentId)
+    const found = hasExpectedProtocolLog(
+      logs,
+      receipt,
+      [
+        LIKE_SET_TOPIC,
+        expectedTopic(BigInt(COMMENT_CONTENT_KIND)),
+        expectedTopic(expected.commentId),
+        account,
+      ],
+      encodeAbiParameters(LIKE_DATA_PARAMETERS, [expected.liked]),
+    )
+    if (!found) {
+      throw new Error(
+        'The receipt did not contain the expected comment-like event.',
+      )
+    }
+    return
+  }
+  assertPostId(expected.postId)
   const postId = expectedTopic(expected.postId)
   const found =
     expected.kind === 'comment'
@@ -1542,6 +1570,16 @@ function assertPostId(postId: bigint) {
   }
 }
 
+function assertCommentId(commentId: bigint) {
+  if (
+    typeof commentId !== 'bigint' ||
+    commentId < 1n ||
+    commentId > MAX_UINT256
+  ) {
+    throw new Error('The selected comment identifier is invalid.')
+  }
+}
+
 function assertGroupId(groupId: bigint) {
   if (groupId < 1n || groupId > MAX_UINT256) {
     throw new Error('The selected group identifier is invalid.')
@@ -1557,7 +1595,11 @@ async function submitPostAction(
   onSubmitted?: TransactionSubmitted,
   localProvider?: Eip1193Provider,
 ) {
-  assertPostId(expectedPostAction.postId)
+  if (expectedPostAction.kind === 'comment-like') {
+    assertCommentId(expectedPostAction.commentId)
+  } else {
+    assertPostId(expectedPostAction.postId)
+  }
   const guard = await createTransactionGuard(provider, account, chainId)
   try {
     if ((await inspectProtocol(provider)).kind !== 'ready') {
@@ -1628,6 +1670,34 @@ export async function setPostLike(
       args: [POST_CONTENT_KIND, postId, liked],
     }),
     { account, kind: 'like', liked, postId },
+    onSubmitted,
+    localProvider,
+  )
+}
+
+export async function setCommentLike(
+  provider: Eip1193Provider,
+  account: Address,
+  chainId: bigint,
+  commentId: bigint,
+  liked: boolean,
+  onSubmitted?: TransactionSubmitted,
+  localProvider?: Eip1193Provider,
+) {
+  assertCommentId(commentId)
+  if (typeof liked !== 'boolean') {
+    throw new Error('The selected comment like state is invalid.')
+  }
+  return await submitPostAction(
+    provider,
+    account,
+    chainId,
+    encodeFunctionData({
+      abi: SET_LIKE_ABI,
+      functionName: 'setLike',
+      args: [COMMENT_CONTENT_KIND, commentId, liked],
+    }),
+    { account, commentId, kind: 'comment-like', liked },
     onSubmitted,
     localProvider,
   )

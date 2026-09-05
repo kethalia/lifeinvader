@@ -47,6 +47,7 @@ import {
   MAX_POST_BODY_BYTES,
   publishComment,
   publishRepost,
+  setCommentLike,
   setPostLike,
   waitForTransactionReceipt,
   type ExpectedPostAction,
@@ -208,15 +209,19 @@ function commentButtonLabel(state: PostCommentReadModelState) {
 }
 
 function PostCommentList({
+  actionsDisabled,
   gatewayTemplate,
   offset,
+  onLike,
   onOffset,
   page,
   postId,
   retrieveMedia,
 }: {
+  actionsDisabled: boolean
   gatewayTemplate?: string
   offset: number
+  onLike: (commentId: bigint, liked: boolean) => void
   onOffset: (offset: number) => void
   page: PostCommentProjectionReadPage
   postId: bigint
@@ -263,6 +268,27 @@ function PostCommentList({
                     value={comment.mediaCid}
                   />
                 ) : null}
+                <div
+                  aria-label={`Public actions for comment ${comment.commentId.toString()}`}
+                  className="comment-actions"
+                >
+                  <button
+                    aria-label={`Record like for comment ${comment.commentId.toString()}`}
+                    disabled={actionsDisabled}
+                    onClick={() => onLike(comment.commentId, true)}
+                    type="button"
+                  >
+                    Like
+                  </button>
+                  <button
+                    aria-label={`Record unlike for comment ${comment.commentId.toString()}`}
+                    disabled={actionsDisabled}
+                    onClick={() => onLike(comment.commentId, false)}
+                    type="button"
+                  >
+                    Unlike
+                  </button>
+                </div>
               </li>
             ))}
           </ol>
@@ -336,6 +362,12 @@ function actionLabel(expected: ExpectedPostAction) {
   return expected.liked ? 'Like' : 'Unlike'
 }
 
+function actionTarget(expected: ExpectedPostAction) {
+  return expected.kind === 'comment-like'
+    ? `comment #${expected.commentId.toString()}`
+    : `post #${expected.postId.toString()}`
+}
+
 function actionContextMatchesSession(
   context: PostActionContext,
   session: WalletSession,
@@ -407,6 +439,7 @@ export function PostFeedPanel({
   resetCommentCache,
   retrieveMedia,
   session,
+  setCommentLikeAction = setCommentLike,
   setPostLikeAction = setPostLike,
   synchronize = synchronizePostFeed,
   synchronizePostComments,
@@ -424,6 +457,7 @@ export function PostFeedPanel({
   resetCommentCache?: PostCommentStreamCacheResetter
   retrieveMedia?: MediaRetriever
   session: WalletSession
+  setCommentLikeAction?: typeof setCommentLike
   setPostLikeAction?: typeof setPostLike
   synchronize?: PostFeedSynchronizer
   synchronizePostComments?: PostCommentStreamSynchronizer
@@ -744,8 +778,14 @@ export function PostFeedPanel({
   }
 
   const runPostAction = (
-    postId: bigint,
-    action: 'comment' | 'like' | 'repost' | 'unlike',
+    targetId: bigint,
+    action:
+      | 'comment'
+      | 'like'
+      | 'like-comment'
+      | 'repost'
+      | 'unlike'
+      | 'unlike-comment',
     comment?: { body: string; mediaCid: Hex; revision: number },
   ) => {
     const account = session.account
@@ -768,13 +808,25 @@ export function PostFeedPanel({
         body: comment.body,
         kind: 'comment',
         mediaCid: comment.mediaCid,
-        postId,
+        postId: targetId,
+      }
+    } else if (action === 'like-comment' || action === 'unlike-comment') {
+      expected = {
+        account,
+        commentId: targetId,
+        kind: 'comment-like',
+        liked: action === 'like-comment',
       }
     } else {
       expected =
         action === 'repost'
-          ? { account, kind: 'repost', postId }
-          : { account, kind: 'like', liked: action === 'like', postId }
+          ? { account, kind: 'repost', postId: targetId }
+          : {
+              account,
+              kind: 'like',
+              liked: action === 'like',
+              postId: targetId,
+            }
     }
     const context: PostActionContext = {
       chainId,
@@ -816,20 +868,35 @@ export function PostFeedPanel({
             provider,
             account,
             chainId,
-            postId,
+            expected.postId,
             { body: expected.body, mediaCid: expected.mediaCid },
             onSubmitted,
           )
         : expected.kind === 'repost'
-          ? publishRepostAction(provider, account, chainId, postId, onSubmitted)
-          : setPostLikeAction(
+          ? publishRepostAction(
               provider,
               account,
               chainId,
-              postId,
-              expected.liked,
+              expected.postId,
               onSubmitted,
             )
+          : expected.kind === 'comment-like'
+            ? setCommentLikeAction(
+                provider,
+                account,
+                chainId,
+                expected.commentId,
+                expected.liked,
+                onSubmitted,
+              )
+            : setPostLikeAction(
+                provider,
+                account,
+                chainId,
+                expected.postId,
+                expected.liked,
+                onSubmitted,
+              )
     void (async () => {
       try {
         const receipt = await operation()
@@ -877,7 +944,7 @@ export function PostFeedPanel({
               ...context,
               message: describeRpcError(
                 actionError,
-                'The public post action failed.',
+                'The public feed action failed.',
               ),
             },
           ].slice(-12),
@@ -1263,8 +1330,8 @@ export function PostFeedPanel({
             role="status"
           >
             <span>
-              {actionLabel(transaction.expected)} for post #
-              {transaction.expected.postId.toString()} on chain{' '}
+              {actionLabel(transaction.expected)} for{' '}
+              {actionTarget(transaction.expected)} on chain{' '}
               {transaction.chainId.toString()} from{' '}
               <code title={transaction.expected.account}>
                 {shortValue(transaction.expected.account)}
@@ -1322,8 +1389,8 @@ export function PostFeedPanel({
       })}
       {activeCompletedPostAction ? (
         <p className="feed-feedback post-action-complete" role="status">
-          {actionLabel(activeCompletedPostAction.expected)} for post #
-          {activeCompletedPostAction.expected.postId.toString()} was included in
+          {actionLabel(activeCompletedPostAction.expected)} for{' '}
+          {actionTarget(activeCompletedPostAction.expected)} was included in
           block {activeCompletedPostAction.receipt.blockNumber.toString()}.
         </p>
       ) : null}
@@ -1538,8 +1605,15 @@ export function PostFeedPanel({
                   </div>
                   {commentPage ? (
                     <PostCommentList
+                      actionsDisabled={postActionsLocked}
                       gatewayTemplate={gateway?.template}
                       offset={commentOffset}
+                      onLike={(commentId, liked) =>
+                        runPostAction(
+                          commentId,
+                          liked ? 'like-comment' : 'unlike-comment',
+                        )
+                      }
                       onOffset={(offset) =>
                         setCommentPageOffsets((current) => ({
                           ...current,
