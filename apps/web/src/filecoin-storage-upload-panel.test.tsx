@@ -121,10 +121,12 @@ function connectedSession(account: Address = ACCOUNT): WalletSession {
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((next) => {
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((next, fail) => {
     resolve = next
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, reject, resolve }
 }
 
 function submissionUnknown(hash?: Hash) {
@@ -497,6 +499,57 @@ describe('FilecoinStorageUploadPanel', () => {
         }) as HTMLInputElement
       ).disabled,
     ).toBe(false)
+  })
+
+  it('keeps a failed cleanup retry detached from a replacement context', async () => {
+    const retryPending = deferred<void>()
+    const journal = recoveryJournal()
+    vi.mocked(journal.remove)
+      .mockRejectedValueOnce(new Error('Initial cleanup failure.'))
+      .mockImplementationOnce(async () => await retryPending.promise)
+      .mockResolvedValueOnce(undefined)
+    const uploadStorage = vi.fn<FilecoinStorageUploader>(
+      async (_provider, _prepared, _quote, _providerId, options) => {
+        await options.onStored?.(checkpoint)
+        await options.onSubmitted?.(TRANSACTION_HASH)
+        return result
+      },
+    )
+    const view = renderUpload({ journal, uploadStorage })
+    authorizeUpload()
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /retry cleanup.*prepare another attempt/i,
+      }),
+    )
+    await waitFor(() => expect(journal.remove).toHaveBeenCalledTimes(2))
+
+    view.rerender(
+      <FilecoinStorageUploadPanel
+        prepared={replacementPrepared}
+        quote={quote}
+        recoveryJournal={journal}
+        session={connectedSession()}
+        uploadStorage={uploadStorage}
+      />,
+    )
+    await act(async () => retryPending.reject(new Error('Retry failed.')))
+
+    expect(screen.queryByText(/storage confirmed in block/i)).toBeNull()
+    expect(await screen.findByText(/Retry failed/i)).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /retry clearing local recovery entry/i,
+      }),
+    )
+    await waitFor(() => expect(journal.remove).toHaveBeenCalledTimes(3))
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', {
+          name: /retry clearing local recovery entry/i,
+        }),
+      ).toBeNull(),
+    )
   })
 
   it('recovers a standalone paid data set without claiming storage', async () => {

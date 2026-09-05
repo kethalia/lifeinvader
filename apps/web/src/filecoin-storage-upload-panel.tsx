@@ -869,9 +869,15 @@ export function FilecoinStorageUploadPanel({
           error,
           'Browser storage is unavailable.',
         )}`
-        setState(
-          previous.kind === 'cleanup'
-            ? { ...previous, message: warning }
+        const previousContextCurrent =
+          previous.kind !== 'cleanup' &&
+          walletContextMatches(previous.context, latestSession.current) &&
+          mediaContextMatches(previous.context, latestPrepared.current)
+        setState((current) =>
+          previous.kind === 'cleanup' ||
+          current.kind === 'cleanup' ||
+          !previousContextCurrent
+            ? { checkpoint, kind: 'cleanup', message: warning }
             : { ...previous, recoveryWarning: warning },
         )
       } finally {
