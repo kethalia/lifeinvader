@@ -1330,7 +1330,8 @@ export async function uploadFilecoinStorage(
   let transportClosed = false
   let lastProgress = 0
   const pendingRequests = new Set<Promise<unknown>>()
-  const commitCanBeSubmitted = () => commitAuthorized || signatureCount === 2
+  const authorizationCanBeSubmitted = () =>
+    commitAuthorized || signatureCount > 0
   const assertTransportOpen = () => {
     if (transportClosed) {
       throw uploadError('the adapter used a closed upload transport.')
@@ -1594,7 +1595,7 @@ export async function uploadFilecoinStorage(
   }
   const onSubmitted = (value: Hash) => {
     assertTransportOpen()
-    if (!commitCanBeSubmitted() || submittedCount !== 0) {
+    if (!authorizationCanBeSubmitted() || submittedCount !== 0) {
       throw uploadError('the provider reported an unexpected transaction.')
     }
     submittedCount += 1
@@ -1623,13 +1624,14 @@ export async function uploadFilecoinStorage(
         await closeTransport()
       }
     } catch (error) {
-      if (walletRejection && !commitCanBeSubmitted()) throw walletRejection
+      if (walletRejection && !authorizationCanBeSubmitted())
+        throw walletRejection
       try {
         guard.assertUnchanged()
       } catch (contextError) {
-        if (!commitCanBeSubmitted()) throw contextError
+        if (!authorizationCanBeSubmitted()) throw contextError
       }
-      if (commitCanBeSubmitted() && checkpoint) {
+      if (authorizationCanBeSubmitted() && checkpoint) {
         throw new FilecoinStorageSubmissionUnknownError(
           error,
           checkpoint,
@@ -1700,7 +1702,7 @@ export async function uploadFilecoinStorage(
         transactionHash,
       })
     } catch (error) {
-      if (commitCanBeSubmitted() && checkpoint) {
+      if (authorizationCanBeSubmitted() && checkpoint) {
         throw new FilecoinStorageSubmissionUnknownError(
           error,
           checkpoint,

@@ -346,14 +346,13 @@ function successfulExecutor({ confirmedTxHash = REPLACEMENT_HASH, createData = c
     return { confirmedTxHash, dataSetId, isNewDataSet: true, pieceIds: [pieceId], txHash: initialTxHash }
   }
 }
+// prettier-ignore
 async function runUpload(
   executeUpload: FilecoinStorageUploadExecutor = successfulExecutor(),
   options: {
-    hash?: Hash
-    logs?: unknown[] | ((uploadId: Hex) => unknown[])
+    hash?: Hash; logs?: unknown[] | ((uploadId: Hex) => unknown[])
     onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => void
-    onSubmitted?: (hash: Hash) => void
-    provider?: Eip1193Provider
+    onSubmitted?: (hash: Hash) => void; provider?: Eip1193Provider
     quoteStorage?: NonNullable<FilecoinStorageUploadOptions['quoteStorage']>
     signal?: AbortSignal
   } = {},
@@ -361,20 +360,14 @@ async function runUpload(
   const hash = options.hash ?? REPLACEMENT_HASH
   return await uploadFilecoinStorage(
     options.provider ?? walletProvider({ hash, logs: options.logs }),
-    prepared,
-    readyQuote(),
-    PROVIDER_ID,
+    prepared, readyQuote(), PROVIDER_ID,
     {
-      executeUpload,
-      expectedAccount: ACCOUNT,
+      executeUpload, expectedAccount: ACCOUNT,
       expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
-      inspectStorage: inspection(),
-      onStored: options.onStored,
-      onSubmitted: options.onSubmitted,
-      pollIntervalMs: 1,
+      inspectStorage: inspection(), onStored: options.onStored,
+      onSubmitted: options.onSubmitted, pollIntervalMs: 1,
       quoteStorage: options.quoteStorage ?? vi.fn(async () => readyQuote()),
-      receiptTimeoutMs: 100,
-      signal: options.signal,
+      receiptTimeoutMs: 100, signal: options.signal,
     },
   )
 }
@@ -499,7 +492,9 @@ describe('Filecoin storage upload execution', () => {
     for (const [executor, message, signatures] of cases) {
       const wallet = walletProvider()
       const request = vi.spyOn(wallet, 'request')
-      await expect(runUpload(executor, { provider: wallet })).rejects.toThrow(message)
+      const pending = runUpload(executor, { provider: wallet })
+      if (signatures === 0) await expect(pending).rejects.toThrow(message)
+      else await expect(pending).rejects.toMatchObject(recoveryFailure(message, null))
       expect(request.mock.calls.filter(
         ([candidate]) => candidate.method === 'eth_signTypedData_v4',
       )).toHaveLength(signatures)
@@ -599,7 +594,7 @@ describe('Filecoin storage upload execution', () => {
       throw new Error('fixture stopped after first signature')
     }
     await expect(runUpload(concurrent, { provider: concurrentWallet.provider }))
-      .rejects.toThrow(/provider did not complete/i)
+      .rejects.toMatchObject(recoveryFailure(/fixture stopped/i, null))
     expect(concurrentWallet.signatureRequest).toHaveBeenCalledOnce()
     const cancelledWallet = delayedWallet()
     const controller = new AbortController()
@@ -641,6 +636,13 @@ describe('Filecoin storage upload execution', () => {
         return await signAuthorization(String(Array.isArray(params) ? params[1] : undefined))
       },
     }) })).rejects.toMatchObject(recoveryFailure(/after submission/i, TX_HASH))
+    let secondPrompt = 0
+    await expect(runUpload(successfulExecutor(), { provider: walletProvider({
+      signatureRequest: async ({ params }) => {
+        if (++secondPrompt === 2) throw rejection
+        return await signAuthorization(String(Array.isArray(params) ? params[1] : undefined))
+      },
+    }) })).rejects.toMatchObject(recoveryFailure(/User rejected/i, null))
   })
   // prettier-ignore
   it('cancels receipt polling and a hung authorized provider', async () => {
