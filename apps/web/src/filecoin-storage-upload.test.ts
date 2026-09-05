@@ -802,6 +802,11 @@ describe('Filecoin storage receipt authentication', () => {
       walletProvider(), REPLACEMENT_HASH, saved, { expectedAccount: OTHER_ACCOUNT,
         expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1, receiptTimeoutMs: 100 },
     )).rejects.toThrow(/different upload context/i)
+    const controller = new AbortController()
+    controller.abort(new DOMException('Stop recovery.', 'AbortError'))
+    await expect(checkFilecoinStorageUploadReceipt(walletProvider(), REPLACEMENT_HASH, saved,
+      { expectedAccount: ACCOUNT, expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+        pollIntervalMs: 1, receiptTimeoutMs: 100, signal: controller.signal })).rejects.toThrow(/Stop recovery/i)
   })
   // prettier-ignore
   it('does not mistake an indexing request for completed indexing', async () => {

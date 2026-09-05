@@ -19,6 +19,11 @@ import {
   type FilecoinStorageQuote,
   type FilecoinStorageQuoteOptions,
 } from './filecoin-storage-quote'
+import {
+  FilecoinStorageUploadPanel,
+  type FilecoinStorageUploader,
+  type FilecoinStorageUploadReceiptChecker,
+} from './filecoin-storage-upload-panel'
 import type { PreparedMediaCar } from './paid-media-car'
 import {
   isTransactionRevertedError,
@@ -271,6 +276,7 @@ function FilecoinFundingStatus({
 
 export function FilecoinStoragePanel({
   checkFundingReceipt,
+  checkUploadReceipt,
   disabled = false,
   fundStorage,
   inspectStorage = inspectFilecoinStorage,
@@ -279,8 +285,10 @@ export function FilecoinStoragePanel({
   publicationChainId,
   quoteStorage = quoteFilecoinStorage,
   session,
+  uploadStorage,
 }: {
   checkFundingReceipt?: FilecoinStorageFundingReceiptChecker
+  checkUploadReceipt?: FilecoinStorageUploadReceiptChecker
   disabled?: boolean
   fundStorage?: FilecoinStorageFunder
   inspectStorage?: FilecoinStorageInspector
@@ -289,6 +297,7 @@ export function FilecoinStoragePanel({
   publicationChainId?: bigint
   quoteStorage?: FilecoinStorageQuoter
   session: WalletSession
+  uploadStorage?: FilecoinStorageUploader
 }) {
   const titleId = useId()
   const fundingAcknowledgmentId = useId()
@@ -308,14 +317,22 @@ export function FilecoinStoragePanel({
     kind: 'idle',
   })
   const [fundingAcknowledged, setFundingAcknowledged] = useState(false)
+  const [uploadWriteLocked, setUploadWriteLocked] = useState(false)
   const network = getFilecoinStorageNetwork(session.chainId)
   const fundingWriteLocked = fundingStateLocksWrites(fundingState)
+  const storageWriteLocked = fundingWriteLocked || uploadWriteLocked
   sessionRef.current = session
 
   useEffect(() => {
-    onWriteLockChange?.(fundingWriteLocked)
-    return () => onWriteLockChange?.(false)
-  }, [fundingWriteLocked, onWriteLockChange])
+    onWriteLockChange?.(storageWriteLocked)
+  }, [onWriteLockChange, storageWriteLocked])
+
+  useEffect(
+    () => () => {
+      onWriteLockChange?.(false)
+    },
+    [onWriteLockChange],
+  )
 
   useEffect(() => {
     inspectionSequence.current += 1
@@ -383,7 +400,7 @@ export function FilecoinStoragePanel({
       !provider ||
       session.status !== 'connected' ||
       !network ||
-      fundingWriteLocked
+      storageWriteLocked
     )
       return
     const operationId = ++inspectionSequence.current
@@ -440,7 +457,7 @@ export function FilecoinStoragePanel({
       !network ||
       state.kind !== 'complete' ||
       state.inspection.kind !== 'ready' ||
-      fundingWriteLocked
+      storageWriteLocked
     )
       return
     const operationId = ++quoteSequence.current
@@ -542,6 +559,7 @@ export function FilecoinStoragePanel({
       session.status !== 'connected' ||
       !network ||
       !displayedQuote ||
+      uploadWriteLocked ||
       displayedQuote.ready
     )
       return
@@ -812,7 +830,7 @@ export function FilecoinStoragePanel({
             type="button"
             disabled={
               disabled ||
-              fundingWriteLocked ||
+              storageWriteLocked ||
               state.kind === 'checking' ||
               quoteState.kind === 'checking'
             }
@@ -845,7 +863,7 @@ export function FilecoinStoragePanel({
                 type="button"
                 disabled={
                   disabled ||
-                  fundingWriteLocked ||
+                  storageWriteLocked ||
                   quoteState.kind === 'checking'
                 }
                 onClick={runQuote}
@@ -990,7 +1008,7 @@ export function FilecoinStoragePanel({
                   >
                     <input
                       checked={fundingAcknowledged}
-                      disabled={disabled || fundingWriteLocked}
+                      disabled={disabled || storageWriteLocked}
                       id={fundingAcknowledgmentId}
                       onChange={(event) =>
                         setFundingAcknowledged(event.target.checked)
@@ -1006,7 +1024,7 @@ export function FilecoinStoragePanel({
                   <button
                     className="button-accent"
                     disabled={
-                      disabled || fundingWriteLocked || !fundingAcknowledged
+                      disabled || storageWriteLocked || !fundingAcknowledged
                     }
                     onClick={runFunding}
                     type="button"
@@ -1037,6 +1055,16 @@ export function FilecoinStoragePanel({
         onClearUnknown={clearUnknownFunding}
         onRetryReceipt={retryFundingReceipt}
         state={fundingState}
+      />
+
+      <FilecoinStorageUploadPanel
+        checkReceipt={checkUploadReceipt}
+        disabled={disabled || fundingWriteLocked}
+        onWriteLockChange={setUploadWriteLocked}
+        prepared={prepared}
+        quote={quote}
+        session={session}
+        uploadStorage={uploadStorage}
       />
 
       {publicationChainId !== undefined &&
