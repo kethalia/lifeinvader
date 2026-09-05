@@ -1,6 +1,8 @@
 import {
   openEventCache,
+  validateEventCacheScanBaseline,
   type BrowserEventCache,
+  type EventCacheDerivedStateBinding,
   type EventCachePosition,
   type EventCacheScanBaseline,
   type EventCacheScanCursor,
@@ -12,9 +14,11 @@ import {
   type EventCursor,
 } from './event-indexer'
 import {
+  getPostCommentProjectionSnapshotDigest,
   PostCommentProjection,
   type PostCommentProjectionProgress,
   type PostCommentProjectionReadOptions,
+  type PostCommentProjectionSnapshot,
 } from './post-comment-projection'
 import {
   POST_COMMENT_EVENT_PAGE_SIZE,
@@ -45,7 +49,14 @@ export type PostCommentProjectionRunSnapshot = {
 export type OpenPostCommentProjectionRunOptions =
   PostCommentStreamStorageOptions & {
     pageSize?: number
+    resume?: PostCommentProjectionResumeState
   }
+
+export type PostCommentProjectionResumeState = {
+  baseline: EventCacheScanBaseline
+  binding: EventCacheDerivedStateBinding
+  projection: PostCommentProjectionSnapshot
+}
 
 type NormalizedProjectionAnchor = {
   chainId: bigint
@@ -53,6 +64,12 @@ type NormalizedProjectionAnchor = {
   head: bigint
   issued: PostCommentProjectionAnchor
   safeHead?: bigint
+}
+
+type NormalizedProjectionResume = {
+  baseline: EventCacheScanBaseline
+  binding: EventCacheDerivedStateBinding
+  projection: PostCommentProjection
 }
 
 function projectionRunError(message: string) {
@@ -93,6 +110,10 @@ function copyBaseline(baseline: EventCacheScanBaseline) {
   }
 }
 
+function copyBinding(binding: EventCacheDerivedStateBinding) {
+  return { ...binding }
+}
+
 function sameCursor(first: EventCursor, second: EventCursor) {
   return (
     first.chainId === second.chainId &&
@@ -127,6 +148,26 @@ function sameCachePosition(
     first.generation === second.generation &&
     first.revision === second.revision &&
     sameCursor(first.cursor, second.cursor)
+  )
+}
+
+function samePostIds(first: readonly bigint[], second: readonly bigint[]) {
+  return (
+    first.length === second.length &&
+    first.every((postId, index) => postId === second[index])
+  )
+}
+
+function sameCheckpoint(
+  first: { blockHash: string; blockNumber: bigint } | undefined,
+  second: { blockHash: string; blockNumber: bigint } | undefined,
+) {
+  return (
+    first === second ||
+    (first !== undefined &&
+      second !== undefined &&
+      first.blockHash === second.blockHash &&
+      first.blockNumber === second.blockNumber)
   )
 }
 
@@ -212,6 +253,79 @@ function getSeed(position: EventCachePosition): EventCursor {
   }
 }
 
+function normalizeResume(
+  value: unknown,
+  anchor: NormalizedProjectionAnchor,
+  requested: PostCommentProjection,
+): NormalizedProjectionResume | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw projectionRunError('resume state')
+  let projection: PostCommentProjection
+  let baseline: EventCacheScanBaseline
+  try {
+    projection = PostCommentProjection.fromSnapshot(value.projection)
+    baseline = validateEventCacheScanBaseline(
+      value.baseline,
+      getSeed(anchor.comments),
+    )
+  } catch {
+    throw projectionRunError('resume state')
+  }
+  if (!samePostIds(requested.trackedPostIds, projection.trackedPostIds)) {
+    throw projectionRunError('resume posts')
+  }
+  if (!isRecord(value.binding)) {
+    throw projectionRunError('resume binding')
+  }
+  const { digest, proof } = value.binding
+  if (
+    typeof digest !== 'string' ||
+    !/^0x[0-9a-f]{64}$/.test(digest) ||
+    typeof proof !== 'string' ||
+    !/^0x[0-9a-f]{64}$/.test(proof)
+  ) {
+    throw projectionRunError('resume binding')
+  }
+  const binding = { digest, proof } as EventCacheDerivedStateBinding
+  if (getPostCommentProjectionSnapshotDigest(projection.snapshot) !== digest) {
+    throw projectionRunError('resume projection digest')
+  }
+  if (
+    baseline.generation !== anchor.comments.generation ||
+    baseline.revision > anchor.comments.revision ||
+    baseline.cursor.nextBlock > anchor.comments.cursor.nextBlock ||
+    (baseline.revision === anchor.comments.revision &&
+      !sameCursor(baseline.cursor, anchor.comments.cursor))
+  ) {
+    throw projectionRunError('resume baseline')
+  }
+  const progress = projection.progress
+  const checkpoint = baseline.cursor.checkpoints.at(-1)
+  if (
+    baseline.cursor.nextBlock === baseline.cursor.startBlock
+      ? checkpoint !== undefined || progress.confirmedThrough !== undefined
+      : checkpoint === undefined ||
+        checkpoint.blockNumber !== baseline.cursor.nextBlock - 1n ||
+        !sameCheckpoint(checkpoint, progress.confirmedThrough) ||
+        !anchor.comments.cursor.checkpoints.some((current) =>
+          sameCheckpoint(current, checkpoint),
+        )
+  ) {
+    throw projectionRunError('resume confirmation')
+  }
+  if (
+    progress.commentCount !== BigInt(baseline.logCount) ||
+    (baseline.last === undefined
+      ? progress.last !== undefined
+      : progress.last === undefined ||
+        baseline.last.blockNumber !== progress.last.blockNumber ||
+        baseline.last.logIndex !== progress.last.logIndex)
+  ) {
+    throw projectionRunError('resume tail')
+  }
+  return { baseline, binding, projection }
+}
+
 function assertPageShape(page: EventCacheScanPage) {
   if (page.reset) throw projectionRunError('cache reset')
   if (page.complete) {
@@ -227,10 +341,12 @@ function assertPageShape(page: EventCacheScanPage) {
 
 export class PostCommentProjectionRun {
   readonly #anchor: NormalizedProjectionAnchor
+  readonly #initialLogCount: number
   readonly #pageSize: number
   readonly #projection: PostCommentProjection
   #advancing = false
   #baseline?: EventCacheScanBaseline
+  #binding?: EventCacheDerivedStateBinding
   #cache?: BrowserEventCache
   #continuation?: EventCacheScanCursor
   #failure?: Error
@@ -238,17 +354,21 @@ export class PostCommentProjectionRun {
   #logsProcessed = 0n
   #pagesScanned = 0n
   #phase: PostCommentProjectionRunPhase = 'comments'
+  #scanBaseline?: EventCacheScanBaseline
 
   private constructor(
     anchor: NormalizedProjectionAnchor,
     pageSize: number,
     projection: PostCommentProjection,
     cache: BrowserEventCache,
+    resume?: NormalizedProjectionResume,
   ) {
     this.#anchor = anchor
+    this.#initialLogCount = resume?.baseline.logCount ?? 0
     this.#pageSize = pageSize
     this.#projection = projection
     this.#cache = cache
+    this.#scanBaseline = resume ? copyBaseline(resume.baseline) : undefined
   }
 
   static async open(
@@ -266,14 +386,30 @@ export class PostCommentProjectionRun {
     ) {
       throw projectionRunError('page size')
     }
-    const projection = new PostCommentProjection(postIdsValue)
+    const requested = new PostCommentProjection(postIdsValue)
+    const resume = normalizeResume(optionsValue.resume, anchor, requested)
+    const projection = resume?.projection ?? requested
     const cache = await openEventCache({
       databaseName: optionsValue.databaseName,
       factory: optionsValue.factory,
       filter: PUBLISHED_COMMENT_FILTER,
       keyRange: optionsValue.keyRange,
     })
-    return new PostCommentProjectionRun(anchor, pageSize, projection, cache)
+    try {
+      if (resume) {
+        await cache.authenticateDerivedState(resume.baseline, resume.binding)
+      }
+      return new PostCommentProjectionRun(
+        anchor,
+        pageSize,
+        projection,
+        cache,
+        resume,
+      )
+    } catch (error) {
+      cache.close()
+      throw error
+    }
   }
 
   get snapshot(): PostCommentProjectionRunSnapshot {
@@ -301,6 +437,24 @@ export class PostCommentProjectionRun {
       throw new Error('The post comment projection is not complete.')
     }
     return this.#projection.progress
+  }
+
+  get projectionSnapshot(): PostCommentProjectionSnapshot {
+    if (this.#phase !== 'complete') {
+      throw new Error('The post comment projection is not complete.')
+    }
+    return this.#projection.snapshot
+  }
+
+  get resumeState(): PostCommentProjectionResumeState {
+    if (this.#phase !== 'complete' || !this.#baseline || !this.#binding) {
+      throw new Error('The post comment projection is not complete.')
+    }
+    return {
+      baseline: copyBaseline(this.#baseline),
+      binding: copyBinding(this.#binding),
+      projection: this.#projection.snapshot,
+    }
   }
 
   get trackedPostIds() {
@@ -341,6 +495,7 @@ export class PostCommentProjectionRun {
     this.#advancing = true
     try {
       const page = await cache.scan(getSeed(this.#anchor.comments), {
+        baseline: this.#continuation ? undefined : this.#scanBaseline,
         continuation: this.#continuation,
         limit: this.#pageSize,
         resetOnCorruption: false,
@@ -370,7 +525,9 @@ export class PostCommentProjectionRun {
     this.#interruption.abort()
     this.#projection.reset()
     this.#baseline = undefined
+    this.#binding = undefined
     this.#continuation = undefined
+    this.#scanBaseline = undefined
     this.#closeCache()
   }
 
@@ -380,6 +537,7 @@ export class PostCommentProjectionRun {
       throw projectionRunError('cache anchor')
     }
     this.#projection.applyLogs(page.logs)
+    this.#scanBaseline = undefined
     this.#logsProcessed += BigInt(page.logs.length)
     this.#pagesScanned += 1n
     if (!page.complete) {
@@ -390,8 +548,9 @@ export class PostCommentProjectionRun {
     const progress = this.#projection.progress
     if (
       !sameCachePosition(baseline, this.#anchor.comments) ||
-      BigInt(baseline.logCount) !== this.#logsProcessed ||
-      progress.commentCount !== this.#logsProcessed
+      BigInt(baseline.logCount) !==
+        BigInt(this.#initialLogCount) + this.#logsProcessed ||
+      progress.commentCount !== BigInt(baseline.logCount)
     ) {
       throw projectionRunError('completed baseline')
     }
@@ -427,9 +586,24 @@ export class PostCommentProjectionRun {
       throw new Error('The post comment projection run is closed.')
     }
     if (currentPhase !== 'authenticate') throw projectionRunError('phase')
+    if (this.#anchor.safeHead !== undefined) {
+      const checkpoint = this.#anchor.comments.cursor.checkpoints.at(-1)
+      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
+        throw projectionRunError('confirmed projection boundary')
+      }
+      this.#projection.confirmThrough(checkpoint)
+    }
+    const digest = getPostCommentProjectionSnapshotDigest(
+      this.#projection.snapshot,
+    )
+    let binding: EventCacheDerivedStateBinding | undefined
     await authenticateIssuedPostCommentProjectionAnchor(
       this.#anchor.issued,
       async () => {
+        if (this.#readPhase() !== 'authenticate') {
+          throw new Error('The post comment projection run is closed.')
+        }
+        binding = await cache.bindDerivedState(baseline, digest)
         if (this.#readPhase() !== 'authenticate') {
           throw new Error('The post comment projection run is closed.')
         }
@@ -451,13 +625,8 @@ export class PostCommentProjectionRun {
       throw new Error('The post comment projection run is closed.')
     }
     if (currentPhase !== 'authenticate') throw projectionRunError('phase')
-    if (this.#anchor.safeHead !== undefined) {
-      const checkpoint = this.#anchor.comments.cursor.checkpoints.at(-1)
-      if (!checkpoint || checkpoint.blockNumber !== this.#anchor.safeHead) {
-        throw projectionRunError('confirmed projection boundary')
-      }
-      this.#projection.confirmThrough(checkpoint)
-    }
+    if (!binding) throw projectionRunError('derived state binding')
+    this.#binding = copyBinding(binding)
     this.#closeCache()
     this.#phase = 'complete'
   }
@@ -468,7 +637,9 @@ export class PostCommentProjectionRun {
     this.#interruption.abort()
     this.#projection.reset()
     this.#baseline = undefined
+    this.#binding = undefined
     this.#continuation = undefined
+    this.#scanBaseline = undefined
     this.#closeCache()
   }
 

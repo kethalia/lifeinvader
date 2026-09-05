@@ -22,6 +22,7 @@ import {
   openPostCommentProjectionRun,
   type OpenPostCommentProjectionRunOptions,
 } from './post-comment-projection-run'
+import { getPostCommentProjectionSnapshotDigest } from './post-comment-projection'
 import {
   POST_COMMENT_EVENT_START_BLOCK,
   synchronizePostCommentStream,
@@ -216,6 +217,7 @@ async function prepareProjection(logs: readonly IndexedEventLog[]) {
   return {
     anchor: synchronized.projectionAnchor,
     control,
+    provider,
     storage: storageOptions,
   }
 }
@@ -245,7 +247,9 @@ describe('post comment projection run', () => {
     expect(run.trackedPostIds).toEqual([7n, 8n])
     expect(() => run.readComments(7n)).toThrow(/not complete/i)
     expect(() => run.progress).toThrow(/not complete/i)
+    expect(() => run.projectionSnapshot).toThrow(/not complete/i)
     expect(() => run.baseline).toThrow(/not complete/i)
+    expect(() => run.resumeState).toThrow(/not complete/i)
 
     await run.advance()
     expect(run.snapshot).toMatchObject({
@@ -289,6 +293,20 @@ describe('post comment projection run', () => {
       retainedCommentCount: 3n,
     })
     expect(run.baseline.logCount).toBe(3)
+    expect(run.projectionSnapshot).toMatchObject({
+      commentCount: 3n,
+      comments: [
+        { commentId: 1n, postId: 7n },
+        { commentId: 2n, postId: 8n },
+        { commentId: 3n, postId: 7n },
+      ],
+      postIds: [7n, 8n],
+    })
+    expect(run.resumeState).toMatchObject({
+      baseline: { logCount: 3 },
+      binding: { digest: expect.stringMatching(/^0x[0-9a-f]{64}$/) },
+      projection: { commentCount: 3n, comments: expect.any(Array) },
+    })
     await expect(run.advance()).resolves.toEqual(run.snapshot)
     run.close()
     expect(run.readComments(7n).comments).toHaveLength(2)
@@ -596,12 +614,24 @@ describe('post comment projection run', () => {
 
     const comments = run.readComments(7n).comments
     comments[0]!.body = 'mutated'
+    const projectionSnapshot = run.projectionSnapshot
+    projectionSnapshot.comments[0]!.body = 'mutated snapshot'
+    projectionSnapshot.last!.logIndex = 99
     const baseline = run.baseline
     baseline.cursor.checkpoints[0]!.blockNumber = 99n
     baseline.last!.logIndex = 99
+    const resume = run.resumeState
+    resume.baseline.logCount = 99
+    resume.binding.proof = hash('mutated binding')
+    resume.projection.comments[0]!.body = 'mutated resume'
     expect(run.readComments(7n).comments[0]!.body).toBe('comment 1')
+    expect(run.projectionSnapshot.comments[0]!.body).toBe('comment 1')
+    expect(run.projectionSnapshot.last!.logIndex).toBe(0)
     expect(run.baseline.cursor.checkpoints[0]!.blockNumber).toBe(SAFE_HEAD)
     expect(run.baseline.last).toEqual({ blockNumber: 1n, logIndex: 0 })
+    expect(run.resumeState.baseline.logCount).toBe(1)
+    expect(run.resumeState.binding.proof).not.toBe(hash('mutated binding'))
+    expect(run.resumeState.projection.comments[0]!.body).toBe('comment 1')
 
     const cache = await openEventCache({
       ...prepared.storage,
@@ -614,6 +644,167 @@ describe('post comment projection run', () => {
     } finally {
       cache.close()
     }
+  })
+
+  it('authenticates a saved projection and scans only appended comments', async () => {
+    const prepared = await prepareProjection([
+      commentLog(1n, 1n, { postId: 7n }),
+      commentLog(2n, 2n, { postId: 8n }),
+      commentLog(3n, 3n, { postId: 7n }),
+    ])
+    const first = await openPostCommentProjectionRun(
+      prepared.anchor,
+      [7n],
+      prepared.storage,
+    )
+    await first.advance()
+    await first.advance()
+    const resume = first.resumeState
+
+    const cache = await openEventCache({
+      ...prepared.storage,
+      filter: PUBLISHED_COMMENT_FILTER,
+    })
+    try {
+      const seed = seedCursor()
+      const current = await cache.readLatest(seed)
+      const safeHead = 7n
+      const cursor = {
+        ...current.cursor,
+        checkpoints: [
+          ...current.cursor.checkpoints,
+          { blockHash: blockHash(safeHead), blockNumber: safeHead },
+        ],
+        nextBlock: safeHead + 1n,
+      } satisfies EventCursor
+      await cache.apply(current, {
+        caughtUp: true,
+        cursor,
+        head: 19n,
+        logs: [
+          commentLog(4n, 6n, { postId: 8n }),
+          commentLog(5n, 7n, { postId: 7n }),
+        ],
+        safeHead,
+        scannedRanges: 1,
+      })
+    } finally {
+      cache.close()
+    }
+    prepared.control.head = 19n
+    const synchronized = await synchronizePostCommentStream(
+      prepared.provider,
+      1n,
+      { storage: prepared.storage },
+    )
+    if (!synchronized.projectionAnchor) {
+      throw new Error('The updated stream did not issue a projection anchor.')
+    }
+
+    const resumed = await openPostCommentProjectionRun(
+      synchronized.projectionAnchor,
+      [7n],
+      { ...prepared.storage, pageSize: 1, resume },
+    )
+    expect(resumed.snapshot).toMatchObject({
+      commentsRetained: 2n,
+      logsProcessed: 0n,
+      pagesScanned: 0n,
+      phase: 'comments',
+      safeHead: 7n,
+    })
+    expect(() => resumed.readComments(7n)).toThrow(/not complete/i)
+
+    await resumed.advance()
+    expect(resumed.snapshot).toMatchObject({
+      commentsRetained: 2n,
+      logsProcessed: 1n,
+      pagesScanned: 1n,
+      phase: 'comments',
+    })
+    await resumed.advance()
+    expect(resumed.snapshot).toMatchObject({
+      commentsRetained: 3n,
+      logsProcessed: 2n,
+      pagesScanned: 2n,
+      phase: 'authenticate',
+    })
+    await resumed.advance()
+
+    expect(
+      resumed.readComments(7n).comments.map(({ commentId }) => commentId),
+    ).toEqual([1n, 3n, 5n])
+    expect(resumed.progress.commentCount).toBe(5n)
+    expect(resumed.baseline.logCount).toBe(5)
+    expect(resumed.projectionSnapshot.confirmedThrough).toEqual({
+      blockHash: blockHash(7n),
+      blockNumber: 7n,
+    })
+    expect(resumed.resumeState.binding.digest).not.toBe(resume.binding.digest)
+  })
+
+  it('rejects edited or mismatched saved comment projections', async () => {
+    const prepared = await prepareProjection([commentLog(1n, 1n)])
+    const run = await openPostCommentProjectionRun(
+      prepared.anchor,
+      [7n],
+      prepared.storage,
+    )
+    await run.advance()
+    await run.advance()
+    const resume = run.resumeState
+    const editedProjection = {
+      ...resume.projection,
+      comments: resume.projection.comments.map((comment) => ({
+        ...comment,
+        body: 'edited',
+      })),
+    }
+
+    await expect(
+      openPostCommentProjectionRun(prepared.anchor, [7n], {
+        ...prepared.storage,
+        resume: { ...resume, projection: editedProjection },
+      }),
+    ).rejects.toThrow(/resume projection digest/i)
+    await expect(
+      openPostCommentProjectionRun(prepared.anchor, [7n], {
+        ...prepared.storage,
+        resume: {
+          ...resume,
+          binding: { ...resume.binding, proof: hash('edited proof') },
+        },
+      }),
+    ).rejects.toThrow(/derived state binding changed or is corrupt/i)
+    await expect(
+      openPostCommentProjectionRun(prepared.anchor, [8n], {
+        ...prepared.storage,
+        resume,
+      }),
+    ).rejects.toThrow(/resume posts/i)
+
+    const mismatchedCount = {
+      ...resume.projection,
+      commentCount: 2n,
+      last: {
+        blockHash: blockHash(2n),
+        blockNumber: 2n,
+        logIndex: 0,
+      },
+    }
+    await expect(
+      openPostCommentProjectionRun(prepared.anchor, [7n], {
+        ...prepared.storage,
+        resume: {
+          ...resume,
+          binding: {
+            ...resume.binding,
+            digest: getPostCommentProjectionSnapshotDigest(mismatchedCount),
+          },
+          projection: mismatchedCount,
+        },
+      }),
+    ).rejects.toThrow(/resume tail/i)
   })
 
   it('rejects overlapping advances and discards state when closed', async () => {
