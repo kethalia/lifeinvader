@@ -22,6 +22,7 @@ import {
   getAddress,
   isAddress,
   maxUint256,
+  verifyTypedData,
   type Address,
   type Hash,
   type Hex,
@@ -41,7 +42,10 @@ import {
   type FilecoinStorageInspectionOptions,
   type FilecoinStorageNetwork,
 } from './filecoin-storage'
-import type { FilecoinStorageQuote } from './filecoin-storage-quote'
+import {
+  quoteFilecoinStorage,
+  type FilecoinStorageQuote,
+} from './filecoin-storage-quote'
 import { bindFilecoinStorageSynapseChain } from './filecoin-storage-synapse'
 import { parseMediaCid } from './media-cid'
 import {
@@ -89,6 +93,7 @@ export type FilecoinStorageUploadPlan = {
   network: FilecoinStorageNetwork
   piece: PieceDetails<Hex>
   providerId: bigint
+  quoteFingerprint: string
 }
 export type FilecoinStorageUploadPiece = PieceDetails<Uint8Array>
 export type FilecoinStorageUploadCheckpoint = {
@@ -132,6 +137,7 @@ export type FilecoinStorageUploadOptions = {
   pollIntervalMs?: number
   readTimeoutMs?: number
   receiptTimeoutMs?: number
+  quoteStorage?: typeof quoteFilecoinStorage
   signal?: AbortSignal
 }
 export type FilecoinStorageUploadReceipt = {
@@ -224,7 +230,9 @@ function requestWalletBeforeAbort(
     signal.addEventListener('abort', handleAbort, { once: true })
     if (signal.aborted) handleAbort()
   })
-  const pending = Promise.resolve().then(() => wallet.request(request))
+  const pending = new Promise((resolve) =>
+    resolve(signal.aborted ? interrupted : wallet.request(request)),
+  )
   return Promise.race([interrupted, pending]).finally(() => {
     signal.removeEventListener('abort', handleAbort)
   })
@@ -253,6 +261,11 @@ function sameNetwork(
       ),
     )
   )
+}
+function quoteFingerprint(quote: FilecoinStorageQuote) {
+  return JSON.stringify(quote, (_key, value) =>
+    typeof value === 'bigint' ? `${value.toString()}n` : value,
+  ).toLowerCase()
 }
 function validateReadyQuote(
   quote: FilecoinStorageQuote,
@@ -304,6 +317,7 @@ function validateReadyQuote(
   if (!quote.ready) {
     throw uploadError('the Filecoin Pay account is not ready for this upload.')
   }
+  return quoteFingerprint(quote)
 }
 export async function planFilecoinStorageUpload(
   prepared: PreparedMediaCar,
@@ -330,7 +344,7 @@ export async function planFilecoinStorageUpload(
     throw uploadError('the selected provider ID is invalid.')
   }
   const snapshot = await validatePreparedMediaCar(prepared)
-  validateReadyQuote(
+  const reviewedQuote = validateReadyQuote(
     quote,
     account,
     expectedChainId,
@@ -353,6 +367,7 @@ export async function planFilecoinStorageUpload(
       text: pieceCid.toString(),
     }),
     providerId,
+    quoteFingerprint: reviewedQuote,
   })
 }
 function normalizeServiceUrl(value: unknown) {
@@ -631,6 +646,7 @@ function validateCreateAuthorization(
       method: 'eth_signTypedData_v4',
       params: [plan.account, parsed.encoded],
     } satisfies ProviderRequest,
+    typedData,
   }
 }
 function validateAddPiecesAuthorization(
@@ -679,9 +695,12 @@ function validateAddPiecesAuthorization(
   }
   parseQuantity(message.nonce, 'piece authorization nonce')
   return {
-    method: 'eth_signTypedData_v4',
-    params: [plan.account, parsed.encoded],
-  } satisfies ProviderRequest
+    request: {
+      method: 'eth_signTypedData_v4',
+      params: [plan.account, parsed.encoded],
+    } satisfies ProviderRequest,
+    typedData,
+  }
 }
 function requestParams(request: ProviderRequest, label: string) {
   if (!Array.isArray(request.params)) {
@@ -1228,6 +1247,12 @@ export async function uploadFilecoinStorage(
   }
   const guard = await createTransactionGuard(wallet, plan.account, plan.chainId)
   const operationController = new AbortController()
+  const requestController = new AbortController()
+  const abortRequests = () =>
+    requestController.abort(operationController.signal.reason)
+  operationController.signal.addEventListener('abort', abortRequests, {
+    once: true,
+  })
   const abortOperation = () => {
     if (!operationController.signal.aborted) {
       operationController.abort(
@@ -1240,6 +1265,7 @@ export async function uploadFilecoinStorage(
   if (options.signal?.aborted) abortFromCaller()
   else
     options.signal?.addEventListener('abort', abortFromCaller, { once: true })
+  if (operationController.signal.aborted) abortRequests()
   const removeProviderListener = wallet.removeListener?.bind(wallet)
   const contextListeners = ['accountsChanged', 'chainChanged', 'disconnect']
   const registeredContextListeners: string[] = []
@@ -1266,6 +1292,7 @@ export async function uploadFilecoinStorage(
   let requestCount = 0
   let signatureCount = 0
   let signaturePending = false
+  let quoteRevalidated = false
   let clientDataSetId: bigint | undefined
   let authenticatedProvider: ReturnType<typeof normalizeProvider> | undefined
   let providerReadState: 'complete' | 'none' | 'pending' = 'none'
@@ -1331,7 +1358,7 @@ export async function uploadFilecoinStorage(
         forwarded,
         Date.now() + readTimeoutMs,
         () => uploadError('a wallet read timed out.'),
-        operationController.signal,
+        requestController.signal,
         () => uploadError('the upload was cancelled.'),
       )
       assertTransportOpen()
@@ -1369,7 +1396,9 @@ export async function uploadFilecoinStorage(
       }
       signaturePending = true
       try {
-        let forwarded: ProviderRequest
+        let authorization:
+          | ReturnType<typeof validateCreateAuthorization>
+          | ReturnType<typeof validateAddPiecesAuthorization>
         let nextClientDataSetId: bigint | undefined
         if (signatureCount === 0) {
           const validated = validateCreateAuthorization(
@@ -1377,18 +1406,40 @@ export async function uploadFilecoinStorage(
             plan,
             checkpoint.provider,
           )
+          authorization = validated
           nextClientDataSetId = validated.clientDataSetId
-          forwarded = validated.request
         } else {
           if (clientDataSetId === undefined) {
             throw uploadError('the data-set authorization is missing.')
           }
-          forwarded = validateAddPiecesAuthorization(
+          authorization = validateAddPiecesAuthorization(
             request,
             plan,
             checkpoint,
             clientDataSetId,
           )
+        }
+        if (!quoteRevalidated) {
+          const refreshed = await (
+            options.quoteStorage ?? quoteFilecoinStorage
+          )(wallet, plan.carBytes.byteLength, {
+            expectedAccount: plan.account,
+            expectedChainId: plan.chainId,
+            signal: requestController.signal,
+          })
+          assertTransportOpen()
+          assertOperationActive()
+          if (
+            validateReadyQuote(
+              refreshed,
+              plan.account,
+              plan.chainId,
+              plan.carBytes.byteLength,
+            ) !== plan.quoteFingerprint
+          ) {
+            throw uploadError('the storage quote changed before authorization.')
+          }
+          quoteRevalidated = true
         }
         await guard.assertSubmission()
         assertTransportOpen()
@@ -1397,8 +1448,8 @@ export async function uploadFilecoinStorage(
         try {
           signatureValue = await requestWalletBeforeAbort(
             wallet,
-            forwarded,
-            operationController.signal,
+            authorization.request,
+            requestController.signal,
           )
         } catch (error) {
           assertOperationActive()
@@ -1408,6 +1459,7 @@ export async function uploadFilecoinStorage(
         assertOperationActive()
         guard.assertUnchanged()
         assertTransportOpen()
+        walletRejection = undefined
         const signature = parseHex(
           signatureValue,
           'wallet storage signature',
@@ -1415,6 +1467,19 @@ export async function uploadFilecoinStorage(
         )
         if (signature.length !== 132) {
           throw uploadError('the wallet returned an invalid storage signature.')
+        }
+        const signatureValid = await verifyTypedData({
+          ...authorization.typedData,
+          address: plan.account,
+          signature,
+        } as Parameters<typeof verifyTypedData>[0]).catch(() => false)
+        assertOperationActive()
+        guard.assertUnchanged()
+        assertTransportOpen()
+        if (!signatureValid) {
+          throw uploadError(
+            'the storage authorization was not signed by the selected account.',
+          )
         }
         if (nextClientDataSetId !== undefined)
           clientDataSetId = nextClientDataSetId
@@ -1446,6 +1511,7 @@ export async function uploadFilecoinStorage(
   }
   const closeTransport = async () => {
     transportClosed = true
+    requestController.abort(uploadError('the upload transport closed.'))
     await Promise.allSettled([...pendingRequests])
   }
   const onStored = (value: FilecoinStorageUploadPiece) => {
@@ -1528,7 +1594,7 @@ export async function uploadFilecoinStorage(
         await closeTransport()
       }
     } catch (error) {
-      if (walletRejection) throw walletRejection
+      if (walletRejection && !commitAuthorized) throw walletRejection
       try {
         guard.assertUnchanged()
       } catch (contextError) {
@@ -1616,6 +1682,7 @@ export async function uploadFilecoinStorage(
     }
   } finally {
     transportClosed = true
+    operationController.signal.removeEventListener('abort', abortRequests)
     if (wallet.on && removeProviderListener) {
       for (const event of registeredContextListeners) {
         try {

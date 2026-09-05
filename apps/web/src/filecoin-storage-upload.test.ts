@@ -16,6 +16,7 @@ import {
   type Hash,
   type Hex,
 } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Eip1193Provider, ProviderRequest } from './ethereum'
 import {
@@ -28,6 +29,7 @@ import {
   uploadFilecoinStorage,
   type FilecoinStorageUploadCheckpoint,
   type FilecoinStorageUploadExecutor,
+  type FilecoinStorageUploadOptions,
 } from './filecoin-storage-upload'
 import {
   FILECOIN_CALIBRATION_CHAIN_ID,
@@ -35,7 +37,13 @@ import {
 } from './filecoin-storage'
 import type { FilecoinStorageQuote } from './filecoin-storage-quote'
 import { preparePaidMediaCar, type PreparedMediaCar } from './paid-media-car'
-const ACCOUNT = '0x000000000000000000000000000000000000a11c'
+const SIGNER = privateKeyToAccount(
+  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+)
+const OTHER_SIGNER = privateKeyToAccount(
+  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+)
+const ACCOUNT = SIGNER.address
 const OTHER_ACCOUNT = '0x000000000000000000000000000000000000b0bb'
 const SERVICE_PROVIDER = '0x0000000000000000000000000000000000005e11'
 const PROVIDER_ID = 17n
@@ -45,7 +53,6 @@ const CLIENT_DATA_SET_ID = 53n
 const TX_HASH = `0x${'12'.repeat(32)}` as Hash
 const REPLACEMENT_HASH = `0x${'23'.repeat(32)}` as Hash
 const BLOCK_HASH = `0x${'34'.repeat(32)}` as Hash
-const SIGNATURE = `0x${'56'.repeat(65)}` as Hex
 const CALIBRATION = FILECOIN_STORAGE_NETWORKS[1]
 let piece: Awaited<ReturnType<typeof calculate>>
 function deferred<T>() {
@@ -53,15 +60,11 @@ function deferred<T>() {
   const promise = new Promise<T>((next) => (resolve = next))
   return { promise, resolve }
 }
-const TYPES = {
-  ...EIP712Types,
-  EIP712Domain: [
-    { name: 'name', type: 'string' },
-    { name: 'version', type: 'string' },
-    { name: 'chainId', type: 'uint256' },
-    { name: 'verifyingContract', type: 'address' },
-  ],
-} as const
+// prettier-ignore
+const TYPES = { ...EIP712Types, EIP712Domain: [
+  { name: 'name', type: 'string' }, { name: 'version', type: 'string' },
+  { name: 'chainId', type: 'uint256' }, { name: 'verifyingContract', type: 'address' },
+] } as const
 let prepared: PreparedMediaCar
 beforeAll(async () => {
   const encoded = new TextEncoder().encode('public evidence '.repeat(16))
@@ -84,236 +87,141 @@ beforeAll(async () => {
 function readyQuote(
   overrides: Partial<FilecoinStorageQuote> = {},
 ): FilecoinStorageQuote {
+  // prettier-ignore
   return {
-    account: ACCOUNT,
-    chainId: FILECOIN_CALIBRATION_CHAIN_ID,
-    copies: 1,
-    dataSize: BigInt(prepared.carBytes.byteLength),
-    depositNeeded: 0n,
-    fees: {
-      addPiecesFee: 2n,
-      createDataSetFee: 3n,
-      total: 5n,
-    },
-    lockups: {
-      cacheMissLockup: 0n,
-      cdnLockup: 0n,
-      lifecycleLockup: 7n,
-      rateDeltaPerEpoch: 1n,
-      reserveReplenishment: 0n,
-      streamingLockup: 11n,
-      total: 18n,
-    },
-    needsServiceApproval: false,
-    rates: { perEpoch: 1n, perMonth: 2_592_000n },
-    ready: true,
-    tokenDecimals: 18,
-    tokenSymbol: 'USDFC',
-    withCDN: false,
+    account: ACCOUNT, chainId: FILECOIN_CALIBRATION_CHAIN_ID, copies: 1,
+    dataSize: BigInt(prepared.carBytes.byteLength), depositNeeded: 0n,
+    fees: { addPiecesFee: 2n, createDataSetFee: 3n, total: 5n },
+    lockups: { cacheMissLockup: 0n, cdnLockup: 0n, lifecycleLockup: 7n,
+      rateDeltaPerEpoch: 1n, reserveReplenishment: 0n, streamingLockup: 11n, total: 18n },
+    needsServiceApproval: false, rates: { perEpoch: 1n, perMonth: 2_592_000n },
+    ready: true, tokenDecimals: 18, tokenSymbol: 'USDFC', withCDN: false,
     ...overrides,
   }
 }
 function domain() {
-  return {
-    chainId: Number(FILECOIN_CALIBRATION_CHAIN_ID),
-    name: 'FilecoinWarmStorageService',
-    verifyingContract: CALIBRATION.contracts.fwss,
-    version: '1',
-  }
+  // prettier-ignore
+  return { chainId: Number(FILECOIN_CALIBRATION_CHAIN_ID),
+    name: 'FilecoinWarmStorageService', verifyingContract: CALIBRATION.contracts.fwss, version: '1' }
 }
 function createAuthorization(overrides: Record<string, unknown> = {}) {
+  // prettier-ignore
   return JSON.stringify({
     domain: domain(),
     message: {
       clientDataSetId: CLIENT_DATA_SET_ID.toString(),
-      metadata: [
-        { key: 'source', value: 'lifeinvader' },
-        { key: 'withIPFSIndexing', value: '' },
-      ],
-      payee: SERVICE_PROVIDER,
-      ...overrides,
+      metadata: [{ key: 'source', value: 'lifeinvader' }, { key: 'withIPFSIndexing', value: '' }],
+      payee: SERVICE_PROVIDER, ...overrides,
     },
-    primaryType: 'CreateDataSet',
-    types: TYPES,
+    primaryType: 'CreateDataSet', types: TYPES,
   })
 }
 function addAuthorization(
   mediaCid: string,
   overrides: Record<string, unknown> = {},
 ) {
+  // prettier-ignore
   return JSON.stringify({
-    domain: domain(),
-    message: {
-      clientDataSetId: CLIENT_DATA_SET_ID.toString(),
-      nonce: '61',
+    domain: domain(), message: {
+      clientDataSetId: CLIENT_DATA_SET_ID.toString(), nonce: '61',
       pieceData: [{ data: bytesToHex(piece.bytes) }],
-      pieceMetadata: [
-        {
-          metadata: [{ key: 'ipfsRootCID', value: mediaCid }],
-          pieceIndex: '0',
-        },
-      ],
+      pieceMetadata: [{ metadata: [{ key: 'ipfsRootCID', value: mediaCid }], pieceIndex: '0' }],
       ...overrides,
     },
-    primaryType: 'AddPieces',
-    types: TYPES,
+    primaryType: 'AddPieces', types: TYPES,
   })
 }
+function signAuthorization(data: string, signer = SIGNER) {
+  return signer.signTypedData(JSON.parse(data))
+}
 function providerDetails(overrides: Record<string, unknown> = {}) {
+  // prettier-ignore
   return {
-    ipniIpfs: true,
-    isActive: true,
-    maxPieceSizeInBytes: 32n * 1024n * 1024n,
-    minPieceSizeInBytes: 127n,
-    paymentTokenAddress: CALIBRATION.contracts.usdfc,
-    payee: SERVICE_PROVIDER,
-    providerId: PROVIDER_ID,
-    serviceProvider: SERVICE_PROVIDER,
-    serviceUrl: 'https://provider.example/pdp',
-    ...overrides,
+    ipniIpfs: true, isActive: true, maxPieceSizeInBytes: 32n * 1024n * 1024n,
+    minPieceSizeInBytes: 127n, paymentTokenAddress: CALIBRATION.contracts.usdfc,
+    payee: SERVICE_PROVIDER, providerId: PROVIDER_ID, serviceProvider: SERVICE_PROVIDER,
+    serviceUrl: 'https://provider.example/pdp', ...overrides,
   }
 }
 function providerReadResult(overrides: Record<string, unknown> = {}) {
   const provider = providerDetails(overrides)
+  // prettier-ignore
   return encodeFunctionResult({
-    abi: serviceProviderRegistry,
-    functionName: 'getProviderWithProduct',
+    abi: serviceProviderRegistry, functionName: 'getProviderWithProduct',
     result: {
       product: {
-        capabilityKeys: [
-          'serviceURL',
-          'minPieceSizeInBytes',
-          'maxPieceSizeInBytes',
-          'storagePricePerTibPerDay',
-          'minProvingPeriodInEpochs',
-          'location',
-          'paymentTokenAddress',
-          'ipniIpfs',
-        ],
-        isActive: true,
-        productType: 0,
+        capabilityKeys: ['serviceURL', 'minPieceSizeInBytes', 'maxPieceSizeInBytes',
+          'storagePricePerTibPerDay', 'minProvingPeriodInEpochs', 'location',
+          'paymentTokenAddress', 'ipniIpfs'],
+        isActive: true, productType: 0,
       },
       productCapabilityValues: [
-        stringToHex(provider.serviceUrl),
-        numberToHex(provider.minPieceSizeInBytes, { size: 32 }),
-        numberToHex(provider.maxPieceSizeInBytes, { size: 32 }),
-        '0x01',
-        '0x01',
-        stringToHex('test'),
-        provider.paymentTokenAddress as Hex,
+        stringToHex(provider.serviceUrl), numberToHex(provider.minPieceSizeInBytes, { size: 32 }),
+        numberToHex(provider.maxPieceSizeInBytes, { size: 32 }), '0x01', '0x01',
+        stringToHex('test'), provider.paymentTokenAddress as Hex,
         provider.ipniIpfs ? '0x01' : '0x00',
       ],
       providerId: provider.providerId,
       providerInfo: {
-        description: 'Fixture provider',
-        isActive: provider.isActive,
-        name: 'Fixture',
+        description: 'Fixture provider', isActive: provider.isActive, name: 'Fixture',
         payee: provider.payee as `0x${string}`,
         serviceProvider: provider.serviceProvider as `0x${string}`,
       },
     },
   })
 }
-function storageLogs(
-  hash: Hash = REPLACEMENT_HASH,
-  overrides: {
-    cdnRailId?: bigint
-    dataSetId?: bigint
-    dataSetMetadataValues?: string[]
-    mediaCid?: string
-    payee?: `0x${string}`
-    pieceCid?: Hex
-    pieceId?: bigint
-    providerId?: bigint
-    serviceProvider?: `0x${string}`
-  } = {},
-) {
+// prettier-ignore
+function storageLogs(hash: Hash = REPLACEMENT_HASH, overrides: {
+  cdnRailId?: bigint; dataSetId?: bigint; dataSetMetadataValues?: string[]; mediaCid?: string
+  payee?: `0x${string}`; pieceCid?: Hex; pieceId?: bigint; providerId?: bigint
+  serviceProvider?: `0x${string}`
+} = {}) {
   const dataSetId = overrides.dataSetId ?? DATA_SET_ID
   const pieceId = overrides.pieceId ?? PIECE_ID
   const serviceProvider = overrides.serviceProvider ?? SERVICE_PROVIDER
   const providerId = overrides.providerId ?? PROVIDER_ID
-  const common = {
-    address: CALIBRATION.contracts.fwss,
-    blockHash: BLOCK_HASH,
-    blockNumber: '0x2a',
-    transactionHash: hash,
-  }
+  const common = { address: CALIBRATION.contracts.fwss, blockHash: BLOCK_HASH,
+    blockNumber: '0x2a', transactionHash: hash }
   return [
     {
       ...common,
       data: encodeAbiParameters(
         [
-          { type: 'uint256' },
-          { type: 'uint256' },
-          { type: 'uint256' },
-          { type: 'address' },
-          { type: 'address' },
-          { type: 'address' },
-          { type: 'string[]' },
-          { type: 'string[]' },
+          { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' },
+          { type: 'address' }, { type: 'address' }, { type: 'address' },
+          { type: 'string[]' }, { type: 'string[]' },
         ],
         [
-          67n,
-          0n,
-          overrides.cdnRailId ?? 0n,
-          ACCOUNT,
-          serviceProvider,
-          overrides.payee ?? serviceProvider,
+          67n, 0n, overrides.cdnRailId ?? 0n, ACCOUNT, serviceProvider, overrides.payee ?? serviceProvider,
           ['source', 'withIPFSIndexing'],
           overrides.dataSetMetadataValues ?? ['lifeinvader', ''],
         ],
       ),
-      topics: encodeEventTopics({
-        abi: fwss,
-        args: { dataSetId, providerId },
-        eventName: 'DataSetCreated',
-      }),
+      topics: encodeEventTopics({ abi: fwss, args: { dataSetId, providerId }, eventName: 'DataSetCreated' }),
     },
     {
       ...common,
       data: encodeAbiParameters(
         [
-          {
-            components: [{ name: 'data', type: 'bytes' }],
-            type: 'tuple',
-          },
-          { type: 'string[]' },
-          { type: 'string[]' },
+          { components: [{ name: 'data', type: 'bytes' }], type: 'tuple' },
+          { type: 'string[]' }, { type: 'string[]' },
         ],
         [
           { data: overrides.pieceCid ?? bytesToHex(piece.bytes) },
-          ['ipfsRootCID'],
-          [overrides.mediaCid ?? prepared.mediaCid.text],
+          ['ipfsRootCID'], [overrides.mediaCid ?? prepared.mediaCid.text],
         ],
       ),
-      topics: encodeEventTopics({
-        abi: fwss,
-        args: { dataSetId, pieceId },
-        eventName: 'PieceAdded',
-      }),
+      topics: encodeEventTopics({ abi: fwss, args: { dataSetId, pieceId }, eventName: 'PieceAdded' }),
     },
   ]
 }
-function walletProvider({
-  account = ACCOUNT,
-  approved = true,
-  hash = REPLACEMENT_HASH,
-  logs = storageLogs(hash),
-  methods = [],
-  providerOverrides = {},
-  receiptRequest,
-  signatureRequest,
-  signatureError,
-}: {
-  account?: string
-  approved?: boolean
-  hash?: Hash
-  logs?: unknown[]
-  methods?: string[]
-  providerOverrides?: Record<string, unknown>
-  receiptRequest?: () => Promise<unknown>
-  signatureRequest?: () => Promise<unknown>
-  signatureError?: unknown
+// prettier-ignore
+function walletProvider({ account = ACCOUNT, approved = true, hash = REPLACEMENT_HASH,
+  logs = storageLogs(hash), methods = [], providerOverrides = {}, receiptRequest,
+  signatureRequest, signatureError }: {
+  account?: string; approved?: boolean; hash?: Hash; logs?: unknown[]; methods?: string[]
+  providerOverrides?: Record<string, unknown>; receiptRequest?: () => Promise<unknown>
+  signatureRequest?: (request: ProviderRequest) => Promise<unknown>; signatureError?: unknown
 } = {}): Eip1193Provider {
   return {
     async request({ method, params }: ProviderRequest) {
@@ -345,8 +253,9 @@ function walletProvider({
       }
       if (method === 'eth_signTypedData_v4') {
         if (signatureError) throw signatureError
-        if (signatureRequest) return await signatureRequest()
-        return SIGNATURE
+        if (signatureRequest) return await signatureRequest({ method, params })
+        const data = Array.isArray(params) ? params[1] : undefined
+        return await signAuthorization(String(data))
       }
       if (method === 'eth_getTransactionReceipt') {
         if (receiptRequest) return await receiptRequest()
@@ -365,55 +274,32 @@ function walletProvider({
     },
   }
 }
-function inspection() {
-  return vi.fn(async () => ({
-    kind: 'ready' as const,
-    network: CALIBRATION,
-  }))
-}
-async function selectProvider(
-  input: Pick<Parameters<FilecoinStorageUploadExecutor>[0], 'plan' | 'request'>,
-) {
+// prettier-ignore
+const inspection = () => vi.fn(async () => ({ kind: 'ready' as const, network: CALIBRATION }))
+// prettier-ignore
+async function selectProvider(input: Pick<Parameters<FilecoinStorageUploadExecutor>[0], 'plan' | 'request'>) {
   const reads = [
     [
       input.plan.network.contracts.serviceProviderRegistry,
-      encodeFunctionData({
-        abi: serviceProviderRegistry,
-        args: [input.plan.providerId, 0],
-        functionName: 'getProviderWithProduct',
-      }),
+      encodeFunctionData({ abi: serviceProviderRegistry, args: [input.plan.providerId, 0],
+        functionName: 'getProviderWithProduct' }),
     ],
     [
       input.plan.network.contracts.fwssView,
-      encodeFunctionData({
-        abi: fwssView,
-        args: [input.plan.providerId],
-        functionName: 'isProviderApproved',
-      }),
+      encodeFunctionData({ abi: fwssView, args: [input.plan.providerId], functionName: 'isProviderApproved' }),
     ],
   ] as const
-  for (const [to, data] of reads) {
-    await input.request({
-      method: 'eth_call',
-      params: [{ data, to }, 'latest'],
-    })
-  }
+  for (const [to, data] of reads)
+    await input.request({ method: 'eth_call', params: [{ data, to }, 'latest'] })
 }
-async function stagePiece(
-  input: Pick<
-    Parameters<FilecoinStorageUploadExecutor>[0],
-    'onStored' | 'plan' | 'reportProgress' | 'request'
-  >,
-  progress = input.plan.carBytes.byteLength,
-) {
+// prettier-ignore
+async function stagePiece(input: Pick<Parameters<FilecoinStorageUploadExecutor>[0],
+  'onStored' | 'plan' | 'reportProgress' | 'request'>,
+progress = input.plan.carBytes.byteLength) {
   await selectProvider(input)
   input.reportProgress(progress)
-  input.onStored({
-    bytes: piece.bytes,
-    paddedSize: piece.paddedSize,
-    size: input.plan.carBytes.byteLength,
-    text: piece.toString(),
-  })
+  input.onStored({ bytes: piece.bytes, paddedSize: piece.paddedSize,
+    size: input.plan.carBytes.byteLength, text: piece.toString() })
 }
 function requestSignature(
   input: Parameters<FilecoinStorageUploadExecutor>[0],
@@ -433,32 +319,17 @@ async function signAndAuthorize(
   await requestSignature(input, addData)
   await input.authorizeCommit()
 }
-function successfulExecutor({
-  confirmedTxHash = REPLACEMENT_HASH,
-  createData = createAuthorization(),
-  addData,
-  dataSetId = DATA_SET_ID,
-  initialTxHash = TX_HASH,
-  pieceId = PIECE_ID,
-}: {
-  addData?: string
-  confirmedTxHash?: Hash
-  createData?: string
-  dataSetId?: bigint
-  initialTxHash?: Hash
-  pieceId?: bigint
+// prettier-ignore
+function successfulExecutor({ confirmedTxHash = REPLACEMENT_HASH, createData = createAuthorization(),
+  addData, dataSetId = DATA_SET_ID, initialTxHash = TX_HASH, pieceId = PIECE_ID }: {
+  addData?: string; confirmedTxHash?: Hash; createData?: string; dataSetId?: bigint
+  initialTxHash?: Hash; pieceId?: bigint
 } = {}): FilecoinStorageUploadExecutor {
   return async (input) => {
     await stagePiece(input)
     await signAndAuthorize(input, createData, addData)
     input.onSubmitted(initialTxHash)
-    return {
-      confirmedTxHash,
-      dataSetId,
-      isNewDataSet: true,
-      pieceIds: [pieceId],
-      txHash: initialTxHash,
-    }
+    return { confirmedTxHash, dataSetId, isNewDataSet: true, pieceIds: [pieceId], txHash: initialTxHash }
   }
 }
 async function runUpload(
@@ -469,6 +340,7 @@ async function runUpload(
     onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => void
     onSubmitted?: (hash: Hash) => void
     provider?: Eip1193Provider
+    quoteStorage?: NonNullable<FilecoinStorageUploadOptions['quoteStorage']>
     signal?: AbortSignal
   } = {},
 ) {
@@ -487,17 +359,16 @@ async function runUpload(
       onStored: options.onStored,
       onSubmitted: options.onSubmitted,
       pollIntervalMs: 1,
+      quoteStorage: options.quoteStorage ?? vi.fn(async () => readyQuote()),
       receiptTimeoutMs: 100,
       signal: options.signal,
     },
   )
 }
 function recoveryFailure(cause: RegExp, hash = REPLACEMENT_HASH) {
-  return {
-    cause: { message: expect.stringMatching(cause) },
-    name: 'FilecoinStorageSubmissionUnknownError',
-    transactionHash: hash,
-  }
+  // prettier-ignore
+  return { cause: { message: expect.stringMatching(cause) },
+    name: 'FilecoinStorageSubmissionUnknownError', transactionHash: hash }
 }
 describe('Filecoin storage upload planning', () => {
   it('snapshots one ready quote and one explicit provider', async () => {
@@ -667,6 +538,31 @@ describe('Filecoin storage upload execution', () => {
       ).toHaveLength(signatures)
     }
   })
+  it('revalidates costs and verifies the signer before authorization', async () => {
+    const changedWallet = walletProvider()
+    const changedRequest = vi.spyOn(changedWallet, 'request')
+    await expect(
+      runUpload(successfulExecutor(), {
+        provider: changedWallet,
+        quoteStorage: vi.fn(async () =>
+          readyQuote({ rates: { perEpoch: 2n, perMonth: 5_184_000n } }),
+        ),
+      }),
+    ).rejects.toThrow(/quote changed/i)
+    expect(
+      changedRequest.mock.calls.filter(
+        ([candidate]) => candidate.method === 'eth_signTypedData_v4',
+      ),
+    ).toHaveLength(0)
+    await expect(
+      runUpload(successfulExecutor(), {
+        provider: walletProvider({
+          signatureRequest: async () =>
+            signAuthorization(createAuthorization(), OTHER_SIGNER),
+        }),
+      }),
+    ).rejects.toThrow(/not signed by the selected account/i)
+  })
   it('rejects providers that cannot perform the promised IPFS path', async () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ ipniIpfs: false }, /does not advertise IPFS indexing/i],
@@ -756,7 +652,9 @@ describe('Filecoin storage upload execution', () => {
       await expect(
         requestSignature(input, addAuthorization(input.plan.mediaCid)),
       ).rejects.toThrow(/unexpected signature/i)
-      concurrentWallet.response.resolve(SIGNATURE)
+      concurrentWallet.response.resolve(
+        await signAuthorization(createAuthorization()),
+      )
       await first
       await expect(input.authorizeCommit()).rejects.toThrow(/incomplete/i)
       throw new Error('fixture stopped after first signature')
@@ -774,6 +672,20 @@ describe('Filecoin storage upload execution', () => {
     await cancelledWallet.prompted.promise
     controller.abort(new DOMException('Stop upload.', 'AbortError'))
     await expect(pending).rejects.toThrow(/cancelled/i)
+    const abandonedWallet = delayedWallet()
+    const abandoned: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input)
+      const first = requestSignature(input, createAuthorization())
+      void first.catch(() => undefined)
+      await abandonedWallet.prompted.promise
+      await expect(
+        requestSignature(input, addAuthorization(input.plan.mediaCid)),
+      ).rejects.toThrow(/unexpected signature/i)
+      throw new Error('adapter exited with an abandoned prompt')
+    }
+    await expect(
+      runUpload(abandoned, { provider: abandonedWallet.provider }),
+    ).rejects.toThrow(/provider did not complete/i)
   })
   it('preserves wallet rejection before any provider commit', async () => {
     const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })
@@ -782,6 +694,28 @@ describe('Filecoin storage upload execution', () => {
         provider: walletProvider({ signatureError: rejection }),
       }),
     ).rejects.toBe(rejection)
+    let signatures = 0
+    const retried: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input)
+      await expect(requestSignature(input, createAuthorization())).rejects.toBe(
+        rejection,
+      )
+      await signAndAuthorize(input)
+      input.onSubmitted(TX_HASH)
+      throw new Error('provider failed after submission')
+    }
+    await expect(
+      runUpload(retried, {
+        provider: walletProvider({
+          signatureRequest: async ({ params }) => {
+            if (signatures++ === 0) throw rejection
+            return await signAuthorization(
+              String(Array.isArray(params) ? params[1] : undefined),
+            )
+          },
+        }),
+      }),
+    ).rejects.toMatchObject(recoveryFailure(/after submission/i, TX_HASH))
   })
   it('cancels receipt polling with its submitted recovery hash', async () => {
     const requested = deferred<void>()
