@@ -53,6 +53,7 @@ const CLIENT_DATA_SET_ID = 53n
 const TX_HASH = `0x${'12'.repeat(32)}` as Hash
 const REPLACEMENT_HASH = `0x${'23'.repeat(32)}` as Hash
 const BLOCK_HASH = `0x${'34'.repeat(32)}` as Hash
+const UPLOAD_ID = `0x${'45'.repeat(32)}` as Hex
 const CALIBRATION = FILECOIN_STORAGE_NETWORKS[1]
 let piece: Awaited<ReturnType<typeof calculate>>
 function deferred<T>() {
@@ -119,13 +120,17 @@ function createAuthorization(overrides: Record<string, unknown> = {}) {
 function addAuthorization(
   mediaCid: string,
   overrides: Record<string, unknown> = {},
+  uploadId: Hex = UPLOAD_ID,
 ) {
   // prettier-ignore
   return JSON.stringify({
     domain: domain(), message: {
       clientDataSetId: CLIENT_DATA_SET_ID.toString(), nonce: '61',
       pieceData: [{ data: bytesToHex(piece.bytes) }],
-      pieceMetadata: [{ metadata: [{ key: 'ipfsRootCID', value: mediaCid }], pieceIndex: '0' }],
+      pieceMetadata: [{ metadata: [
+        { key: 'ipfsRootCID', value: mediaCid },
+        { key: 'lifeinvaderUploadId', value: uploadId },
+      ], pieceIndex: '0' }],
       ...overrides,
     },
     primaryType: 'AddPieces', types: TYPES,
@@ -174,7 +179,7 @@ function providerReadResult(overrides: Record<string, unknown> = {}) {
 function storageLogs(hash: Hash = REPLACEMENT_HASH, overrides: {
   cdnRailId?: bigint; dataSetId?: bigint; dataSetMetadataValues?: string[]; mediaCid?: string
   payee?: `0x${string}`; pieceCid?: Hex; pieceId?: bigint; providerId?: bigint
-  serviceProvider?: `0x${string}`
+  serviceProvider?: `0x${string}`; uploadId?: Hex
 } = {}) {
   const dataSetId = overrides.dataSetId ?? DATA_SET_ID
   const pieceId = overrides.pieceId ?? PIECE_ID
@@ -208,7 +213,8 @@ function storageLogs(hash: Hash = REPLACEMENT_HASH, overrides: {
         ],
         [
           { data: overrides.pieceCid ?? bytesToHex(piece.bytes) },
-          ['ipfsRootCID'], [overrides.mediaCid ?? prepared.mediaCid.text],
+          ['ipfsRootCID', 'lifeinvaderUploadId'],
+          [overrides.mediaCid ?? prepared.mediaCid.text, overrides.uploadId ?? UPLOAD_ID],
         ],
       ),
       topics: encodeEventTopics({ abi: fwss, args: { dataSetId, pieceId }, eventName: 'PieceAdded' }),
@@ -217,12 +223,14 @@ function storageLogs(hash: Hash = REPLACEMENT_HASH, overrides: {
 }
 // prettier-ignore
 function walletProvider({ account = ACCOUNT, approved = true, hash = REPLACEMENT_HASH,
-  logs = storageLogs(hash), methods = [], providerOverrides = {}, receiptRequest,
+  logs, methods = [], providerOverrides = {}, receiptRequest,
   signatureRequest, signatureError }: {
-  account?: string; approved?: boolean; hash?: Hash; logs?: unknown[]; methods?: string[]
+  account?: string; approved?: boolean; hash?: Hash
+  logs?: unknown[] | ((uploadId: Hex) => unknown[]); methods?: string[]
   providerOverrides?: Record<string, unknown>; receiptRequest?: () => Promise<unknown>
   signatureRequest?: (request: ProviderRequest) => Promise<unknown>; signatureError?: unknown
 } = {}): Eip1193Provider {
+  let signedUploadId = UPLOAD_ID
   return {
     async request({ method, params }: ProviderRequest) {
       methods.push(method)
@@ -252,9 +260,13 @@ function walletProvider({ account = ACCOUNT, approved = true, hash = REPLACEMENT
         throw new Error(`Unexpected eth_call target ${target}`)
       }
       if (method === 'eth_signTypedData_v4') {
+        const data = Array.isArray(params) ? params[1] : undefined
+        const match = typeof data === 'string'
+          ? /"key"\s*:\s*"lifeinvaderUploadId"\s*,\s*"value"\s*:\s*"(0x[0-9a-f]{64})"/i.exec(data)
+          : undefined
+        if (match?.[1]) signedUploadId = match[1] as Hex
         if (signatureError) throw signatureError
         if (signatureRequest) return await signatureRequest({ method, params })
-        const data = Array.isArray(params) ? params[1] : undefined
         return await signAuthorization(String(data))
       }
       if (method === 'eth_getTransactionReceipt') {
@@ -262,7 +274,9 @@ function walletProvider({ account = ACCOUNT, approved = true, hash = REPLACEMENT
         return {
           blockHash: BLOCK_HASH,
           blockNumber: '0x2a',
-          logs,
+          logs: typeof logs === 'function'
+            ? logs(signedUploadId)
+            : (logs ?? storageLogs(hash, { uploadId: signedUploadId })),
           status: '0x1',
           transactionHash: hash,
         }
@@ -313,7 +327,7 @@ function requestSignature(
 async function signAndAuthorize(
   input: Parameters<FilecoinStorageUploadExecutor>[0],
   createData = createAuthorization(),
-  addData = addAuthorization(input.plan.mediaCid),
+  addData = addAuthorization(input.plan.mediaCid, {}, input.plan.uploadId),
 ) {
   await requestSignature(input, createData)
   await requestSignature(input, addData)
@@ -336,7 +350,7 @@ async function runUpload(
   executeUpload: FilecoinStorageUploadExecutor = successfulExecutor(),
   options: {
     hash?: Hash
-    logs?: unknown[]
+    logs?: unknown[] | ((uploadId: Hex) => unknown[])
     onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => void
     onSubmitted?: (hash: Hash) => void
     provider?: Eip1193Provider
@@ -346,8 +360,7 @@ async function runUpload(
 ) {
   const hash = options.hash ?? REPLACEMENT_HASH
   return await uploadFilecoinStorage(
-    options.provider ??
-      walletProvider({ hash, logs: options.logs ?? storageLogs(hash) }),
+    options.provider ?? walletProvider({ hash, logs: options.logs }),
     prepared,
     readyQuote(),
     PROVIDER_ID,
@@ -390,7 +403,10 @@ describe('Filecoin storage upload planning', () => {
     })
     expect(Object.isFrozen(plan)).toBe(true)
     expect(Object.isFrozen(plan.piece)).toBe(true)
+    expect(plan.uploadId).toMatch(/^0x[0-9a-f]{64}$/)
     prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
+    expect((await planFilecoinStorageUpload(prepared, readyQuote(), PROVIDER_ID,
+      ACCOUNT, FILECOIN_CALIBRATION_CHAIN_ID)).uploadId).not.toBe(plan.uploadId)
   })
   // prettier-ignore
   it('rejects stale and unsupported upload plans', async () => {
@@ -410,62 +426,46 @@ describe('Filecoin storage upload planning', () => {
   })
 })
 describe('Filecoin storage upload execution', () => {
+  // prettier-ignore
   it('constrains reads and signatures, follows a replacement, and verifies events', async () => {
     const methods: string[] = []
     const submitted: Hash[] = []
     const stored = vi.fn()
     const result = await runUpload(successfulExecutor(), {
-      onStored: stored,
-      onSubmitted: (hash) => submitted.push(hash),
-      provider: walletProvider({ methods }),
+      onStored: stored, onSubmitted: (hash) => submitted.push(hash),
+      provider: walletProvider({ methods })
     })
     expect(result).toMatchObject({
-      account: ACCOUNT,
-      carByteLength: prepared.carBytes.byteLength,
-      chainId: FILECOIN_CALIBRATION_CHAIN_ID,
-      dataSetId: DATA_SET_ID,
-      initialTransactionHash: TX_HASH,
-      ipfsIndexingRequested: true,
-      mediaCid: prepared.mediaCid.text,
-      pieceId: PIECE_ID,
-      provider: {
-        id: PROVIDER_ID,
-        serviceProvider: SERVICE_PROVIDER,
-        serviceUrl: 'https://provider.example/pdp/',
-      },
-      transactionHash: REPLACEMENT_HASH,
-      withCDN: false,
+      account: ACCOUNT, carByteLength: prepared.carBytes.byteLength,
+      chainId: FILECOIN_CALIBRATION_CHAIN_ID, dataSetId: DATA_SET_ID,
+      initialTransactionHash: TX_HASH, ipfsIndexingRequested: true,
+      mediaCid: prepared.mediaCid.text, pieceId: PIECE_ID,
+      provider: { id: PROVIDER_ID, serviceProvider: SERVICE_PROVIDER,
+        serviceUrl: 'https://provider.example/pdp/' },
+      transactionHash: REPLACEMENT_HASH, withCDN: false,
     })
-    expect(result.providerPieceUrl).toBe(
-      `https://provider.example/pdp/piece/${piece.toString()}`,
-    )
+    expect(result.providerPieceUrl).toBe(`https://provider.example/pdp/piece/${piece.toString()}`)
     expect(result.receipt.hash).toBe(REPLACEMENT_HASH)
     expect(submitted).toEqual([TX_HASH, REPLACEMENT_HASH])
     expect(stored).toHaveBeenCalledOnce()
     expect(methods.filter((method) => method === 'eth_call')).toHaveLength(2)
-    expect(
-      methods.filter((method) => method === 'eth_signTypedData_v4'),
-    ).toHaveLength(2)
+    expect(methods.filter((method) => method === 'eth_signTypedData_v4')).toHaveLength(2)
     expect(methods).not.toContain('eth_sendTransaction')
   })
+  // prettier-ignore
   it('rejects arbitrary reads, transactions, and excess RPC requests', async () => {
     const forbidden: FilecoinStorageUploadExecutor = async ({ request }) => {
       await request({ method: 'eth_sendTransaction', params: [] })
       throw new Error('unreachable')
     }
     await expect(runUpload(forbidden)).rejects.toThrow(/forbidden RPC method/i)
-    const wrongRead: FilecoinStorageUploadExecutor = async ({
-      plan,
-      request,
-    }) => {
+    const wrongRead: FilecoinStorageUploadExecutor = async ({ plan, request }) => {
       await request({
         method: 'eth_call',
         params: [
           {
             data: encodeFunctionData({
-              abi: fwssView,
-              args: [plan.providerId + 1n],
-              functionName: 'isProviderApproved',
+              abi: fwssView, args: [plan.providerId + 1n], functionName: 'isProviderApproved',
             }),
             to: plan.network.contracts.fwssView,
           },
@@ -474,56 +474,35 @@ describe('Filecoin storage upload execution', () => {
       })
       throw new Error('unreachable')
     }
-    await expect(runUpload(wrongRead)).rejects.toThrow(
-      /unexpected contract read/i,
-    )
+    await expect(runUpload(wrongRead)).rejects.toThrow(/unexpected contract read/i)
     const greedy: FilecoinStorageUploadExecutor = async ({ request }) => {
-      for (
-        let index = 0;
-        index <= MAX_FILECOIN_STORAGE_UPLOAD_RPC_REQUESTS;
-        index += 1
-      ) {
+      for (let index = 0; index <= MAX_FILECOIN_STORAGE_UPLOAD_RPC_REQUESTS; index += 1)
         await request({ method: 'eth_blockNumber' })
-      }
       throw new Error('unreachable')
     }
     await expect(runUpload(greedy)).rejects.toThrow(/RPC request budget/i)
   })
+  // prettier-ignore
   it('rejects changed typed-data terms before forwarding them', async () => {
     const cases: [FilecoinStorageUploadExecutor, RegExp, number][] = [
-      [
-        successfulExecutor({
-          createData: createAuthorization({ payee: OTHER_ACCOUNT }),
-        }),
-        /data-set authorization terms/i,
-        0,
-      ],
+      [successfulExecutor({ createData: createAuthorization({ payee: OTHER_ACCOUNT }) }),
+        /data-set authorization terms/i, 0],
       [
         successfulExecutor({
           addData: addAuthorization(prepared.mediaCid.text, {
-            pieceMetadata: [
-              {
-                metadata: [{ key: 'ipfsRootCID', value: 'bafkqaaa' }],
-                pieceIndex: '0',
-              },
-            ],
+            pieceMetadata: [{ metadata: [{ key: 'ipfsRootCID', value: 'bafkqaaa' }], pieceIndex: '0' }],
           }),
         }),
-        /piece authorization terms/i,
-        1,
+        /piece authorization terms/i, 1,
       ],
     ]
     for (const [executor, message, signatures] of cases) {
       const wallet = walletProvider()
       const request = vi.spyOn(wallet, 'request')
-      await expect(runUpload(executor, { provider: wallet })).rejects.toThrow(
-        message,
-      )
-      expect(
-        request.mock.calls.filter(
-          ([candidate]) => candidate.method === 'eth_signTypedData_v4',
-        ),
-      ).toHaveLength(signatures)
+      await expect(runUpload(executor, { provider: wallet })).rejects.toThrow(message)
+      expect(request.mock.calls.filter(
+        ([candidate]) => candidate.method === 'eth_signTypedData_v4',
+      )).toHaveLength(signatures)
     }
   })
   // prettier-ignore
@@ -707,28 +686,36 @@ describe('Filecoin storage upload execution', () => {
     await authorized.promise
     hungController.abort(new DOMException('Stop commit.', 'AbortError'))
     await expect(hungUpload).rejects.toMatchObject(recoveryFailure(/cancelled/i, null))
+    const guardRead = deferred<void>()
+    const base = walletProvider()
+    const guardProvider: Eip1193Provider = { ...base, request(request) {
+      if (request.method !== 'eth_chainId') return base.request(request)
+      guardRead.resolve(undefined); return new Promise(() => undefined)
+    } }
+    const guardController = new AbortController()
+    const guardUpload = runUpload(successfulExecutor(), {
+      provider: guardProvider, signal: guardController.signal,
+    })
+    await guardRead.promise
+    guardController.abort(new DOMException('Stop guard.', 'AbortError'))
+    await expect(guardUpload).rejects.toThrow(/Stop guard/i)
   })
+  // prettier-ignore
   it('returns a recovery checkpoint when provider submission is uncertain', async () => {
     const checkpoints: FilecoinStorageUploadCheckpoint[] = []
     const uncertain: FilecoinStorageUploadExecutor = async (input) => {
       const base = successfulExecutor({ confirmedTxHash: TX_HASH })
       await base({
         ...input,
-        onSubmitted(hash) {
-          input.onSubmitted(hash)
-          throw new Error('provider disconnected after accepting commit')
-        },
+        onSubmitted(hash) { input.onSubmitted(hash)
+          throw new Error('provider disconnected after accepting commit') },
       })
       throw new Error('unreachable')
     }
     let failure: unknown
     try {
-      await runUpload(uncertain, {
-        onStored: (checkpoint) => checkpoints.push(checkpoint),
-      })
-    } catch (error) {
-      failure = error
-    }
+      await runUpload(uncertain, { onStored: (checkpoint) => checkpoints.push(checkpoint) })
+    } catch (error) { failure = error }
     expect(isFilecoinStorageSubmissionUnknownError(failure)).toBe(true)
     if (!isFilecoinStorageSubmissionUnknownError(failure)) return
     expect(failure.transactionHash).toBe(TX_HASH)
@@ -737,20 +724,18 @@ describe('Filecoin storage upload execution', () => {
     const noHash: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
       await requestSignature(input, createAuthorization())
-      await requestSignature(input, addAuthorization(input.plan.mediaCid))
+      await requestSignature(input, addAuthorization(
+        input.plan.mediaCid, {}, input.plan.uploadId,
+      ))
       throw new Error('provider disconnected before returning a hash')
     }
-    await expect(runUpload(noHash)).rejects.toMatchObject({
-      name: 'FilecoinStorageSubmissionUnknownError',
-      transactionHash: undefined,
-    })
+    await expect(runUpload(noHash)).rejects.toMatchObject({ name:
+      'FilecoinStorageSubmissionUnknownError', transactionHash: undefined })
     const malformed: FilecoinStorageUploadExecutor = async (input) => ({
       ...(await successfulExecutor({ confirmedTxHash: TX_HASH })(input)),
       pieceIds: [],
     })
-    await expect(runUpload(malformed)).rejects.toMatchObject(
-      recoveryFailure(/invalid commit result/i, TX_HASH),
-    )
+    await expect(runUpload(malformed)).rejects.toMatchObject(recoveryFailure(/invalid commit result/i, TX_HASH))
   })
   // prettier-ignore
   it('releases both wallet listener layers when registration fails', async () => {
@@ -778,77 +763,48 @@ describe('Filecoin storage receipt authentication', () => {
     if (!captured) throw new Error('Checkpoint was not captured.')
     return captured
   }
+  // prettier-ignore
   it('derives IDs from exact canonical events for later recovery', async () => {
     const saved = await checkpoint()
-    await expect(
-      checkFilecoinStorageUploadReceipt(
-        walletProvider(),
-        REPLACEMENT_HASH,
-        saved,
-        {
-          expectedAccount: ACCOUNT,
-          expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
-          pollIntervalMs: 1,
-          receiptTimeoutMs: 100,
-        },
-      ),
-    ).resolves.toMatchObject({
-      dataSetId: DATA_SET_ID,
-      pieceId: PIECE_ID,
-      receipt: { hash: REPLACEMENT_HASH },
-    })
+    await expect(checkFilecoinStorageUploadReceipt(
+      walletProvider({ logs: storageLogs(REPLACEMENT_HASH, { uploadId: saved.uploadId }) }),
+      REPLACEMENT_HASH, saved, { expectedAccount: ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1, receiptTimeoutMs: 100 },
+    )).resolves.toMatchObject({ dataSetId: DATA_SET_ID, pieceId: PIECE_ID,
+      receipt: { hash: REPLACEMENT_HASH } })
   })
+  // prettier-ignore
   it('rejects changed metadata, identities, duplicates, and provider result IDs', async () => {
     const changed: [Parameters<typeof storageLogs>[1], RegExp][] = [
       [{ dataSetMetadataValues: ['another-app', ''] }, /data-set event/i],
       [{ cdnRailId: 1n }, /data-set event/i],
       [{ mediaCid: 'bafkqaaa' }, /piece event/i],
+      [{ uploadId: UPLOAD_ID }, /piece event/i],
       [{ payee: OTHER_ACCOUNT }, /data-set event/i],
       [{ serviceProvider: OTHER_ACCOUNT }, /data-set event/i],
     ]
-    for (const [overrides, message] of changed) {
-      await expect(
-        runUpload(successfulExecutor(), {
-          logs: storageLogs(REPLACEMENT_HASH, overrides),
-        }),
-      ).rejects.toMatchObject(recoveryFailure(message))
-    }
-    const duplicated = storageLogs()
-    duplicated.push(duplicated[1] as (typeof duplicated)[number])
-    await expect(
-      runUpload(successfulExecutor(), { logs: duplicated }),
-    ).rejects.toMatchObject(
-      recoveryFailure(/exactly one data set and one piece/i),
-    )
-    await expect(
-      runUpload(successfulExecutor({ pieceId: PIECE_ID + 1n })),
-    ).rejects.toMatchObject(recoveryFailure(/provider result disagrees/i))
+    for (const [overrides, message] of changed)
+      await expect(runUpload(successfulExecutor(), { logs: (uploadId) =>
+        storageLogs(REPLACEMENT_HASH, { uploadId, ...overrides }),
+      })).rejects.toMatchObject(recoveryFailure(message))
+    await expect(runUpload(successfulExecutor(), { logs: (uploadId) => {
+      const duplicated = storageLogs(REPLACEMENT_HASH, { uploadId })
+      duplicated.push(duplicated[1] as (typeof duplicated)[number]); return duplicated
+    } })).rejects.toMatchObject(recoveryFailure(/exactly one data set and one piece/i))
+    await expect(runUpload(successfulExecutor({ pieceId: PIECE_ID + 1n })))
+      .rejects.toMatchObject(recoveryFailure(/provider result disagrees/i))
   })
+  // prettier-ignore
   it('rejects noncanonical receipt fields and wrong recovery context', async () => {
     const saved = await checkpoint()
-    const receipt = {
-      blockHash: BLOCK_HASH,
-      blockNumber: 42n,
-      hash: REPLACEMENT_HASH,
-    }
-    const logs = storageLogs()
+    const receipt = { blockHash: BLOCK_HASH, blockNumber: 42n, hash: REPLACEMENT_HASH }
+    const logs = storageLogs(REPLACEMENT_HASH, { uploadId: saved.uploadId })
     ;(logs[0] as Record<string, unknown>).transactionHash = TX_HASH
-    expect(() =>
-      assertFilecoinStorageUploadReceipt(logs, receipt, saved),
-    ).toThrow(/not canonical/i)
-    await expect(
-      checkFilecoinStorageUploadReceipt(
-        walletProvider(),
-        REPLACEMENT_HASH,
-        saved,
-        {
-          expectedAccount: OTHER_ACCOUNT,
-          expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
-          pollIntervalMs: 1,
-          receiptTimeoutMs: 100,
-        },
-      ),
-    ).rejects.toThrow(/different upload context/i)
+    expect(() => assertFilecoinStorageUploadReceipt(logs, receipt, saved)).toThrow(/not canonical/i)
+    await expect(checkFilecoinStorageUploadReceipt(
+      walletProvider(), REPLACEMENT_HASH, saved, { expectedAccount: OTHER_ACCOUNT,
+        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1, receiptTimeoutMs: 100 },
+    )).rejects.toThrow(/different upload context/i)
   })
   it('does not mistake an indexing request for completed indexing', async () => {
     expect(FILECOIN_STORAGE_DATA_SET_METADATA).toEqual({

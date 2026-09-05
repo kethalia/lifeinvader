@@ -69,6 +69,7 @@ export const FILECOIN_STORAGE_DATA_SET_METADATA = Object.freeze({
 const STORAGE_DOMAIN_NAME = 'FilecoinWarmStorageService'
 const STORAGE_DOMAIN_VERSION = '1'
 const PIECE_METADATA_KEY = 'ipfsRootCID'
+const UPLOAD_METADATA_KEY = 'lifeinvaderUploadId'
 const PDP_PRODUCT_TYPE = 0n
 const EIP712_FIELDS = {
   ...EIP712Types,
@@ -94,6 +95,7 @@ export type FilecoinStorageUploadPlan = {
   piece: PieceDetails<Hex>
   providerId: bigint
   quoteFingerprint: string
+  uploadId: Hex
 }
 export type FilecoinStorageUploadPiece = PieceDetails<Uint8Array>
 export type FilecoinStorageUploadCheckpoint = {
@@ -108,6 +110,7 @@ export type FilecoinStorageUploadCheckpoint = {
     serviceProvider: Address
     serviceUrl: string
   }
+  uploadId: Hex
   withCDN: false
 }
 export type FilecoinStorageUploadExecutorResult = {
@@ -353,6 +356,9 @@ export async function planFilecoinStorageUpload(
   signal?.throwIfAborted()
   const pieceCid = await calculatePieceCid(snapshot.carBytes)
   signal?.throwIfAborted()
+  const uploadId = bytesToHex(
+    globalThis.crypto.getRandomValues(new Uint8Array(32)),
+  )
   return Object.freeze({
     account,
     carBytes: snapshot.carBytes,
@@ -370,6 +376,7 @@ export async function planFilecoinStorageUpload(
     }),
     providerId,
     quoteFingerprint: reviewedQuote,
+    uploadId,
   })
 }
 function normalizeServiceUrl(value: unknown) {
@@ -500,6 +507,7 @@ function makeCheckpoint(
       serviceProvider: provider.serviceProvider,
       serviceUrl: provider.serviceUrl,
     }),
+    uploadId: plan.uploadId,
     withCDN: false,
   })
 }
@@ -691,6 +699,7 @@ function validateAddPiecesAuthorization(
     parseQuantity(metadata.pieceIndex, 'piece index') !== 0n ||
     !exactMetadata(metadata.metadata, [
       { key: PIECE_METADATA_KEY, value: checkpoint.mediaCid },
+      { key: UPLOAD_METADATA_KEY, value: checkpoint.uploadId },
     ])
   ) {
     throw uploadError('the adapter changed the piece authorization terms.')
@@ -866,7 +875,10 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   const pieces = [
     {
       pieceCid: stored.pieceCid,
-      pieceMetadata: { [PIECE_METADATA_KEY]: plan.mediaCid },
+      pieceMetadata: {
+        [PIECE_METADATA_KEY]: plan.mediaCid,
+        [UPLOAD_METADATA_KEY]: plan.uploadId,
+      },
     },
   ]
   const extraData = await context.presignForCommit(pieces)
@@ -1021,10 +1033,12 @@ export function assertFilecoinStorageUploadReceipt(
     pieceArgs.dataSetId !== dataSetArgs.dataSetId ||
     pieceArgs.pieceCid.data.toLowerCase() !==
       checkpoint.piece.bytes.toLowerCase() ||
-    pieceArgs.keys.length !== 1 ||
+    pieceArgs.keys.length !== 2 ||
     pieceArgs.keys[0] !== PIECE_METADATA_KEY ||
-    pieceArgs.values.length !== 1 ||
-    pieceArgs.values[0] !== checkpoint.mediaCid
+    pieceArgs.keys[1] !== UPLOAD_METADATA_KEY ||
+    pieceArgs.values.length !== 2 ||
+    pieceArgs.values[0] !== checkpoint.mediaCid ||
+    pieceArgs.values[1] !== checkpoint.uploadId
   ) {
     throw uploadError('the piece event changed the authorized terms.')
   }
@@ -1109,6 +1123,7 @@ function normalizeCheckpoint(
     throw uploadError('the checkpoint provider ID is invalid.')
   }
   const pieceBytes = parseHex(value.piece.bytes, 'checkpoint PieceCID', 128)
+  const uploadId = parseHex(value.uploadId, 'checkpoint upload ID', 32)
   let pieceCid: ReturnType<typeof parsePieceCid>
   try {
     pieceCid = parsePieceCid(pieceBytes)
@@ -1116,6 +1131,7 @@ function normalizeCheckpoint(
     throw uploadError('the checkpoint PieceCID is invalid.', { cause })
   }
   if (
+    uploadId.length !== 66 ||
     pieceCid.toString() !== value.piece.text ||
     !Number.isSafeInteger(value.piece.size) ||
     value.piece.size !== value.carByteLength ||
@@ -1138,6 +1154,7 @@ function normalizeCheckpoint(
       text: pieceCid.toString(),
     }),
     provider,
+    uploadId,
     withCDN: false as const,
   })
 }
@@ -1248,7 +1265,12 @@ export async function uploadFilecoinStorage(
   ) {
     throw uploadError('the pinned storage-contract graph is not ready.')
   }
-  const guard = await createTransactionGuard(wallet, plan.account, plan.chainId)
+  const guard = await createTransactionGuard(
+    wallet,
+    plan.account,
+    plan.chainId,
+    options.signal,
+  )
   const operationController = new AbortController()
   const requestController = new AbortController()
   const abortRequests = () =>

@@ -647,6 +647,7 @@ export async function createTransactionGuard(
   provider: Eip1193Provider,
   account: Address,
   chainId: bigint,
+  signal?: AbortSignal,
 ): Promise<TransactionGuard> {
   let chainChanged = false
   let accountChanged = false
@@ -700,9 +701,11 @@ export async function createTransactionGuard(
           () => provider.request({ method: 'eth_chainId' }),
           Date.now() + WALLET_READ_TIMEOUT_MS,
           chainChangedError,
+          signal,
         ),
       )
     } catch {
+      signal?.throwIfAborted()
       throw chainChangedError()
     }
     if (chainChanged || currentChainId !== chainId) throw chainChangedError()
@@ -715,9 +718,11 @@ export async function createTransactionGuard(
           () => provider.request({ method: 'eth_accounts' }),
           Date.now() + WALLET_READ_TIMEOUT_MS,
           accountChangedError,
+          signal,
         ),
       )[0]
     } catch {
+      signal?.throwIfAborted()
       throw accountChangedError()
     }
     if (
