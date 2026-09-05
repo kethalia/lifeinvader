@@ -243,7 +243,6 @@ function assertUnsigned(
 function validTimeout(value: number, maximum: number) {
   return Number.isSafeInteger(value) && value > 0 && value <= maximum
 }
-
 function sameNetwork(
   first: FilecoinStorageNetwork,
   second: FilecoinStorageNetwork,
@@ -258,7 +257,6 @@ function sameNetwork(
     )
   )
 }
-
 function validateReadyQuote(
   quote: FilecoinStorageQuote,
   account: Address,
@@ -310,7 +308,6 @@ function validateReadyQuote(
     throw uploadError('the Filecoin Pay account is not ready for this upload.')
   }
 }
-
 /** Validate, hash-check, and snapshot the exact CAR covered by a ready quote. */
 export async function planFilecoinStorageUpload(
   prepared: PreparedMediaCar,
@@ -362,7 +359,6 @@ export async function planFilecoinStorageUpload(
     providerId,
   })
 }
-
 function normalizeServiceUrl(value: unknown) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 2_048) {
     throw uploadError('the provider returned an invalid service URL.')
@@ -389,7 +385,6 @@ function normalizeServiceUrl(value: unknown) {
   if (!url.pathname.endsWith('/')) url.pathname += '/'
   return url.toString()
 }
-
 function normalizeProvider(
   value: ReturnType<typeof parsePDPProvider>,
   plan: FilecoinStorageUploadPlan,
@@ -428,7 +423,6 @@ function normalizeProvider(
     serviceUrl: normalizeServiceUrl(value.pdp.serviceURL),
   })
 }
-
 function normalizePiece(
   value: FilecoinStorageUploadPiece,
   plan: FilecoinStorageUploadPlan,
@@ -474,7 +468,6 @@ function normalizePiece(
     text: cid.toString(),
   })
 }
-
 function makeCheckpoint(
   plan: FilecoinStorageUploadPlan,
   provider: ReturnType<typeof normalizeProvider>,
@@ -495,7 +488,6 @@ function makeCheckpoint(
     withCDN: false,
   })
 }
-
 function exactKeys(
   value: Record<string, unknown>,
   expected: readonly string[],
@@ -506,14 +498,12 @@ function exactKeys(
     [...expected].sort().every((key, index) => received[index] === key)
   )
 }
-
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw uploadError(`the adapter produced invalid ${label}.`)
   }
   return value as Record<string, unknown>
 }
-
 function exactTypedFields(
   value: unknown,
   expected: readonly { readonly name: string; readonly type: string }[],
@@ -531,7 +521,6 @@ function exactTypedFields(
     )
   })
 }
-
 function validateTypes(value: unknown) {
   const types = asRecord(value, 'storage authorization types')
   if (
@@ -543,7 +532,6 @@ function validateTypes(value: unknown) {
     throw uploadError('the adapter requested unexpected authorization types.')
   }
 }
-
 function validateDomain(value: unknown, plan: FilecoinStorageUploadPlan) {
   const domain = asRecord(value, 'storage authorization domain')
   if (
@@ -559,7 +547,6 @@ function validateDomain(value: unknown, plan: FilecoinStorageUploadPlan) {
     throw uploadError('the adapter changed the storage authorization domain.')
   }
 }
-
 function exactMetadata(
   value: unknown,
   expected: readonly { key: string; value: string }[],
@@ -580,7 +567,6 @@ function exactMetadata(
     })
   )
 }
-
 function parseTypedRequest(request: ProviderRequest, account: Address) {
   if (!Array.isArray(request.params) || request.params.length !== 2) {
     throw uploadError('the adapter produced invalid authorization parameters.')
@@ -611,7 +597,6 @@ function parseTypedRequest(request: ProviderRequest, account: Address) {
   }
   return { encoded, typedData }
 }
-
 function validateCreateAuthorization(
   request: ProviderRequest,
   plan: FilecoinStorageUploadPlan,
@@ -650,7 +635,6 @@ function validateCreateAuthorization(
     } satisfies ProviderRequest,
   }
 }
-
 function validateAddPiecesAuthorization(
   request: ProviderRequest,
   plan: FilecoinStorageUploadPlan,
@@ -701,14 +685,12 @@ function validateAddPiecesAuthorization(
     params: [plan.account, parsed.encoded],
   } satisfies ProviderRequest
 }
-
 function requestParams(request: ProviderRequest, label: string) {
   if (!Array.isArray(request.params)) {
     throw uploadError(`the adapter produced invalid ${label} parameters.`)
   }
   return request.params
 }
-
 function validateReadCall(
   request: ProviderRequest,
   plan: FilecoinStorageUploadPlan,
@@ -760,7 +742,6 @@ function validateReadCall(
     } satisfies ProviderRequest,
   }
 }
-
 function authenticateProviderRead(
   value: unknown,
   plan: FilecoinStorageUploadPlan,
@@ -783,7 +764,6 @@ function authenticateProviderRead(
     })
   }
 }
-
 function authenticateApprovalRead(value: unknown) {
   const data = parseHex(value, 'provider-approval response', 32)
   try {
@@ -803,7 +783,6 @@ function authenticateApprovalRead(value: unknown) {
     })
   }
 }
-
 const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   authorizeCommit,
   onStored,
@@ -888,7 +867,6 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
     txHash: committed.txHash,
   }
 }
-
 function parseLogQuantity(value: unknown) {
   if (
     typeof value !== 'string' ||
@@ -899,7 +877,6 @@ function parseLogQuantity(value: unknown) {
   }
   return BigInt(value)
 }
-
 function canonicalEventLogs(
   logs: unknown,
   receipt: TransactionReceipt,
@@ -956,7 +933,6 @@ function canonicalEventLogs(
     }
   })
 }
-
 /** Authenticate one fresh data set and its one root-CID-tagged CAR piece. */
 export function assertFilecoinStorageUploadReceipt(
   logs: unknown,
@@ -1039,7 +1015,6 @@ export function assertFilecoinStorageUploadReceipt(
     pieceId: pieceArgs.pieceId,
   }
 }
-
 function validateReceiptTiming(
   options: Pick<
     FilecoinStorageUploadOptions,
@@ -1059,7 +1034,6 @@ function validateReceiptTiming(
   }
   return receiptTimeoutMs
 }
-
 function normalizeCheckpoint(
   value: FilecoinStorageUploadCheckpoint,
   expectedAccount: Address,
@@ -1158,11 +1132,15 @@ async function waitForUploadReceipt(
   options: Pick<
     FilecoinStorageUploadOptions,
     'pollIntervalMs' | 'receiptTimeoutMs'
-  >,
+  > & { assertActive?: () => void },
 ): Promise<FilecoinStorageUploadReceipt> {
   let eventResult: { dataSetId: bigint; pieceId: bigint } | undefined
   const receipt = await waitForTransactionReceipt(provider, hash, {
-    assertCurrentChain: guard.assertSubmission,
+    assertCurrentChain: async () => {
+      options.assertActive?.()
+      await guard.assertSubmission()
+      options.assertActive?.()
+    },
     assertReceiptLogs: (logs, candidate) => {
       eventResult = assertFilecoinStorageUploadReceipt(
         logs,
@@ -1170,7 +1148,11 @@ async function waitForUploadReceipt(
         checkpoint,
       )
     },
-    assertUnchanged: guard.assertUnchanged,
+    assertUnchanged: () => {
+      options.assertActive?.()
+      guard.assertUnchanged()
+      options.assertActive?.()
+    },
     pollIntervalMs: options.pollIntervalMs,
     selectedChainId: checkpoint.chainId,
     timeoutMs:
@@ -1614,6 +1596,7 @@ export async function uploadFilecoinStorage(
         checkpoint,
         guard,
         {
+          assertActive: assertOperationActive,
           pollIntervalMs: options.pollIntervalMs,
           receiptTimeoutMs,
         },

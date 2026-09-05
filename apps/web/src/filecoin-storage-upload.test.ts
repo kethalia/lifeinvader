@@ -302,6 +302,7 @@ function walletProvider({
   logs = storageLogs(hash),
   methods = [],
   providerOverrides = {},
+  receiptRequest,
   signatureRequest,
   signatureError,
 }: {
@@ -311,6 +312,7 @@ function walletProvider({
   logs?: unknown[]
   methods?: string[]
   providerOverrides?: Record<string, unknown>
+  receiptRequest?: () => Promise<unknown>
   signatureRequest?: () => Promise<unknown>
   signatureError?: unknown
 } = {}): Eip1193Provider {
@@ -348,6 +350,7 @@ function walletProvider({
         return SIGNATURE
       }
       if (method === 'eth_getTransactionReceipt') {
+        if (receiptRequest) return await receiptRequest()
         return {
           blockHash: BLOCK_HASH,
           blockNumber: '0x2a',
@@ -790,6 +793,24 @@ describe('Filecoin storage upload execution', () => {
         provider: walletProvider({ signatureError: rejection }),
       }),
     ).rejects.toBe(rejection)
+  })
+  it('cancels receipt polling with its submitted recovery hash', async () => {
+    const requested = deferred<void>()
+    const response = deferred<null>()
+    const controller = new AbortController()
+    const pending = runUpload(successfulExecutor(), {
+      provider: walletProvider({
+        receiptRequest() {
+          requested.resolve(undefined)
+          return response.promise
+        },
+      }),
+      signal: controller.signal,
+    })
+    await requested.promise
+    controller.abort(new DOMException('Stop upload.', 'AbortError'))
+    response.resolve(null)
+    await expect(pending).rejects.toMatchObject(recoveryFailure(/cancelled/i))
   })
   it('returns a recovery checkpoint when provider submission is uncertain', async () => {
     const checkpoints: FilecoinStorageUploadCheckpoint[] = []
