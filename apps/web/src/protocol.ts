@@ -651,21 +651,33 @@ export async function createTransactionGuard(
 ): Promise<TransactionGuard> {
   let chainChanged = false
   let accountChanged = false
+  const contextController = new AbortController()
+  const readSignal = signal
+    ? AbortSignal.any([signal, contextController.signal])
+    : contextController.signal
+  const markChainChanged = () => {
+    chainChanged = true
+    contextController.abort(chainChangedError())
+  }
+  const markAccountChanged = () => {
+    accountChanged = true
+    contextController.abort(accountChangedError())
+  }
   const handleChainChanged = (value: unknown) => {
     try {
-      if (parseChainId(value) !== chainId) chainChanged = true
+      if (parseChainId(value) !== chainId) markChainChanged()
     } catch {
-      chainChanged = true
+      markChainChanged()
     }
   }
   const handleAccountsChanged = (value: unknown) => {
     try {
       const selectedAccount = parseAccounts(value)[0]
       if (selectedAccount?.toLowerCase() !== account.toLowerCase()) {
-        accountChanged = true
+        markAccountChanged()
       }
     } catch {
-      accountChanged = true
+      markAccountChanged()
     }
   }
   const addProviderListener = provider.on?.bind(provider)
@@ -684,6 +696,7 @@ export async function createTransactionGuard(
     if (accountChanged) throw accountChangedError()
   }
   const release = () => {
+    contextController.abort()
     if (!removeProviderListener) return
     for (const { event, listener } of registeredListeners.splice(0)) {
       try {
@@ -701,11 +714,11 @@ export async function createTransactionGuard(
           () => provider.request({ method: 'eth_chainId' }),
           Date.now() + WALLET_READ_TIMEOUT_MS,
           chainChangedError,
-          signal,
+          readSignal,
         ),
       )
     } catch {
-      signal?.throwIfAborted()
+      readSignal.throwIfAborted()
       throw chainChangedError()
     }
     if (chainChanged || currentChainId !== chainId) throw chainChangedError()
@@ -718,11 +731,11 @@ export async function createTransactionGuard(
           () => provider.request({ method: 'eth_accounts' }),
           Date.now() + WALLET_READ_TIMEOUT_MS,
           accountChangedError,
-          signal,
+          readSignal,
         ),
       )[0]
     } catch {
-      signal?.throwIfAborted()
+      readSignal.throwIfAborted()
       throw accountChangedError()
     }
     if (

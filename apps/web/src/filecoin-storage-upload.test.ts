@@ -574,6 +574,7 @@ describe('Filecoin storage upload execution', () => {
       recoveryFailure(/incomplete storage commit/i, null),
     )
   })
+  // prettier-ignore
   it('serializes wallet prompts and withholds signatures after cancellation', async () => {
     const delayedWallet = () => {
       const prompted = deferred<void>()
@@ -582,38 +583,28 @@ describe('Filecoin storage upload execution', () => {
         prompted.resolve(undefined)
         return response.promise
       })
-      return {
-        prompted,
-        provider: walletProvider({ signatureRequest }),
-        response,
-        signatureRequest,
-      }
+      return { prompted, provider: walletProvider({ signatureRequest }),
+        response, signatureRequest }
     }
     const concurrentWallet = delayedWallet()
     const concurrent: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
       const first = requestSignature(input, createAuthorization())
       await concurrentWallet.prompted.promise
-      await expect(
-        requestSignature(input, addAuthorization(input.plan.mediaCid)),
-      ).rejects.toThrow(/unexpected signature/i)
-      concurrentWallet.response.resolve(
-        await signAuthorization(createAuthorization()),
-      )
+      await expect(requestSignature(input, addAuthorization(input.plan.mediaCid)))
+        .rejects.toThrow(/unexpected signature/i)
+      concurrentWallet.response.resolve(await signAuthorization(createAuthorization()))
       await first
       await expect(input.authorizeCommit()).rejects.toThrow(/incomplete/i)
       throw new Error('fixture stopped after first signature')
     }
-    await expect(
-      runUpload(concurrent, { provider: concurrentWallet.provider }),
-    ).rejects.toThrow(/provider did not complete/i)
+    await expect(runUpload(concurrent, { provider: concurrentWallet.provider }))
+      .rejects.toThrow(/provider did not complete/i)
     expect(concurrentWallet.signatureRequest).toHaveBeenCalledOnce()
     const cancelledWallet = delayedWallet()
     const controller = new AbortController()
     const pending = runUpload(successfulExecutor(), {
-      provider: cancelledWallet.provider,
-      signal: controller.signal,
-    })
+      provider: cancelledWallet.provider, signal: controller.signal })
     await cancelledWallet.prompted.promise
     controller.abort(new DOMException('Stop upload.', 'AbortError'))
     await expect(pending).rejects.toThrow(/cancelled/i)
@@ -623,44 +614,33 @@ describe('Filecoin storage upload execution', () => {
       const first = requestSignature(input, createAuthorization())
       void first.catch(() => undefined)
       await abandonedWallet.prompted.promise
-      await expect(
-        requestSignature(input, addAuthorization(input.plan.mediaCid)),
-      ).rejects.toThrow(/unexpected signature/i)
+      await expect(requestSignature(input, addAuthorization(input.plan.mediaCid)))
+        .rejects.toThrow(/unexpected signature/i)
       throw new Error('adapter exited with an abandoned prompt')
     }
-    await expect(
-      runUpload(abandoned, { provider: abandonedWallet.provider }),
-    ).rejects.toThrow(/provider did not complete/i)
+    await expect(runUpload(abandoned, { provider: abandonedWallet.provider }))
+      .rejects.toThrow(/provider did not complete/i)
   })
+  // prettier-ignore
   it('preserves wallet rejection before any provider commit', async () => {
     const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })
-    await expect(
-      runUpload(successfulExecutor(), {
-        provider: walletProvider({ signatureError: rejection }),
-      }),
-    ).rejects.toBe(rejection)
+    await expect(runUpload(successfulExecutor(), {
+      provider: walletProvider({ signatureError: rejection }),
+    })).rejects.toBe(rejection)
     let signatures = 0
     const retried: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
-      await expect(requestSignature(input, createAuthorization())).rejects.toBe(
-        rejection,
-      )
+      await expect(requestSignature(input, createAuthorization())).rejects.toBe(rejection)
       await signAndAuthorize(input)
       input.onSubmitted(TX_HASH)
       throw new Error('provider failed after submission')
     }
-    await expect(
-      runUpload(retried, {
-        provider: walletProvider({
-          signatureRequest: async ({ params }) => {
-            if (signatures++ === 0) throw rejection
-            return await signAuthorization(
-              String(Array.isArray(params) ? params[1] : undefined),
-            )
-          },
-        }),
-      }),
-    ).rejects.toMatchObject(recoveryFailure(/after submission/i, TX_HASH))
+    await expect(runUpload(retried, { provider: walletProvider({
+      signatureRequest: async ({ params }) => {
+        if (signatures++ === 0) throw rejection
+        return await signAuthorization(String(Array.isArray(params) ? params[1] : undefined))
+      },
+    }) })).rejects.toMatchObject(recoveryFailure(/after submission/i, TX_HASH))
   })
   // prettier-ignore
   it('cancels receipt polling and a hung authorized provider', async () => {
@@ -699,6 +679,21 @@ describe('Filecoin storage upload execution', () => {
     await guardRead.promise
     guardController.abort(new DOMException('Stop guard.', 'AbortError'))
     await expect(guardUpload).rejects.toThrow(/Stop guard/i)
+    const recheck = deferred<void>()
+    const contextBase = walletProvider()
+    const chainListeners = new Set<(...args: unknown[]) => void>()
+    let chainReads = 0
+    const contextProvider: Eip1193Provider = { ...contextBase,
+      request(request) { if (request.method === 'eth_chainId' && ++chainReads === 2) {
+        recheck.resolve(undefined); return new Promise(() => undefined)
+      } return contextBase.request(request) },
+      on(event, listener) { if (event === 'chainChanged') chainListeners.add(listener) },
+      removeListener(event, listener) { if (event === 'chainChanged') chainListeners.delete(listener) },
+    }
+    const contextUpload = runUpload(successfulExecutor(), { provider: contextProvider })
+    await recheck.promise
+    for (const listener of [...chainListeners]) listener('0x1')
+    await expect(contextUpload).rejects.toThrow(/network changed/i)
   })
   // prettier-ignore
   it('returns a recovery checkpoint when provider submission is uncertain', async () => {
@@ -806,11 +801,9 @@ describe('Filecoin storage receipt authentication', () => {
         expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1, receiptTimeoutMs: 100 },
     )).rejects.toThrow(/different upload context/i)
   })
+  // prettier-ignore
   it('does not mistake an indexing request for completed indexing', async () => {
-    expect(FILECOIN_STORAGE_DATA_SET_METADATA).toEqual({
-      source: 'lifeinvader',
-      withIPFSIndexing: '',
-    })
+    expect(FILECOIN_STORAGE_DATA_SET_METADATA).toEqual({ source: 'lifeinvader', withIPFSIndexing: '' })
     const result = await runUpload()
     expect(result.ipfsIndexingRequested).toBe(true)
     expect(result).not.toHaveProperty('indexed')
