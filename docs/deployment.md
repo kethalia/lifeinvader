@@ -50,7 +50,7 @@ pnpm --filter @lifeinvader/contracts deploy:protocol \
 
 For a live supported chain, replace the RPC URL and use a Foundry-supported hardware wallet or encrypted keystore option. The script checks all frozen hashes before broadcasting and can safely be run again after deployment.
 
-The web client will later offer the same raw factory call through the connected wallet. It must perform the same factory and protocol code-hash checks before enabling that transaction.
+The web client offers the same raw factory call through the connected wallet and performs the same factory and protocol code-hash checks before enabling that transaction.
 
 ## Pinned fork validation
 
@@ -64,3 +64,5 @@ anvil \
 ```
 
 Transactions sent to `127.0.0.1:8545` mutate only the local fork. Before testing deployment, confirm that the forked factory code hash matches the frozen value above and that the Lifeinvader address is empty or already has the expected runtime code. Pinning the block makes failures reproducible and prevents a test from silently switching historical state between runs.
+
+For repeatable browser and storage validation, use the exact fork blocks, chain IDs, guards, and commands in [`testing.md`](./testing.md). The MetaMask fork uses local chain ID `31337`; the separate Filecoin storage fork retains `314159` for its chain-bound deployed contracts and typed signatures.
