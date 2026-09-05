@@ -541,9 +541,12 @@ function decodePage(
 }
 
 export class PostCommentProjection {
+  readonly #blockHashesByNumber = new Map<bigint, Hash>()
+  readonly #blockNumbersByHash = new Map<Hash, bigint>()
   readonly #comments = new Map<string, PublishedComment[]>()
   readonly #postIds: readonly bigint[]
   readonly #tracked = new Set<string>()
+  readonly #transactionBlocksByHash = new Map<Hash, bigint>()
   #commentCount = 0n
   #confirmedThrough?: EventCheckpoint
   #last?: PostCommentProjectionPosition
@@ -564,6 +567,7 @@ export class PostCommentProjection {
       const comments = projection.#comments.get(key) ?? []
       comments.push(copyComment(comment))
       projection.#comments.set(key, comments)
+      projection.#retainCommentIdentity(comment)
     }
     projection.#commentCount = snapshot.commentCount
     projection.#confirmedThrough = snapshot.confirmedThrough
@@ -623,26 +627,12 @@ export class PostCommentProjection {
       comments.push(comment)
       retained.set(key, comments)
     }
-    const retainedHistory = [...this.#comments.values()].flatMap(
-      (comments) => comments,
-    )
-    const completeHistory = [...retainedHistory, ...page.comments].toSorted(
-      comparePositions,
-    )
-    assertConsistentCommentMetadata(completeHistory, 'history')
-    assertBlockIdentities(
-      [
-        ...completeHistory,
-        ...(this.#last ? [this.#last] : []),
-        ...(this.#confirmedThrough ? [this.#confirmedThrough] : []),
-        ...(page.last ? [page.last] : []),
-      ],
-      'history',
-    )
+    this.#assertCompatiblePage(page.comments)
     for (const [key, comments] of retained) {
       const existing = this.#comments.get(key)
       if (existing) existing.push(...comments)
       else this.#comments.set(key, [...comments])
+      for (const comment of comments) this.#retainCommentIdentity(comment)
       this.#retainedCommentCount += BigInt(comments.length)
     }
     this.#commentCount += BigInt(page.comments.length)
@@ -675,14 +665,7 @@ export class PostCommentProjection {
     ) {
       throw projectionError('confirmation progress')
     }
-    assertBlockIdentities(
-      [
-        ...[...this.#comments.values()].flatMap((comments) => comments),
-        ...(this.#last ? [this.#last] : []),
-        checkpoint,
-      ],
-      'confirmation',
-    )
+    this.#assertCompatibleBlock(checkpoint, 'confirmation')
     this.#confirmedThrough = checkpoint
   }
 
@@ -709,10 +692,65 @@ export class PostCommentProjection {
   }
 
   reset() {
+    this.#blockHashesByNumber.clear()
+    this.#blockNumbersByHash.clear()
     this.#comments.clear()
     this.#commentCount = 0n
     this.#confirmedThrough = undefined
     this.#last = undefined
     this.#retainedCommentCount = 0n
+    this.#transactionBlocksByHash.clear()
+  }
+
+  #assertCompatibleBlock(
+    fingerprint: { blockHash: Hash; blockNumber: bigint },
+    label: string,
+  ) {
+    const knownHash = this.#blockHashesByNumber.get(fingerprint.blockNumber)
+    const knownBlockNumber = this.#blockNumbersByHash.get(fingerprint.blockHash)
+    if (
+      (knownHash !== undefined && knownHash !== fingerprint.blockHash) ||
+      (knownBlockNumber !== undefined &&
+        knownBlockNumber !== fingerprint.blockNumber)
+    ) {
+      throw projectionError(`${label} block identity`)
+    }
+    for (const boundary of [this.#last, this.#confirmedThrough]) {
+      if (
+        boundary &&
+        ((boundary.blockNumber === fingerprint.blockNumber &&
+          boundary.blockHash !== fingerprint.blockHash) ||
+          (boundary.blockHash === fingerprint.blockHash &&
+            boundary.blockNumber !== fingerprint.blockNumber))
+      ) {
+        throw projectionError(`${label} block identity`)
+      }
+    }
+  }
+
+  #assertCompatiblePage(comments: readonly PublishedComment[]) {
+    assertBlockIdentities(comments, 'page')
+    assertTransactionHashesBelongToOneBlock(comments, 'page')
+    for (const comment of comments) {
+      this.#assertCompatibleBlock(comment, 'history')
+      const knownBlockNumber = this.#transactionBlocksByHash.get(
+        comment.transactionHash,
+      )
+      if (
+        knownBlockNumber !== undefined &&
+        knownBlockNumber !== comment.blockNumber
+      ) {
+        throw projectionError('history transaction block')
+      }
+    }
+  }
+
+  #retainCommentIdentity(comment: PublishedComment) {
+    this.#blockHashesByNumber.set(comment.blockNumber, comment.blockHash)
+    this.#blockNumbersByHash.set(comment.blockHash, comment.blockNumber)
+    this.#transactionBlocksByHash.set(
+      comment.transactionHash,
+      comment.blockNumber,
+    )
   }
 }

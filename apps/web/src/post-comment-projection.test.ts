@@ -390,6 +390,26 @@ describe('post comment projection', () => {
     expect(projection.snapshot).toEqual(snapshot)
   })
 
+  it('applies a one-log delta over 5,000 retained comments', () => {
+    const projection = new PostCommentProjection([7n])
+    projection.applyLogs(
+      Array.from({ length: 5_000 }, (_, index) => {
+        const commentId = BigInt(index + 1)
+        return commentLog(commentId, commentId)
+      }),
+    )
+
+    projection.applyLogs([commentLog(5_001n, 5_001n)])
+
+    expect(projection.progress).toMatchObject({
+      commentCount: 5_001n,
+      retainedCommentCount: 5_001n,
+    })
+    expect(
+      projection.readComments(7n, { offset: 5_000 }).comments[0]!.commentId,
+    ).toBe(5_001n)
+  })
+
   it('requires later pages to begin in a later complete block', () => {
     const projection = new PostCommentProjection([7n])
     projection.applyLogs([commentLog(1n, 2n)])
