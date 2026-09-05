@@ -4,11 +4,15 @@ import {
   type FilecoinStorageUploadCheckpoint,
 } from './filecoin-storage-upload'
 
-const RECOVERY_KEY_PREFIX = 'lifeinvader:filecoin-storage-recovery:v1:'
+const DEFAULT_DATABASE_NAME = 'lifeinvader-filecoin-storage-recovery'
 const RECOVERY_SCHEMA_VERSION = 1
+const RECOVERY_STORE = 'recoveries'
 const MAX_EVM_QUANTITY = (1n << 256n) - 1n
 const MAX_RECORD_BYTES = 8_192
-const MAX_SCANNED_STORAGE_KEYS = 512
+const HASH_CAPACITY_SENTINELS = [
+  `0x${'00'.repeat(32)}` as Hash,
+  `0x${'ff'.repeat(32)}` as Hash,
+] as const
 
 export const MAX_FILECOIN_STORAGE_RECOVERY_RECORDS = 16
 
@@ -19,27 +23,23 @@ export type FilecoinStorageRecoveryRecord = Readonly<{
   updatedAtMs: number
 }>
 
-export type FilecoinStorageRecoveryStorage = Pick<
-  Storage,
-  'getItem' | 'key' | 'length' | 'removeItem' | 'setItem'
->
-
 export type FilecoinStorageRecoveryJournal = {
-  clear(): void
-  list(): readonly FilecoinStorageRecoveryRecord[]
+  clear(): Promise<void>
+  list(): Promise<readonly FilecoinStorageRecoveryRecord[]>
   markSubmitted(
     checkpoint: FilecoinStorageUploadCheckpoint,
     transactionHash: Hash,
-  ): FilecoinStorageRecoveryRecord
-  remove(uploadId: Hex): void
+  ): Promise<FilecoinStorageRecoveryRecord>
+  remove(uploadId: Hex): Promise<void>
   stage(
     checkpoint: FilecoinStorageUploadCheckpoint,
-  ): FilecoinStorageRecoveryRecord
+  ): Promise<FilecoinStorageRecoveryRecord>
 }
 
 export type FilecoinStorageRecoveryJournalOptions = {
+  databaseName?: string
+  factory?: IDBFactory
   now?: () => number
-  storage?: FilecoinStorageRecoveryStorage
 }
 
 type EncodedCheckpoint = {
@@ -71,6 +71,12 @@ type EncodedRecoveryRecord = {
   updatedAtMs: number
 }
 
+type StoredRecoveryEnvelope = {
+  raw: string
+  schemaVersion: typeof RECOVERY_SCHEMA_VERSION
+  uploadId: Hex
+}
+
 export class FilecoinStorageRecoveryJournalError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(`Filecoin storage recovery journal ${message}.`, options)
@@ -83,6 +89,11 @@ function journalError(message: string, cause?: unknown) {
     message,
     cause === undefined ? undefined : { cause },
   )
+}
+
+function asJournalError(value: unknown, fallback: string) {
+  if (value instanceof FilecoinStorageRecoveryJournalError) return value
+  return journalError(fallback, value)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -224,10 +235,6 @@ function decodeCheckpoint(value: unknown) {
   return normalized
 }
 
-function recoveryKey(uploadId: Hex) {
-  return `${RECOVERY_KEY_PREFIX}${normalizeUploadId(uploadId).slice(2)}`
-}
-
 function encodeRecord(record: FilecoinStorageRecoveryRecord) {
   const encoded: EncodedRecoveryRecord = {
     checkpoint: encodeCheckpoint(record.checkpoint),
@@ -236,10 +243,14 @@ function encodeRecord(record: FilecoinStorageRecoveryRecord) {
     transactionHashes: [...record.transactionHashes],
     updatedAtMs: record.updatedAtMs,
   }
-  return JSON.stringify(encoded)
+  const raw = JSON.stringify(encoded)
+  if (raw.length > MAX_RECORD_BYTES) {
+    throw journalError('record size is invalid')
+  }
+  return raw
 }
 
-function decodeRecord(raw: string, key: string) {
+function decodeRecord(raw: string, uploadId: Hex) {
   if (raw.length === 0 || raw.length > MAX_RECORD_BYTES) {
     throw journalError('record size is invalid')
   }
@@ -265,7 +276,7 @@ function decodeRecord(raw: string, key: string) {
     throw journalError('record schema is invalid')
   }
   const checkpoint = decodeCheckpoint(value.checkpoint)
-  if (key !== recoveryKey(checkpoint.uploadId)) {
+  if (checkpoint.uploadId !== uploadId) {
     throw journalError('record key does not match its upload ID')
   }
   const transactionHashes = value.transactionHashes.map(normalizeHash)
@@ -300,113 +311,6 @@ function sameCheckpoint(
   )
 }
 
-function resolveStorage(storage?: FilecoinStorageRecoveryStorage) {
-  if (storage) return storage
-  try {
-    const browserStorage = globalThis.localStorage
-    if (browserStorage) return browserStorage
-  } catch (cause) {
-    throw journalError('is unavailable in this browser', cause)
-  }
-  throw journalError('is unavailable in this browser')
-}
-
-function storageLength(storage: FilecoinStorageRecoveryStorage) {
-  try {
-    const length = storage.length
-    if (
-      !Number.isSafeInteger(length) ||
-      length < 0 ||
-      length > MAX_SCANNED_STORAGE_KEYS
-    ) {
-      throw journalError('storage key scan limit was exceeded')
-    }
-    return length
-  } catch (cause) {
-    if (cause instanceof FilecoinStorageRecoveryJournalError) throw cause
-    throw journalError('could not inspect browser storage', cause)
-  }
-}
-
-function recoveryKeys(
-  storage: FilecoinStorageRecoveryStorage,
-  enforceRecordLimit = true,
-) {
-  const keys: string[] = []
-  const length = storageLength(storage)
-  try {
-    for (let index = 0; index < length; index += 1) {
-      const key = storage.key(index)
-      if (key?.startsWith(RECOVERY_KEY_PREFIX)) keys.push(key)
-    }
-  } catch (cause) {
-    throw journalError('could not inspect browser storage', cause)
-  }
-  if (
-    enforceRecordLimit &&
-    keys.length > MAX_FILECOIN_STORAGE_RECOVERY_RECORDS
-  ) {
-    throw journalError('record limit was exceeded')
-  }
-  return keys.sort()
-}
-
-function readStorage(storage: FilecoinStorageRecoveryStorage, key: string) {
-  try {
-    return storage.getItem(key)
-  } catch (cause) {
-    throw journalError('could not read browser storage', cause)
-  }
-}
-
-function writeStorage(
-  storage: FilecoinStorageRecoveryStorage,
-  key: string,
-  record: FilecoinStorageRecoveryRecord,
-) {
-  const encoded = encodeRecord(record)
-  if (encoded.length > MAX_RECORD_BYTES) {
-    throw journalError('record size is invalid')
-  }
-  try {
-    storage.setItem(key, encoded)
-  } catch (cause) {
-    throw journalError('could not write browser storage', cause)
-  }
-}
-
-function removeStorage(storage: FilecoinStorageRecoveryStorage, key: string) {
-  try {
-    storage.removeItem(key)
-  } catch (cause) {
-    throw journalError('could not update browser storage', cause)
-  }
-}
-
-function readRecords(storage: FilecoinStorageRecoveryStorage) {
-  const records: FilecoinStorageRecoveryRecord[] = []
-  for (const key of recoveryKeys(storage)) {
-    const raw = readStorage(storage, key)
-    if (raw !== null) records.push(decodeRecord(raw, key))
-  }
-  records.sort(
-    (first, second) =>
-      second.updatedAtMs - first.updatedAtMs ||
-      first.checkpoint.uploadId.localeCompare(second.checkpoint.uploadId),
-  )
-  return Object.freeze(records)
-}
-
-function currentTime(now: () => number) {
-  let value: unknown
-  try {
-    value = now()
-  } catch (cause) {
-    throw journalError('clock is unavailable', cause)
-  }
-  return normalizeTimestamp(value, 'clock value')
-}
-
 function createRecord(
   checkpoint: FilecoinStorageUploadCheckpoint,
   createdAtMs: number,
@@ -421,75 +325,328 @@ function createRecord(
   })
 }
 
+function assertHashCapacity(checkpoint: FilecoinStorageUploadCheckpoint) {
+  encodeRecord(
+    createRecord(
+      checkpoint,
+      Number.MAX_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+      HASH_CAPACITY_SENTINELS,
+    ),
+  )
+}
+
+function encodeEnvelope(
+  record: FilecoinStorageRecoveryRecord,
+): StoredRecoveryEnvelope {
+  return {
+    raw: encodeRecord(record),
+    schemaVersion: RECOVERY_SCHEMA_VERSION,
+    uploadId: record.checkpoint.uploadId,
+  }
+}
+
+function decodeEnvelope(value: unknown, expectedUploadId?: Hex) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['raw', 'schemaVersion', 'uploadId']) ||
+    value.schemaVersion !== RECOVERY_SCHEMA_VERSION ||
+    typeof value.raw !== 'string'
+  ) {
+    throw journalError('stored envelope is invalid')
+  }
+  const uploadId = normalizeUploadId(value.uploadId)
+  if (value.uploadId !== uploadId) {
+    throw journalError('stored envelope key is not canonical')
+  }
+  if (expectedUploadId !== undefined && uploadId !== expectedUploadId) {
+    throw journalError('stored envelope key is invalid')
+  }
+  return decodeRecord(value.raw, uploadId)
+}
+
+function currentTime(now: () => number) {
+  let value: unknown
+  try {
+    value = now()
+  } catch (cause) {
+    throw journalError('clock is unavailable', cause)
+  }
+  return normalizeTimestamp(value, 'clock value')
+}
+
+function openDatabase(options: FilecoinStorageRecoveryJournalOptions) {
+  let factory: IDBFactory | undefined
+  try {
+    factory = options.factory ?? globalThis.indexedDB
+  } catch (cause) {
+    throw journalError('is unavailable in this browser', cause)
+  }
+  const databaseName = options.databaseName ?? DEFAULT_DATABASE_NAME
+  if (!factory) throw journalError('is unavailable in this browser')
+  if (
+    typeof databaseName !== 'string' ||
+    databaseName.length === 0 ||
+    databaseName.length > 128
+  ) {
+    throw journalError('database name is invalid')
+  }
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    let request: IDBOpenDBRequest
+    try {
+      request = factory.open(databaseName, RECOVERY_SCHEMA_VERSION)
+    } catch (cause) {
+      reject(journalError('could not open', cause))
+      return
+    }
+    let settled = false
+    const fail = (value: unknown, fallback: string) => {
+      if (settled) return
+      settled = true
+      reject(asJournalError(value, fallback))
+    }
+    request.onupgradeneeded = () => {
+      if (settled) {
+        request.transaction?.abort()
+        return
+      }
+      const database = request.result
+      if (database.objectStoreNames.contains(RECOVERY_STORE)) {
+        database.deleteObjectStore(RECOVERY_STORE)
+      }
+      database.createObjectStore(RECOVERY_STORE, { keyPath: 'uploadId' })
+    }
+    request.onerror = () => fail(request.error, 'could not open')
+    request.onblocked = () => fail(undefined, 'is blocked by another tab')
+    request.onsuccess = () => {
+      const database = request.result
+      if (settled) {
+        database.close()
+        return
+      }
+      settled = true
+      database.onversionchange = () => database.close()
+      resolve(database)
+    }
+  })
+}
+
+async function withDatabase<T>(
+  options: FilecoinStorageRecoveryJournalOptions,
+  operation: (database: IDBDatabase) => Promise<T>,
+) {
+  const database = await openDatabase(options)
+  try {
+    return await operation(database)
+  } finally {
+    database.close()
+  }
+}
+
+function listRecords(database: IDBDatabase) {
+  return new Promise<readonly FilecoinStorageRecoveryRecord[]>(
+    (resolve, reject) => {
+      const transaction = database.transaction(RECOVERY_STORE, 'readonly')
+      const request = transaction
+        .objectStore(RECOVERY_STORE)
+        .getAll(undefined, MAX_FILECOIN_STORAGE_RECOVERY_RECORDS + 1)
+      let values: unknown[] = []
+      let requestError: unknown
+      request.onsuccess = () => {
+        values = request.result as unknown[]
+      }
+      request.onerror = () => {
+        requestError = request.error
+      }
+      transaction.oncomplete = () => {
+        try {
+          if (values.length > MAX_FILECOIN_STORAGE_RECOVERY_RECORDS) {
+            throw journalError('record limit was exceeded')
+          }
+          const records = values.map((value) => decodeEnvelope(value))
+          records.sort(
+            (first, second) =>
+              second.updatedAtMs - first.updatedAtMs ||
+              first.checkpoint.uploadId.localeCompare(
+                second.checkpoint.uploadId,
+              ),
+          )
+          resolve(Object.freeze(records))
+        } catch (error) {
+          reject(asJournalError(error, 'record validation failed'))
+        }
+      }
+      transaction.onabort = () =>
+        reject(
+          asJournalError(requestError ?? transaction.error, 'read was aborted'),
+        )
+      transaction.onerror = () => undefined
+    },
+  )
+}
+
+function mutateRecord(
+  database: IDBDatabase,
+  checkpoint: FilecoinStorageUploadCheckpoint,
+  now: () => number,
+  transactionHash?: Hash,
+) {
+  return new Promise<FilecoinStorageRecoveryRecord>((resolve, reject) => {
+    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    const store = transaction.objectStore(RECOVERY_STORE)
+    const getRequest = store.get(checkpoint.uploadId)
+    let failure: unknown
+    let result: FilecoinStorageRecoveryRecord | undefined
+    const fail = (error: unknown, fallback: string) => {
+      if (failure === undefined) failure = asJournalError(error, fallback)
+      try {
+        transaction.abort()
+      } catch {
+        reject(asJournalError(failure, fallback))
+      }
+    }
+    const write = (record: FilecoinStorageRecoveryRecord) => {
+      result = record
+      try {
+        const request = store.put(encodeEnvelope(record))
+        request.onerror = () => {
+          if (failure === undefined) {
+            failure = asJournalError(request.error, 'write failed')
+          }
+        }
+      } catch (error) {
+        fail(error, 'write failed')
+      }
+    }
+    const create = () => {
+      const time = currentTime(now)
+      write(
+        createRecord(
+          checkpoint,
+          time,
+          time,
+          transactionHash ? [transactionHash] : [],
+        ),
+      )
+    }
+    const checkCapacityAndCreate = () => {
+      const countRequest = store.count()
+      countRequest.onsuccess = () => {
+        if (countRequest.result >= MAX_FILECOIN_STORAGE_RECOVERY_RECORDS) {
+          fail(journalError('record limit was reached'), 'capacity failed')
+          return
+        }
+        create()
+      }
+      countRequest.onerror = () => {
+        if (failure === undefined) {
+          failure = asJournalError(countRequest.error, 'capacity read failed')
+        }
+      }
+    }
+    getRequest.onsuccess = () => {
+      try {
+        if (getRequest.result === undefined) {
+          checkCapacityAndCreate()
+          return
+        }
+        const existing = decodeEnvelope(getRequest.result, checkpoint.uploadId)
+        if (!sameCheckpoint(existing.checkpoint, checkpoint)) {
+          throw journalError('upload ID is already bound to another checkpoint')
+        }
+        if (!transactionHash) {
+          result = existing
+          return
+        }
+        const hashes = [...existing.transactionHashes]
+        if (!hashes.includes(transactionHash)) hashes.push(transactionHash)
+        if (hashes.length > 2) {
+          throw journalError('transaction replacement limit was exceeded')
+        }
+        const time = currentTime(now)
+        write(
+          createRecord(
+            checkpoint,
+            existing.createdAtMs,
+            Math.max(existing.updatedAtMs, time),
+            hashes,
+          ),
+        )
+      } catch (error) {
+        fail(error, 'record update failed')
+      }
+    }
+    getRequest.onerror = () => {
+      if (failure === undefined) {
+        failure = asJournalError(getRequest.error, 'record read failed')
+      }
+    }
+    transaction.oncomplete = () => {
+      if (result) resolve(result)
+      else reject(journalError('record update did not complete'))
+    }
+    transaction.onabort = () =>
+      reject(asJournalError(failure ?? transaction.error, 'write was aborted'))
+    transaction.onerror = () => undefined
+  })
+}
+
+function deleteRecords(
+  database: IDBDatabase,
+  mode: 'all' | 'one',
+  uploadId?: Hex,
+) {
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    let failure: unknown
+    try {
+      const store = transaction.objectStore(RECOVERY_STORE)
+      const request = mode === 'all' ? store.clear() : store.delete(uploadId!)
+      request.onerror = () => {
+        failure = request.error
+      }
+    } catch (error) {
+      failure = error
+      transaction.abort()
+    }
+    transaction.oncomplete = () => resolve()
+    transaction.onabort = () =>
+      reject(asJournalError(failure ?? transaction.error, 'delete failed'))
+    transaction.onerror = () => undefined
+  })
+}
+
 export function createFilecoinStorageRecoveryJournal(
   options: FilecoinStorageRecoveryJournalOptions = {},
 ): FilecoinStorageRecoveryJournal {
-  const storage = resolveStorage(options.storage)
   const now = options.now ?? Date.now
   return {
-    clear() {
-      for (const key of recoveryKeys(storage, false)) {
-        removeStorage(storage, key)
-      }
+    async clear() {
+      await withDatabase(options, (database) => deleteRecords(database, 'all'))
     },
-    list() {
-      return readRecords(storage)
+    async list() {
+      return withDatabase(options, listRecords)
     },
-    markSubmitted(checkpoint, transactionHash) {
+    async markSubmitted(checkpoint, transactionHash) {
       const normalized = normalizeCheckpoint(checkpoint)
       const normalizedHash = normalizeHash(transactionHash)
-      const key = recoveryKey(normalized.uploadId)
-      const records = readRecords(storage)
-      const existing = records.find(
-        (record) => record.checkpoint.uploadId === normalized.uploadId,
+      assertHashCapacity(normalized)
+      return withDatabase(options, (database) =>
+        mutateRecord(database, normalized, now, normalizedHash),
       )
-      if (existing && !sameCheckpoint(existing.checkpoint, normalized)) {
-        throw journalError('upload ID is already bound to another checkpoint')
-      }
-      if (
-        !existing &&
-        records.length >= MAX_FILECOIN_STORAGE_RECOVERY_RECORDS
-      ) {
-        throw journalError('record limit was reached')
-      }
-      const hashes = existing ? [...existing.transactionHashes] : []
-      if (!hashes.includes(normalizedHash)) hashes.push(normalizedHash)
-      if (hashes.length > 2) {
-        throw journalError('transaction replacement limit was exceeded')
-      }
-      const time = currentTime(now)
-      const createdAtMs = existing?.createdAtMs ?? time
-      const record = createRecord(
-        normalized,
-        createdAtMs,
-        Math.max(createdAtMs, time),
-        hashes,
+    },
+    async remove(uploadId) {
+      const normalized = normalizeUploadId(uploadId)
+      await withDatabase(options, (database) =>
+        deleteRecords(database, 'one', normalized),
       )
-      writeStorage(storage, key, record)
-      return record
     },
-    remove(uploadId) {
-      removeStorage(storage, recoveryKey(uploadId))
-    },
-    stage(checkpoint) {
+    async stage(checkpoint) {
       const normalized = normalizeCheckpoint(checkpoint)
-      const records = readRecords(storage)
-      const existing = records.find(
-        (record) => record.checkpoint.uploadId === normalized.uploadId,
+      assertHashCapacity(normalized)
+      return withDatabase(options, (database) =>
+        mutateRecord(database, normalized, now),
       )
-      if (existing) {
-        if (!sameCheckpoint(existing.checkpoint, normalized)) {
-          throw journalError('upload ID is already bound to another checkpoint')
-        }
-        return existing
-      }
-      if (records.length >= MAX_FILECOIN_STORAGE_RECOVERY_RECORDS) {
-        throw journalError('record limit was reached')
-      }
-      const time = currentTime(now)
-      const record = createRecord(normalized, time, time, [])
-      writeStorage(storage, recoveryKey(normalized.uploadId), record)
-      return record
     },
   }
 }

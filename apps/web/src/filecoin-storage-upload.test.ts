@@ -519,6 +519,7 @@ describe('Filecoin storage upload execution', () => {
       [{ ipniIpfs: false }, /does not advertise IPFS indexing/i],
       [{ payee: OTHER_ACCOUNT }, /payee must be its service account/i],
       [{ serviceUrl: 'http://provider.example/' }, /credential-free HTTPS/i],
+      [{ serviceUrl: `https://provider.example/${'😀'.repeat(700)}` }, /invalid service URL/i],
       [{ minPieceSizeInBytes: BigInt(prepared.carBytes.byteLength + 1) }, /outside the provider size range/i],
     ]
     for (const [providerOverrides, message] of cases)

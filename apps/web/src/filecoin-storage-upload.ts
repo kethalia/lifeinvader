@@ -405,7 +405,11 @@ function normalizeServiceUrl(value: unknown) {
     )
   }
   if (!url.pathname.endsWith('/')) url.pathname += '/'
-  return url.toString()
+  const normalized = url.toString()
+  if (normalized.length > 2_048) {
+    throw uploadError('the provider returned an invalid service URL.')
+  }
+  return normalized
 }
 function normalizeProvider(
   value: ReturnType<typeof parsePDPProvider>,
