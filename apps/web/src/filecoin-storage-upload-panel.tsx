@@ -398,6 +398,16 @@ export function FilecoinStorageUploadPanel({
 
   useEffect(() => {
     setAcknowledged(false)
+    setState((current) => {
+      if (
+        (current.kind === 'confirmed' || current.kind === 'data-set-only') &&
+        (!walletContextMatches(current.context, session) ||
+          !mediaContextMatches(current.context, prepared))
+      ) {
+        return { kind: 'idle' }
+      }
+      return current
+    })
     const context = activeContext.current
     if (
       context &&

@@ -45,6 +45,11 @@ const prepared: PreparedMediaCar = {
   mediaCid: MEDIA_CID,
   rootCid: CID.parse(MEDIA_CID.text),
 }
+const replacementPrepared: PreparedMediaCar = {
+  ...prepared,
+  carBytes: new Uint8Array(prepared.carBytes),
+  file: { ...prepared.file, name: 'replacement-proof.gif' },
+}
 const quote: FilecoinStorageQuote = {
   account: ACCOUNT,
   chainId: FILECOIN_CALIBRATION_CHAIN_ID,
@@ -240,7 +245,7 @@ describe('FilecoinStorageUploadPanel', () => {
       },
     )
     const onWriteLockChange = vi.fn()
-    renderUpload({ onWriteLockChange, uploadStorage })
+    const view = renderUpload({ onWriteLockChange, uploadStorage })
     authorizeUpload()
     const options = await started.promise
     expect(uploadStorage).toHaveBeenCalledWith(
@@ -287,6 +292,25 @@ describe('FilecoinStorageUploadPanel', () => {
         }) as HTMLInputElement
       ).disabled,
     ).toBe(true)
+    view.rerender(
+      <FilecoinStorageUploadPanel
+        onWriteLockChange={onWriteLockChange}
+        prepared={replacementPrepared}
+        quote={quote}
+        session={connectedSession()}
+        uploadStorage={uploadStorage}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.queryByText(/storage confirmed in block/i)).toBeNull(),
+    )
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: /provider ID/i,
+        }) as HTMLInputElement
+      ).disabled,
+    ).toBe(false)
   })
 
   it('distinguishes a pre-signature rejection from no-hash ambiguity', async () => {
@@ -331,7 +355,11 @@ describe('FilecoinStorageUploadPanel', () => {
       }),
     )
     const onWriteLockChange = vi.fn()
-    renderUpload({ checkReceipt, onWriteLockChange, uploadStorage })
+    const view = renderUpload({
+      checkReceipt,
+      onWriteLockChange,
+      uploadStorage,
+    })
     authorizeUpload()
     expect((await screen.findByRole('alert')).textContent).toMatch(
       /do not authorize another provider attempt/i,
@@ -358,6 +386,26 @@ describe('FilecoinStorageUploadPanel', () => {
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
     )
+    view.rerender(
+      <FilecoinStorageUploadPanel
+        checkReceipt={checkReceipt}
+        onWriteLockChange={onWriteLockChange}
+        prepared={prepared}
+        quote={{ ...quote, account: OTHER_ACCOUNT }}
+        session={connectedSession(OTHER_ACCOUNT)}
+        uploadStorage={uploadStorage}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.queryByText(/created data set 29/i)).toBeNull(),
+    )
+    expect(
+      (
+        screen.getByRole('textbox', {
+          name: /provider ID/i,
+        }) as HTMLInputElement
+      ).disabled,
+    ).toBe(false)
   })
 
   it('recovers a completed piece and retains failures for another check', async () => {
