@@ -66,6 +66,14 @@ function inspectionProvider() {
   }
 }
 
+async function waitForWalletWrites() {
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText(/^display name$/i) as HTMLInputElement).disabled,
+    ).toBe(false),
+  )
+}
+
 afterEach(() => {
   cleanup()
   resetWalletDiscoveryForTests()
@@ -89,6 +97,7 @@ describe('wallet profile publisher', () => {
       />,
     )
     await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    await waitForWalletWrites()
     fireEvent.change(screen.getByLabelText(/IPFS avatar CID/i), {
       target: { value: '   ' },
     })
@@ -130,6 +139,7 @@ describe('wallet profile publisher', () => {
       />,
     )
     await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    await waitForWalletWrites()
 
     const clearButton = screen.getByRole('button', {
       name: /publish empty profile snapshot/i,
@@ -257,6 +267,7 @@ describe('wallet profile publisher', () => {
       />,
     )
     await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    await waitForWalletWrites()
     fireEvent.change(screen.getByLabelText(/^display name$/i), {
       target: { value: displayName },
     })

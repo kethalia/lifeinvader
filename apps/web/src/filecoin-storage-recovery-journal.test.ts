@@ -1,11 +1,12 @@
 import { calculate } from '@filoz/synapse-core/piece'
 import { IDBFactory } from 'fake-indexeddb'
 import { bytesToHex, getAddress, type Hash, type Hex } from 'viem'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   createFilecoinStorageRecoveryJournal,
   FilecoinStorageRecoveryJournalError,
   MAX_FILECOIN_STORAGE_RECOVERY_RECORDS,
+  type FilecoinStorageRecoveryNotifications,
   type FilecoinStorageRecoveryJournalOptions,
 } from './filecoin-storage-recovery-journal'
 import { FILECOIN_CALIBRATION_CHAIN_ID } from './filecoin-storage'
@@ -19,6 +20,12 @@ const HASH_B = `0x${'23'.repeat(32)}` as Hash
 const HASH_C = `0x${'34'.repeat(32)}` as Hash
 const CAR_BYTES = new Uint8Array(273).fill(7)
 const RECOVERY_STORE = 'recoveries'
+const TEST_NOTIFICATIONS: FilecoinStorageRecoveryNotifications = {
+  publish() {},
+  subscribe() {
+    return () => undefined
+  },
+}
 
 type TestStorage = Required<
   Pick<FilecoinStorageRecoveryJournalOptions, 'databaseName' | 'factory'>
@@ -74,13 +81,21 @@ function testStorage(factory = new IDBFactory()): TestStorage {
   }
 }
 
-function openJournal(storage: TestStorage, now: () => number = Date.now) {
-  return createFilecoinStorageRecoveryJournal({ ...storage, now })
+function openJournal(
+  storage: TestStorage,
+  now: () => number = Date.now,
+  notifications = TEST_NOTIFICATIONS,
+) {
+  return createFilecoinStorageRecoveryJournal({
+    ...storage,
+    notifications,
+    now,
+  })
 }
 
 function openRawDatabase(storage: TestStorage) {
   return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = storage.factory.open(storage.databaseName, 1)
+    const request = storage.factory.open(storage.databaseName)
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -397,6 +412,96 @@ describe('Filecoin storage recovery journal', () => {
     await first.clear()
     await expect(first.list()).resolves.toEqual([])
     await expect(other.list()).resolves.toHaveLength(1)
+  })
+
+  it('conditionally removes only the exact record observed by the caller', async () => {
+    const storage = testStorage()
+    const firstTab = openJournal(storage)
+    const secondTab = openJournal(storage)
+    const saved = checkpoint()
+    const stale = await firstTab.stage(saved)
+
+    await secondTab.markSubmitted(saved, HASH_A)
+    await expect(firstTab.removeIfUnchanged(stale)).resolves.toBe(false)
+    const latest = (await firstTab.list())[0]
+    expect(latest?.transactionHashes).toEqual([HASH_A])
+
+    await expect(firstTab.removeIfUnchanged(latest!)).resolves.toBe(true)
+    await expect(firstTab.removeIfUnchanged(latest!)).resolves.toBe(true)
+    await expect(firstTab.list()).resolves.toEqual([])
+  })
+
+  it('prevents a later provider hash from recreating an explicitly discarded record', async () => {
+    const storage = testStorage()
+    const firstTab = openJournal(storage)
+    const secondTab = openJournal(storage)
+    const saved = checkpoint()
+    const staged = await firstTab.stage(saved)
+
+    await expect(firstTab.removeIfUnchanged(staged)).resolves.toBe(true)
+    await expect(secondTab.markSubmitted(saved, HASH_A)).rejects.toThrow(
+      /explicitly discarded/i,
+    )
+    await expect(firstTab.list()).resolves.toEqual([])
+
+    await firstTab.clear()
+    await expect(secondTab.markSubmitted(saved, HASH_A)).resolves.toMatchObject(
+      {
+        transactionHashes: [HASH_A],
+      },
+    )
+  })
+
+  it('publishes journal mutations to other subscribers', async () => {
+    const storage = testStorage()
+    const listeners = new Map<string, Set<() => void>>()
+    const notifications: FilecoinStorageRecoveryNotifications = {
+      publish(databaseName) {
+        for (const listener of listeners.get(databaseName) ?? []) listener()
+      },
+      subscribe(databaseName, listener) {
+        const current = listeners.get(databaseName) ?? new Set()
+        current.add(listener)
+        listeners.set(databaseName, current)
+        return () => current.delete(listener)
+      },
+    }
+    const firstTab = openJournal(storage, Date.now, notifications)
+    const secondTab = openJournal(storage, Date.now, notifications)
+    const listener = vi.fn()
+    const unsubscribe = firstTab.subscribe(listener)
+
+    await secondTab.stage(checkpoint())
+    expect(listener).toHaveBeenCalledOnce()
+    unsubscribe()
+    await secondTab.markSubmitted(checkpoint(), HASH_A)
+    expect(listener).toHaveBeenCalledOnce()
+  })
+
+  it('preserves version-one recovery records when adding discard markers', async () => {
+    const factory = new IDBFactory()
+    const sourceStorage = testStorage(factory)
+    const staged = await openJournal(sourceStorage).stage(checkpoint())
+    const envelope = (await readRawEnvelopes(sourceStorage))[0]!
+    const legacyStorage = testStorage(factory)
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = factory.open(legacyStorage.databaseName, 1)
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore(RECOVERY_STORE, {
+          keyPath: 'uploadId',
+        })
+      }
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    transaction.objectStore(RECOVERY_STORE).put(envelope)
+    await transactionDone(transaction)
+    database.close()
+
+    const upgraded = openJournal(legacyStorage)
+    await expect(upgraded.list()).resolves.toEqual([staged])
+    await expect(upgraded.removeIfUnchanged(staged)).resolves.toBe(true)
   })
 
   it('uses a specific error for unavailable storage and invalid names', async () => {

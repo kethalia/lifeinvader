@@ -1180,7 +1180,7 @@ async function waitForUploadReceipt(
   options: Pick<
     FilecoinStorageUploadOptions,
     'pollIntervalMs' | 'receiptTimeoutMs' | 'signal'
-  >,
+  > & { deadline?: number },
 ): Promise<FilecoinStorageUploadReceipt> {
   let eventResult: FilecoinStorageUploadEvents | undefined
   const receipt = await waitForTransactionReceipt(provider, hash, {
@@ -1196,6 +1196,7 @@ async function waitForUploadReceipt(
     pollIntervalMs: options.pollIntervalMs,
     selectedChainId: checkpoint.chainId,
     signal: options.signal,
+    deadline: options.deadline,
     timeoutMs:
       options.receiptTimeoutMs ?? FILECOIN_STORAGE_UPLOAD_RECEIPT_TIMEOUT_MS,
   })
@@ -1211,6 +1212,7 @@ export async function checkFilecoinStorageUploadReceipt(
   options: FilecoinStorageUploadReceiptOptions,
 ): Promise<FilecoinStorageUploadReceipt> {
   const receiptTimeoutMs = validateReceiptTiming(options)
+  const deadline = Date.now() + receiptTimeoutMs
   let transactionHash: Hash
   let expectedAccount: Address
   try {
@@ -1229,6 +1231,7 @@ export async function checkFilecoinStorageUploadReceipt(
     normalized.account,
     normalized.chainId,
     options.signal,
+    deadline,
   )
   try {
     return await waitForUploadReceipt(
@@ -1237,6 +1240,7 @@ export async function checkFilecoinStorageUploadReceipt(
       normalized,
       guard,
       {
+        deadline,
         pollIntervalMs: options.pollIntervalMs,
         receiptTimeoutMs,
         signal: options.signal,

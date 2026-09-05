@@ -855,6 +855,40 @@ describe('Filecoin storage receipt authentication', () => {
           kind: 'data-set-created', receipt: { hash: REPLACEMENT_HASH } })
   })
   // prettier-ignore
+  it('applies one receipt-recovery deadline across preflight and receipt reads', async () => {
+    const saved = await checkpoint()
+    const methods: string[] = []
+    const base = walletProvider({ logs: storageLogs(REPLACEMENT_HASH, { uploadId: saved.uploadId }) })
+    const provider: Eip1193Provider = {
+      async request(request) {
+        methods.push(request.method)
+        if (request.method === 'eth_chainId' || request.method === 'eth_accounts') {
+          await new Promise((resolve) => setTimeout(resolve, 40))
+        }
+        if (request.method === 'eth_getTransactionReceipt') {
+          await new Promise((resolve) => setTimeout(resolve, 30))
+        }
+        return base.request(request)
+      },
+    }
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-05T00:00:00.000Z'))
+    try {
+      const startedAt = Date.now()
+      const recovery = checkFilecoinStorageUploadReceipt(provider, REPLACEMENT_HASH, saved, {
+        expectedAccount: ACCOUNT, expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID,
+        pollIntervalMs: 1, receiptTimeoutMs: 100,
+      })
+      const rejection = expect(recovery).rejects.toThrow(/still unavailable/i)
+      await vi.advanceTimersByTimeAsync(100)
+      await rejection
+      expect(Date.now() - startedAt).toBe(100)
+      expect(methods).toContain('eth_getTransactionReceipt')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  // prettier-ignore
   it('rejects changed metadata, identities, duplicates, and provider result IDs', async () => {
     const changed: [Parameters<typeof storageLogs>[1], RegExp][] = [
       [{ dataSetMetadataValues: ['another-app', ''] }, /data-set event/i],

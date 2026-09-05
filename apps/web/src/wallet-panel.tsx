@@ -34,6 +34,10 @@ import type { IncludedPost } from './post-feed-confirmation'
 import { MAX_MEDIA_CID_TEXT_LENGTH, parseMediaCid } from './media-cid'
 import { PaidMediaPicker, type PaidMediaPreparer } from './paid-media-picker'
 import type { PreparedMediaCar } from './paid-media-car'
+import {
+  FilecoinStorageRecoveryPanel,
+  type FilecoinStorageRecoveryJournalReader,
+} from './filecoin-storage-recovery-panel'
 import { FilecoinStoragePanel } from './filecoin-storage-panel'
 import { useOpeningWalletOperations } from './opening-wallet-operation'
 import { ProfileComposer } from './profile-composer'
@@ -208,6 +212,7 @@ function TransactionStatus({
   )
 }
 export function WalletPanel({
+  filecoinRecoveryJournal,
   onPostConfirmed,
   prepareMediaAction,
   publishPostAction = publishPost,
@@ -216,6 +221,7 @@ export function WalletPanel({
   synchronizeProfile,
   walletSession,
 }: {
+  filecoinRecoveryJournal?: FilecoinStorageRecoveryJournalReader
   onPostConfirmed(post: IncludedPost): void
   prepareMediaAction?: PaidMediaPreparer
   publishPostAction?: typeof publishPost
@@ -242,7 +248,10 @@ export function WalletPanel({
   const [mediaPickerRevision, setMediaPickerRevision] = useState(0)
   const [mediaPreparationBusy, setMediaPreparationBusy] = useState(false)
   const [mediaPreparationFailed, setMediaPreparationFailed] = useState(false)
-  const [storageWriteLocked, setStorageWriteLocked] = useState(false)
+  const [storageOperationWriteLocked, setStorageOperationWriteLocked] =
+    useState(false)
+  const [storageRecoveryWriteLocked, setStorageRecoveryWriteLocked] =
+    useState(true)
   const [preparedMedia, setPreparedMedia] = useState<PreparedMediaCar>()
   const [preparedMediaPublicationChainId, setPreparedMediaPublicationChainId] =
     useState<bigint>()
@@ -746,6 +755,8 @@ export function WalletPanel({
   const protocolTransactionWriteLocked =
     busyOperations.some((operation) => operation.action !== 'chain') ||
     submittedTransactions.some((transaction) => transaction.status !== 'failed')
+  const storageWriteLocked =
+    storageOperationWriteLocked || storageRecoveryWriteLocked
   const walletWriteLocked = protocolTransactionWriteLocked || storageWriteLocked
   const lockedByAnotherConsole = useWalletWriteBoundary(
     'wallet',
@@ -969,13 +980,25 @@ export function WalletPanel({
               </div>
             </form>
           )}
+          <FilecoinStorageRecoveryPanel
+            disabled={
+              busyAction !== undefined ||
+              protocolTransactionWriteLocked ||
+              lockedByAnotherConsole ||
+              storageOperationWriteLocked
+            }
+            onWriteLockChange={setStorageRecoveryWriteLocked}
+            recoveryJournal={filecoinRecoveryJournal}
+            session={session}
+          />
           <FilecoinStoragePanel
             disabled={
               busyAction !== undefined ||
               protocolTransactionWriteLocked ||
-              lockedByAnotherConsole
+              lockedByAnotherConsole ||
+              storageRecoveryWriteLocked
             }
-            onWriteLockChange={setStorageWriteLocked}
+            onWriteLockChange={setStorageOperationWriteLocked}
             prepared={preparedMedia}
             publicationChainId={preparedMediaPublicationChainId}
             session={session}
