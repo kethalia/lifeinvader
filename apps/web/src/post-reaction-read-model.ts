@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { describeRpcError, type Eip1193Provider } from './ethereum'
+import { isDeferredEventCacheCorruptionError } from './event-cache'
+import type { PostReactionSummary } from './post-reaction-projection'
 import {
   openPostReactionProjectionRun,
+  type PostReactionProjectionResumeState,
   type PostReactionProjectionRun,
   type PostReactionProjectionRunSnapshot,
 } from './post-reaction-projection-run'
-import type { PostReactionSummary } from './post-reaction-projection'
 import {
+  createPostReactionResumeStore,
+  type PostReactionResumeStore,
+} from './post-reaction-resume-store'
+import {
+  resetPostReactionStreamCache,
   synchronizePostReactionStream,
   type PostReactionProjectionAnchor,
+  type PostReactionStreamCacheResetter,
   type PostReactionStreamSnapshot,
   type PostReactionStreamSynchronizer,
 } from './post-reaction-stream'
@@ -16,11 +24,12 @@ import type { WalletSession } from './wallet-session'
 
 export type PostReactionProjectionReader = Pick<
   PostReactionProjectionRun,
-  'advance' | 'close' | 'getSummary' | 'snapshot'
+  'advance' | 'close' | 'getSummary' | 'resumeState' | 'snapshot'
 >
 
 export type PostReactionProjectionOpener = (
   anchor: PostReactionProjectionAnchor,
+  resume?: PostReactionProjectionResumeState,
 ) => Promise<PostReactionProjectionReader>
 
 export type PostReactionReadModelState =
@@ -29,14 +38,19 @@ export type PostReactionReadModelState =
   | { phase: 'catchup'; stream: PostReactionStreamSnapshot }
   | {
       busy: boolean
+      notice?: string
       phase: 'projecting'
       projection: PostReactionProjectionRunSnapshot
+      resumed: boolean
     }
   | {
+      notice?: string
       phase: 'complete'
       projection: PostReactionProjectionRunSnapshot
+      resumeSaved: boolean
+      resumed: boolean
     }
-  | { message: string; phase: 'failed' }
+  | { message: string; phase: 'failed'; retryable: boolean }
 
 type ScopedReadModelState = {
   chainId: bigint
@@ -44,25 +58,49 @@ type ScopedReadModelState = {
   state: PostReactionReadModelState
 }
 
+type ActiveProjection = {
+  notice?: string
+  resumed: boolean
+  run: PostReactionProjectionReader
+}
+
 export type UsePostReactionReadModelOptions = {
   openProjection?: PostReactionProjectionOpener
+  resetCache?: PostReactionStreamCacheResetter
+  resumeStore?: PostReactionResumeStore
   synchronize?: PostReactionStreamSynchronizer
 }
 
 const IDLE_STATE = { phase: 'idle' } as const
+const defaultResumeStore = createPostReactionResumeStore()
+
+const defaultProjectionOpener: PostReactionProjectionOpener = (
+  anchor,
+  resume,
+) => openPostReactionProjectionRun(anchor, { resume })
+
+const defaultCacheResetter: PostReactionStreamCacheResetter = (
+  chainId,
+  startBlock,
+) => resetPostReactionStreamCache(chainId, {}, startBlock)
 
 function stateForProjection(
   projection: PostReactionProjectionRunSnapshot,
+  resumed: boolean,
+  notice?: string,
 ): PostReactionReadModelState {
-  if (projection.phase === 'complete') {
-    return { phase: 'complete', projection }
-  }
   if (
     projection.phase === 'likes' ||
     projection.phase === 'reposts' ||
     projection.phase === 'authenticate'
   ) {
-    return { busy: false, phase: 'projecting', projection }
+    return {
+      busy: false,
+      notice,
+      phase: 'projecting',
+      projection,
+      resumed,
+    }
   }
   throw new Error('The local reaction projection became unavailable.')
 }
@@ -70,14 +108,17 @@ function stateForProjection(
 export function usePostReactionReadModel(
   session: WalletSession,
   {
-    openProjection = openPostReactionProjectionRun,
+    openProjection = defaultProjectionOpener,
+    resetCache = defaultCacheResetter,
+    resumeStore = defaultResumeStore,
     synchronize = synchronizePostReactionStream,
   }: UsePostReactionReadModelOptions = {},
 ) {
   const [scopedState, setScopedState] = useState<ScopedReadModelState>()
   const activeController = useRef<AbortController | undefined>(undefined)
-  const activeRun = useRef<PostReactionProjectionReader | undefined>(undefined)
+  const activeProjection = useRef<ActiveProjection | undefined>(undefined)
   const busy = useRef(false)
+  const ignoreSavedResume = useRef(false)
   const requestSequence = useRef(0)
   const connected =
     session.status === 'connected' &&
@@ -97,30 +138,76 @@ export function usePostReactionReadModel(
     requestSequence.current += 1
     activeController.current?.abort()
     activeController.current = undefined
-    activeRun.current?.close()
-    activeRun.current = undefined
+    activeProjection.current?.run.close()
+    activeProjection.current = undefined
     busy.current = false
+    ignoreSavedResume.current = false
     setScopedState(undefined)
     return () => {
       requestSequence.current += 1
       activeController.current?.abort()
       activeController.current = undefined
-      activeRun.current?.close()
-      activeRun.current = undefined
+      activeProjection.current?.run.close()
+      activeProjection.current = undefined
       busy.current = false
+      ignoreSavedResume.current = false
     }
   }, [chainId, connected, provider])
 
+  const publishCompletedRun = useCallback(
+    async (
+      active: ActiveProjection,
+      projection: PostReactionProjectionRunSnapshot,
+      context: {
+        chainId: bigint
+        provider: Eip1193Provider
+        requestId: number
+      },
+    ) => {
+      const { chainId, provider, requestId } = context
+      const resume = active.run.resumeState
+      let notice = active.notice
+      let resumeSaved = true
+      try {
+        await resumeStore.save(chainId, resume)
+      } catch {
+        resumeSaved = false
+        notice =
+          'Confirmed reaction totals are available, but resumable local progress could not be saved.'
+      }
+      if (requestSequence.current !== requestId) return
+      if (resumeSaved) ignoreSavedResume.current = false
+      setScopedState({
+        chainId,
+        provider,
+        state: {
+          notice,
+          phase: 'complete',
+          projection,
+          resumeSaved,
+          resumed: active.resumed,
+        },
+      })
+    },
+    [resumeStore],
+  )
+
   const loadNextRange = useCallback(() => {
-    if (!connected || provider === undefined || chainId === undefined) return
-    if (busy.current) return
+    if (
+      !connected ||
+      provider === undefined ||
+      chainId === undefined ||
+      busy.current
+    ) {
+      return
+    }
     busy.current = true
     const requestId = ++requestSequence.current
     activeController.current?.abort()
     const controller = new AbortController()
     activeController.current = controller
-    activeRun.current?.close()
-    activeRun.current = undefined
+    activeProjection.current?.run.close()
+    activeProjection.current = undefined
     setScopedState({
       chainId,
       provider,
@@ -142,7 +229,52 @@ export function usePostReactionReadModel(
           })
           return
         }
-        openedRun = await openProjection(stream.projectionAnchor)
+        let notice: string | undefined
+        let resume: PostReactionProjectionResumeState | undefined
+        let resumeReadFailed = false
+        if (ignoreSavedResume.current) {
+          notice =
+            'Previously rejected reaction progress is being bypassed while the canonical projection is rebuilt.'
+        } else {
+          try {
+            resume = await resumeStore.load(chainId)
+          } catch {
+            resumeReadFailed = true
+            notice =
+              'Saved reaction progress was unreadable and will not be trusted. Rebuilding from canonical events.'
+            try {
+              await resumeStore.remove(chainId)
+            } catch {
+              // A disposable acceleration cache may be unavailable. A fresh
+              // projection remains correct without it.
+            }
+          }
+        }
+        if (controller.signal.aborted || requestSequence.current !== requestId)
+          return
+        if (resumeReadFailed) ignoreSavedResume.current = true
+        let resumed = resume !== undefined
+        try {
+          openedRun = await openProjection(stream.projectionAnchor, resume)
+        } catch (error) {
+          if (!resume) throw error
+          ignoreSavedResume.current = true
+          notice =
+            'Saved reaction progress no longer matched the authenticated event caches. It was discarded and rebuilt.'
+          try {
+            await resumeStore.remove(chainId)
+          } catch {
+            // The invalid tuple has already been rejected by the projection.
+          }
+          if (
+            controller.signal.aborted ||
+            requestSequence.current !== requestId
+          ) {
+            return
+          }
+          resumed = false
+          openedRun = await openProjection(stream.projectionAnchor)
+        }
         if (
           controller.signal.aborted ||
           requestSequence.current !== requestId
@@ -151,18 +283,28 @@ export function usePostReactionReadModel(
           openedRun = undefined
           return
         }
-        const projectionState = stateForProjection(openedRun.snapshot)
-        activeRun.current = openedRun
-        setScopedState({
-          chainId,
-          provider,
-          state: projectionState,
-        })
+        const active = { notice, resumed, run: openedRun }
+        activeProjection.current = active
         openedRun = undefined
+        if (active.run.snapshot.phase === 'complete') {
+          await publishCompletedRun(active, active.run.snapshot, {
+            chainId,
+            provider,
+            requestId,
+          })
+        } else {
+          setScopedState({
+            chainId,
+            provider,
+            state: stateForProjection(active.run.snapshot, resumed, notice),
+          })
+        }
       } catch (error) {
         openedRun?.close()
         if (controller.signal.aborted || requestSequence.current !== requestId)
           return
+        activeProjection.current?.run.close()
+        activeProjection.current = undefined
         setScopedState({
           chainId,
           provider,
@@ -172,6 +314,7 @@ export function usePostReactionReadModel(
               'The public reaction history could not be synchronized.',
             ),
             phase: 'failed',
+            retryable: true,
           },
         })
       } finally {
@@ -181,7 +324,15 @@ export function usePostReactionReadModel(
         }
       }
     })()
-  }, [chainId, connected, openProjection, provider, synchronize])
+  }, [
+    chainId,
+    connected,
+    openProjection,
+    provider,
+    publishCompletedRun,
+    resumeStore,
+    synchronize,
+  ])
 
   const advanceProjection = useCallback(() => {
     if (
@@ -193,8 +344,8 @@ export function usePostReactionReadModel(
     ) {
       return
     }
-    const run = activeRun.current
-    if (!run) return
+    const active = activeProjection.current
+    if (!active) return
     busy.current = true
     const requestId = ++requestSequence.current
     setScopedState({
@@ -202,41 +353,79 @@ export function usePostReactionReadModel(
       provider,
       state: { ...state, busy: true },
     })
-    void run
+    void active.run
       .advance()
-      .then((projection) => {
+      .then(async (projection) => {
         if (requestSequence.current !== requestId) return
+        if (projection.phase === 'complete') {
+          await publishCompletedRun(active, projection, {
+            chainId,
+            provider,
+            requestId,
+          })
+          return
+        }
         setScopedState({
           chainId,
           provider,
-          state: stateForProjection(projection),
+          state: stateForProjection(projection, active.resumed, active.notice),
         })
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (requestSequence.current !== requestId) return
-        run.close()
-        activeRun.current = undefined
+        const startBlock = active.run.snapshot.startBlock
+        active.run.close()
+        activeProjection.current = undefined
+        let message = describeRpcError(
+          error,
+          'The local reaction projection could not be completed.',
+        )
+        let retryable = true
+        if (isDeferredEventCacheCorruptionError(error)) {
+          try {
+            await resetCache(chainId, startBlock)
+            if (requestSequence.current !== requestId) return
+            ignoreSavedResume.current = true
+            try {
+              await resumeStore.remove(chainId)
+            } catch {
+              // A stale resume is independently rejected on the next open.
+            }
+            message =
+              'The corrupt local reaction caches were reset. Retry to rebuild them from confirmed chain events.'
+          } catch (resetError) {
+            const detail = describeRpcError(
+              resetError,
+              'The corrupt local reaction caches could not be reset.',
+            )
+            message = `${detail} Clear this site’s browser data and reload.`
+            retryable = false
+          }
+        }
+        if (requestSequence.current !== requestId) return
         setScopedState({
           chainId,
           provider,
-          state: {
-            message: describeRpcError(
-              error,
-              'The local reaction projection could not be completed.',
-            ),
-            phase: 'failed',
-          },
+          state: { message, phase: 'failed', retryable },
         })
       })
       .finally(() => {
         if (requestSequence.current === requestId) busy.current = false
       })
-  }, [chainId, connected, provider, state])
+  }, [
+    chainId,
+    connected,
+    provider,
+    publishCompletedRun,
+    resetCache,
+    resumeStore,
+    state,
+  ])
 
   const getSummary = useCallback(
     (postId: bigint, account?: string): PostReactionSummary | undefined => {
       if (!connected || state.phase !== 'complete') return undefined
-      return activeRun.current?.getSummary(postId, account)
+      return activeProjection.current?.run.getSummary(postId, account)
     },
     [connected, state.phase],
   )
