@@ -105,16 +105,13 @@ function domain() {
   return { chainId: Number(FILECOIN_CALIBRATION_CHAIN_ID),
     name: 'FilecoinWarmStorageService', verifyingContract: CALIBRATION.contracts.fwss, version: '1' }
 }
-function createAuthorization(overrides: Record<string, unknown> = {}) {
-  // prettier-ignore
-  return JSON.stringify({
-    domain: domain(),
-    message: {
+// prettier-ignore
+function createAuthorization(uploadId: Hex, overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({ domain: domain(), message: {
       clientDataSetId: CLIENT_DATA_SET_ID.toString(),
-      metadata: [{ key: 'source', value: 'lifeinvader' }, { key: 'withIPFSIndexing', value: '' }],
+      metadata: [{ key: 'lifeinvaderUploadId', value: uploadId }, { key: 'source', value: 'lifeinvader' }, { key: 'withIPFSIndexing', value: '' }],
       payee: SERVICE_PROVIDER, ...overrides,
-    },
-    primaryType: 'CreateDataSet', types: TYPES,
+    }, primaryType: 'CreateDataSet', types: TYPES,
   })
 }
 function addAuthorization(
@@ -198,8 +195,8 @@ function storageLogs(hash: Hash = REPLACEMENT_HASH, overrides: {
         ],
         [
           67n, 0n, overrides.cdnRailId ?? 0n, ACCOUNT, serviceProvider, overrides.payee ?? serviceProvider,
-          ['source', 'withIPFSIndexing'],
-          overrides.dataSetMetadataValues ?? ['lifeinvader', ''],
+          ['lifeinvaderUploadId', 'source', 'withIPFSIndexing'],
+          overrides.dataSetMetadataValues ?? [overrides.uploadId ?? UPLOAD_ID, 'lifeinvader', ''],
         ],
       ),
       topics: encodeEventTopics({ abi: fwss, args: { dataSetId, providerId }, eventName: 'DataSetCreated' }),
@@ -326,7 +323,7 @@ function requestSignature(
 }
 async function signAndAuthorize(
   input: Parameters<FilecoinStorageUploadExecutor>[0],
-  createData = createAuthorization(),
+  createData = createAuthorization(input.plan.uploadId),
   addData = addAuthorization(input.plan.mediaCid, {}, input.plan.uploadId),
 ) {
   await requestSignature(input, createData)
@@ -334,14 +331,14 @@ async function signAndAuthorize(
   await input.authorizeCommit()
 }
 // prettier-ignore
-function successfulExecutor({ confirmedTxHash = REPLACEMENT_HASH, createData = createAuthorization(),
+function successfulExecutor({ confirmedTxHash = REPLACEMENT_HASH, createOverrides,
   addData, dataSetId = DATA_SET_ID, initialTxHash = TX_HASH, pieceId = PIECE_ID }: {
-  addData?: string; confirmedTxHash?: Hash; createData?: string; dataSetId?: bigint
+  addData?: string; confirmedTxHash?: Hash; createOverrides?: Record<string, unknown>; dataSetId?: bigint
   initialTxHash?: Hash; pieceId?: bigint
 } = {}): FilecoinStorageUploadExecutor {
   return async (input) => {
     await stagePiece(input)
-    await signAndAuthorize(input, createData, addData)
+    await signAndAuthorize(input, createAuthorization(input.plan.uploadId, createOverrides), addData)
     input.onSubmitted(initialTxHash)
     return { confirmedTxHash, dataSetId, isNewDataSet: true, pieceIds: [pieceId], txHash: initialTxHash }
   }
@@ -394,12 +391,11 @@ describe('Filecoin storage upload planning', () => {
       bytes: bytesToHex(piece.bytes), paddedSize: piece.paddedSize,
       size: piece.size, text: piece.toString(),
     })
-    expect(Object.isFrozen(plan)).toBe(true)
-    expect(Object.isFrozen(plan.piece)).toBe(true)
+    expect(Object.isFrozen(plan)).toBe(true); expect(Object.isFrozen(plan.piece)).toBe(true)
     expect(plan.uploadId).toMatch(/^0x[0-9a-f]{64}$/)
     prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
-    expect((await planFilecoinStorageUpload(prepared, readyQuote(), PROVIDER_ID,
-      ACCOUNT, FILECOIN_CALIBRATION_CHAIN_ID)).uploadId).not.toBe(plan.uploadId)
+    expect((await planFilecoinStorageUpload(prepared, readyQuote(), PROVIDER_ID, ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID)).uploadId).not.toBe(plan.uploadId)
   })
   // prettier-ignore
   it('rejects stale and unsupported upload plans', async () => {
@@ -478,8 +474,8 @@ describe('Filecoin storage upload execution', () => {
   // prettier-ignore
   it('rejects changed typed-data terms before forwarding them', async () => {
     const cases: [FilecoinStorageUploadExecutor, RegExp, number][] = [
-      [successfulExecutor({ createData: createAuthorization({ payee: OTHER_ACCOUNT }) }),
-        /data-set authorization terms/i, 0],
+      [successfulExecutor({ createOverrides: { payee: OTHER_ACCOUNT } }), /data-set authorization terms/i, 0],
+      [successfulExecutor({ createOverrides: { metadata: [] } }), /data-set authorization terms/i, 0],
       [
         successfulExecutor({
           addData: addAuthorization(prepared.mediaCid.text, {
@@ -513,8 +509,8 @@ describe('Filecoin storage upload execution', () => {
     expect(changedRequest.mock.calls.filter(
       ([candidate]) => candidate.method === 'eth_signTypedData_v4',
     )).toHaveLength(1)
-    await expect(runUpload(successfulExecutor(), { provider: walletProvider({
-      signatureRequest: async () => signAuthorization(createAuthorization(), OTHER_SIGNER),
+    await expect(runUpload(successfulExecutor(), { provider: walletProvider({ signatureRequest:
+      async ({ params }) => signAuthorization(String(Array.isArray(params) ? params[1] : undefined), OTHER_SIGNER),
     }) })).rejects.toThrow(/not signed by the selected account/i)
   })
   // prettier-ignore
@@ -584,11 +580,11 @@ describe('Filecoin storage upload execution', () => {
     const concurrentWallet = delayedWallet()
     const concurrent: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
-      const first = requestSignature(input, createAuthorization())
+      const first = requestSignature(input, createAuthorization(input.plan.uploadId))
       await concurrentWallet.prompted.promise
       await expect(requestSignature(input, addAuthorization(input.plan.mediaCid)))
         .rejects.toThrow(/unexpected signature/i)
-      concurrentWallet.response.resolve(await signAuthorization(createAuthorization()))
+      concurrentWallet.response.resolve(await signAuthorization(createAuthorization(input.plan.uploadId)))
       await first
       await expect(input.authorizeCommit()).rejects.toThrow(/incomplete/i)
       throw new Error('fixture stopped after first signature')
@@ -606,7 +602,7 @@ describe('Filecoin storage upload execution', () => {
     const abandonedWallet = delayedWallet()
     const abandoned: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
-      const first = requestSignature(input, createAuthorization())
+      const first = requestSignature(input, createAuthorization(input.plan.uploadId))
       void first.catch(() => undefined)
       await abandonedWallet.prompted.promise
       await expect(requestSignature(input, addAuthorization(input.plan.mediaCid)))
@@ -625,7 +621,7 @@ describe('Filecoin storage upload execution', () => {
     let signatures = 0
     const retried: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
-      await expect(requestSignature(input, createAuthorization())).rejects.toBe(rejection)
+      await expect(requestSignature(input, createAuthorization(input.plan.uploadId))).rejects.toBe(rejection)
       await signAndAuthorize(input)
       input.onSubmitted(TX_HASH)
       throw new Error('provider failed after submission')
@@ -720,7 +716,7 @@ describe('Filecoin storage upload execution', () => {
     expect(failure.checkpoint.mediaCid).toBe(prepared.mediaCid.text)
     const noHash: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
-      await requestSignature(input, createAuthorization())
+      await requestSignature(input, createAuthorization(input.plan.uploadId))
       await requestSignature(input, addAuthorization(
         input.plan.mediaCid, {}, input.plan.uploadId,
       ))
@@ -763,12 +759,16 @@ describe('Filecoin storage receipt authentication', () => {
   // prettier-ignore
   it('derives IDs from exact canonical events for later recovery', async () => {
     const saved = await checkpoint()
-    await expect(checkFilecoinStorageUploadReceipt(
-      walletProvider({ logs: storageLogs(REPLACEMENT_HASH, { uploadId: saved.uploadId }) }),
-      REPLACEMENT_HASH, saved, { expectedAccount: ACCOUNT,
-        expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1, receiptTimeoutMs: 100 },
-    )).resolves.toMatchObject({ dataSetId: DATA_SET_ID, pieceId: PIECE_ID,
-      receipt: { hash: REPLACEMENT_HASH } })
+    await expect(checkFilecoinStorageUploadReceipt(walletProvider({ logs:
+      storageLogs(REPLACEMENT_HASH, { uploadId: saved.uploadId }) }), REPLACEMENT_HASH, saved,
+      { expectedAccount: ACCOUNT, expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1,
+        receiptTimeoutMs: 100 })).resolves.toMatchObject({ dataSetId: DATA_SET_ID, pieceId: PIECE_ID,
+      kind: 'piece-added', receipt: { hash: REPLACEMENT_HASH } })
+    const dataSetOnly = storageLogs(REPLACEMENT_HASH, { uploadId: saved.uploadId }).slice(0, 1)
+    await expect(checkFilecoinStorageUploadReceipt(walletProvider({ logs: dataSetOnly }), REPLACEMENT_HASH,
+      saved, { expectedAccount: ACCOUNT, expectedChainId: FILECOIN_CALIBRATION_CHAIN_ID, pollIntervalMs: 1,
+        receiptTimeoutMs: 100 })).resolves.toMatchObject({ dataSetId: DATA_SET_ID,
+          kind: 'data-set-created', receipt: { hash: REPLACEMENT_HASH } })
   })
   // prettier-ignore
   it('rejects changed metadata, identities, duplicates, and provider result IDs', async () => {
@@ -776,7 +776,7 @@ describe('Filecoin storage receipt authentication', () => {
       [{ dataSetMetadataValues: ['another-app', ''] }, /data-set event/i],
       [{ cdnRailId: 1n }, /data-set event/i],
       [{ mediaCid: 'bafkqaaa' }, /piece event/i],
-      [{ uploadId: UPLOAD_ID }, /piece event/i],
+      [{ uploadId: UPLOAD_ID }, /data-set event/i],
       [{ payee: OTHER_ACCOUNT }, /data-set event/i],
       [{ serviceProvider: OTHER_ACCOUNT }, /data-set event/i],
     ]
@@ -787,7 +787,7 @@ describe('Filecoin storage receipt authentication', () => {
     await expect(runUpload(successfulExecutor(), { logs: (uploadId) => {
       const duplicated = storageLogs(REPLACEMENT_HASH, { uploadId })
       duplicated.push(duplicated[1] as (typeof duplicated)[number]); return duplicated
-    } })).rejects.toMatchObject(recoveryFailure(/exactly one data set and one piece/i))
+    } })).rejects.toMatchObject(recoveryFailure(/unexpected number/i))
     await expect(runUpload(successfulExecutor({ pieceId: PIECE_ID + 1n })))
       .rejects.toMatchObject(recoveryFailure(/provider result disagrees/i))
   })

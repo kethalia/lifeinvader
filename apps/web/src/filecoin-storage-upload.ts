@@ -143,9 +143,10 @@ export type FilecoinStorageUploadOptions = {
   quoteStorage?: typeof quoteFilecoinStorage
   signal?: AbortSignal
 }
-export type FilecoinStorageUploadReceipt = {
-  dataSetId: bigint
-  pieceId: bigint
+type FilecoinStorageUploadEvents =
+  | { dataSetId: bigint; kind: 'data-set-created' }
+  | { dataSetId: bigint; kind: 'piece-added'; pieceId: bigint }
+export type FilecoinStorageUploadReceipt = FilecoinStorageUploadEvents & {
   receipt: TransactionReceipt
 }
 export type FilecoinStorageUploadResult = FilecoinStorageUploadCheckpoint & {
@@ -590,6 +591,14 @@ function exactMetadata(
     })
   )
 }
+function dataSetMetadataEntries(uploadId: Hex) {
+  const { source, withIPFSIndexing } = FILECOIN_STORAGE_DATA_SET_METADATA
+  return [
+    { key: UPLOAD_METADATA_KEY, value: uploadId },
+    { key: 'source', value: source },
+    { key: 'withIPFSIndexing', value: withIPFSIndexing },
+  ] as const
+}
 function parseTypedRequest(request: ProviderRequest, account: Address) {
   if (!Array.isArray(request.params) || request.params.length !== 2) {
     throw uploadError('the adapter produced invalid authorization parameters.')
@@ -637,13 +646,7 @@ function validateCreateAuthorization(
       parseAddress(message.payee, 'data-set payee'),
       provider.serviceProvider,
     ) ||
-    !exactMetadata(message.metadata, [
-      { key: 'source', value: FILECOIN_STORAGE_DATA_SET_METADATA.source },
-      {
-        key: 'withIPFSIndexing',
-        value: FILECOIN_STORAGE_DATA_SET_METADATA.withIPFSIndexing,
-      },
-    ])
+    !exactMetadata(message.metadata, dataSetMetadataEntries(plan.uploadId))
   ) {
     throw uploadError('the adapter changed the data-set authorization terms.')
   }
@@ -855,7 +858,10 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   }
   const context = new StorageContext({
     dataSetId: undefined,
-    dataSetMetadata: { ...FILECOIN_STORAGE_DATA_SET_METADATA },
+    dataSetMetadata: {
+      ...FILECOIN_STORAGE_DATA_SET_METADATA,
+      [UPLOAD_METADATA_KEY]: plan.uploadId,
+    },
     options: { withCDN: false },
     provider,
     synapse,
@@ -968,7 +974,7 @@ export function assertFilecoinStorageUploadReceipt(
   logs: unknown,
   receipt: TransactionReceipt,
   checkpoint: FilecoinStorageUploadCheckpoint,
-): { dataSetId: bigint; pieceId: bigint } {
+): FilecoinStorageUploadEvents {
   const network = getFilecoinStorageNetwork(checkpoint.chainId)
   if (!network) throw uploadError('the checkpoint chain is unsupported.')
   const dataSetLogs = canonicalEventLogs(
@@ -978,10 +984,8 @@ export function assertFilecoinStorageUploadReceipt(
     'DataSetCreated',
   )
   const pieceLogs = canonicalEventLogs(logs, receipt, network, 'PieceAdded')
-  if (dataSetLogs.length !== 1 || pieceLogs.length !== 1) {
-    throw uploadError(
-      'the receipt did not create exactly one data set and one piece.',
-    )
+  if (dataSetLogs.length !== 1 || pieceLogs.length > 1) {
+    throw uploadError('the receipt created an unexpected number of records.')
   }
   const dataSetArgs = dataSetLogs[0]?.args as
     | {
@@ -1005,9 +1009,10 @@ export function assertFilecoinStorageUploadReceipt(
         values: readonly string[]
       }
     | undefined
-  if (!dataSetArgs || !pieceArgs) {
+  if (!dataSetArgs) {
     throw uploadError('the receipt did not expose storage event arguments.')
   }
+  const expectedMetadata = dataSetMetadataEntries(checkpoint.uploadId)
   if (
     dataSetArgs.providerId !== checkpoint.provider.id ||
     dataSetArgs.cacheMissRailId !== 0n ||
@@ -1018,16 +1023,18 @@ export function assertFilecoinStorageUploadReceipt(
       checkpoint.provider.serviceProvider,
     ) ||
     !sameAddress(dataSetArgs.payee, checkpoint.provider.serviceProvider) ||
-    dataSetArgs.metadataKeys.length !== 2 ||
-    dataSetArgs.metadataKeys[0] !== 'source' ||
-    dataSetArgs.metadataKeys[1] !== 'withIPFSIndexing' ||
-    dataSetArgs.metadataValues.length !== 2 ||
-    dataSetArgs.metadataValues[0] !==
-      FILECOIN_STORAGE_DATA_SET_METADATA.source ||
-    dataSetArgs.metadataValues[1] !==
-      FILECOIN_STORAGE_DATA_SET_METADATA.withIPFSIndexing
+    dataSetArgs.metadataKeys.length !== expectedMetadata.length ||
+    dataSetArgs.metadataValues.length !== expectedMetadata.length ||
+    expectedMetadata.some(
+      (entry, index) =>
+        dataSetArgs.metadataKeys[index] !== entry.key ||
+        dataSetArgs.metadataValues[index] !== entry.value,
+    )
   ) {
     throw uploadError('the data-set event changed the authorized terms.')
+  }
+  if (!pieceArgs) {
+    return { dataSetId: dataSetArgs.dataSetId, kind: 'data-set-created' }
   }
   if (
     pieceArgs.dataSetId !== dataSetArgs.dataSetId ||
@@ -1044,6 +1051,7 @@ export function assertFilecoinStorageUploadReceipt(
   }
   return {
     dataSetId: dataSetArgs.dataSetId,
+    kind: 'piece-added',
     pieceId: pieceArgs.pieceId,
   }
 }
@@ -1168,7 +1176,7 @@ async function waitForUploadReceipt(
     'pollIntervalMs' | 'receiptTimeoutMs' | 'signal'
   >,
 ): Promise<FilecoinStorageUploadReceipt> {
-  let eventResult: { dataSetId: bigint; pieceId: bigint } | undefined
+  let eventResult: FilecoinStorageUploadEvents | undefined
   const receipt = await waitForTransactionReceipt(provider, hash, {
     assertCurrentChain: guard.assertSubmission,
     assertReceiptLogs: (logs, candidate) => {
@@ -1684,6 +1692,7 @@ export async function uploadFilecoinStorage(
         },
       )
       if (
+        confirmed.kind !== 'piece-added' ||
         confirmed.dataSetId !== executionResult.dataSetId ||
         confirmed.pieceId !== executionResult.pieceIds[0]
       ) {
