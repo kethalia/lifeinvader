@@ -10,6 +10,7 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { decodeEventLog, getAddress, keccak256, type Hex } from 'viem'
+import type { Eip1193Provider } from '../src/ethereum'
 import {
   COMMENT_PUBLISHED_EVENT_ABI,
   COMMENT_PUBLISHED_TOPIC,
@@ -221,6 +222,24 @@ function parseReceiptBlockNumber(value: unknown) {
     (value as Record<string, unknown>).blockNumber,
     'receipt block number',
   )
+}
+
+async function mineConfirmations(app: Page, rpcUrl: string) {
+  await rpc(rpcUrl, 'anvil_mine', ['0xc'])
+  const head = parseRpcQuantity(await rpc(rpcUrl, 'eth_blockNumber'), 'head')
+  // MetaMask caches its head independently of direct Anvil RPC reads.
+  await expect
+    .poll(
+      () =>
+        app.evaluate(async () => {
+          const wallet = (window as Window & { ethereum?: Eip1193Provider })
+            .ethereum
+          if (!wallet) throw new Error('MetaMask is no longer injected.')
+          return await wallet.request({ method: 'eth_blockNumber' })
+        }),
+      { intervals: [1_000, 2_000], timeout: 30_000 },
+    )
+    .toBe(head)
 }
 
 async function includedActionLog(
@@ -521,7 +540,7 @@ test('deploys, posts, comments, and reacts through MetaMask on Anvil', async ({}
     expect(decoded.args.body).toBe(POST_BODY)
     expect(decoded.args.mediaCid).toBe('0x')
 
-    await rpc(rpcUrl, 'anvil_mine', ['0xc'])
+    await mineConfirmations(app, rpcUrl)
     const refreshFeed = app.locator('.feed-controls').getByRole('button')
     await expect(refreshFeed).toBeEnabled()
     await refreshFeed.click()
@@ -560,7 +579,7 @@ test('deploys, posts, comments, and reacts through MetaMask on Anvil', async ({}
       postId: 1n,
     })
 
-    await rpc(rpcUrl, 'anvil_mine', ['0xc'])
+    await mineConfirmations(app, rpcUrl)
     await app.getByRole('button', { name: 'Load comment histories' }).click()
     const advanceComments = app.getByRole('button', {
       name: 'Process next local comment page',
