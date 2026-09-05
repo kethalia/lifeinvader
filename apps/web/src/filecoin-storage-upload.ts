@@ -405,7 +405,11 @@ function normalizeServiceUrl(value: unknown) {
     )
   }
   if (!url.pathname.endsWith('/')) url.pathname += '/'
-  return url.toString()
+  const normalized = url.toString()
+  if (normalized.length > 2_048) {
+    throw uploadError('the provider returned an invalid service URL.')
+  }
+  return normalized
 }
 function normalizeProvider(
   value: ReturnType<typeof parsePDPProvider>,
@@ -1075,7 +1079,7 @@ function validateReceiptTiming(
   }
   return receiptTimeoutMs
 }
-function normalizeCheckpoint(
+export function normalizeFilecoinStorageUploadCheckpoint(
   value: FilecoinStorageUploadCheckpoint,
   expectedAccount: Address,
   expectedChainId: bigint,
@@ -1214,7 +1218,7 @@ export async function checkFilecoinStorageUploadReceipt(
   } catch (cause) {
     throw uploadError('the receipt recovery input is invalid.', { cause })
   }
-  const normalized = normalizeCheckpoint(
+  const normalized = normalizeFilecoinStorageUploadCheckpoint(
     checkpoint,
     expectedAccount,
     options.expectedChainId,
