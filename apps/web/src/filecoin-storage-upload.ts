@@ -859,8 +859,8 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
   const context = new StorageContext({
     dataSetId: undefined,
     dataSetMetadata: {
-      ...FILECOIN_STORAGE_DATA_SET_METADATA,
       [UPLOAD_METADATA_KEY]: plan.uploadId,
+      ...FILECOIN_STORAGE_DATA_SET_METADATA,
     },
     options: { withCDN: false },
     provider,
