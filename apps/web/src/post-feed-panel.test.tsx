@@ -35,6 +35,7 @@ import type {
 import {
   publishComment,
   publishRepost,
+  setCommentLike,
   setPostLike,
   TransactionSubmissionUnknownError,
   waitForTransactionReceipt,
@@ -577,6 +578,23 @@ describe('PostFeedPanel', () => {
       .fn()
       .mockResolvedValueOnce(run)
       .mockResolvedValueOnce(refreshedRun)
+    const setCommentLikeAction = vi.fn<typeof setCommentLike>(
+      async (
+        _provider,
+        _account,
+        _chainId,
+        _commentId,
+        _liked,
+        onSubmitted,
+      ) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        return {
+          blockHash: BLOCK_HASH,
+          blockNumber: 42n,
+          hash: TRANSACTION_HASH,
+        }
+      },
+    )
     const commentResumeStore = {
       load: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),
@@ -588,6 +606,7 @@ describe('PostFeedPanel', () => {
         commentResumeStore={commentResumeStore}
         openCommentProjection={openCommentProjection}
         session={connectedSession(provider)}
+        setCommentLikeAction={setCommentLikeAction}
         synchronize={vi
           .fn()
           .mockResolvedValue(
@@ -665,6 +684,35 @@ describe('PostFeedPanel', () => {
     expect(screen.queryByText('Public comment 11.')).toBeNull()
     expect(readComments).toHaveBeenCalledWith(1n, { limit: 10, offset: 0 })
     expect(readComments).toHaveBeenCalledWith(2n, { limit: 10, offset: 0 })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /record like for comment 1$/i }),
+    )
+    expect(
+      await screen.findByText(/like for comment #1 was included/i),
+    ).toBeTruthy()
+    expect(setCommentLikeAction).toHaveBeenLastCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      1n,
+      true,
+      expect.any(Function),
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: /record unlike for comment 1$/i }),
+    )
+    expect(
+      await screen.findByText(/unlike for comment #1 was included/i),
+    ).toBeTruthy()
+    expect(setCommentLikeAction).toHaveBeenLastCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      1n,
+      false,
+      expect.any(Function),
+    )
 
     fireEvent.click(
       screen.getByRole('button', { name: /show next comments for post 1/i }),
@@ -1041,6 +1089,125 @@ describe('PostFeedPanel', () => {
         selectedChainId: 1n,
       }),
     )
+  })
+
+  it('keeps an unknown comment-like receipt bound to its original wallet and comment', async () => {
+    const provider: Eip1193Provider = {
+      request: vi.fn(async ({ method }) => {
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_accounts') return [ACCOUNT]
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    }
+    const readProvider = { request: vi.fn() } as Eip1193Provider
+    const run = {
+      advance: vi.fn(),
+      close: vi.fn(),
+      readComments: vi.fn().mockReturnValue({
+        comments: [{ ...comment('Public reply.', 9n), blockNumber: 12n }],
+        complete: true,
+        totalComments: 1n,
+      }),
+      resumeState: COMMENT_RESUME,
+      snapshot: commentProjection('complete'),
+      trackedPostIds: [1n],
+    } satisfies PostCommentProjectionReader
+    const setCommentLikeAction = vi.fn<typeof setCommentLike>(
+      async (
+        _provider,
+        _account,
+        _chainId,
+        _commentId,
+        _liked,
+        onSubmitted,
+      ) => {
+        onSubmitted?.(TRANSACTION_HASH)
+        throw new Error('Receipt transport timed out.')
+      },
+    )
+    const waitForActionReceipt = vi.fn<typeof waitForTransactionReceipt>(
+      async () => ({
+        blockHash: BLOCK_HASH,
+        blockNumber: 42n,
+        hash: TRANSACTION_HASH,
+      }),
+    )
+    const props = {
+      commentResumeStore: {
+        load: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn().mockResolvedValue(undefined),
+        save: vi.fn().mockResolvedValue(undefined),
+      },
+      openCommentProjection: vi.fn().mockResolvedValue(run),
+      readProvider,
+      setCommentLikeAction,
+      synchronize: vi.fn().mockResolvedValue(snapshot([post('Discuss.')])),
+      synchronizePostComments: vi
+        .fn()
+        .mockResolvedValue(commentStream(COMMENT_ANCHOR)),
+      waitForActionReceipt,
+    }
+    const { rerender } = render(
+      <PostFeedPanel {...props} session={connectedSession(provider)} />,
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: /load comment histories/i }),
+    )
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /record like for comment 9$/i,
+      }),
+    )
+    await screen.findByText(/final status is unknown/i)
+    expect(setCommentLikeAction).toHaveBeenCalledWith(
+      provider,
+      ACCOUNT,
+      1n,
+      9n,
+      true,
+      expect.any(Function),
+    )
+    expect(
+      screen.getByRole('button', { name: /record unlike for comment 9$/i }),
+    ).toHaveProperty('disabled', true)
+    expect(
+      screen.getByRole('button', { name: /record like for post 1$/i }),
+    ).toHaveProperty('disabled', true)
+
+    rerender(
+      <PostFeedPanel {...props} session={connectedSession(provider, 2n)} />,
+    )
+    await screen.findByText(/belongs to another wallet context/i)
+    expect(screen.getByText(/comment #9 on chain 1 from/i)).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: /check action receipt again/i }),
+    ).toBeNull()
+    expect(waitForActionReceipt).not.toHaveBeenCalled()
+
+    rerender(<PostFeedPanel {...props} session={connectedSession(provider)} />)
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /check action receipt again/i,
+      }),
+    )
+    await screen.findByText(/like for comment #9 was included/i)
+    expect(waitForActionReceipt).toHaveBeenCalledWith(
+      provider,
+      TRANSACTION_HASH,
+      expect.objectContaining({
+        expectedPostAction: {
+          account: ACCOUNT,
+          commentId: 9n,
+          kind: 'comment-like',
+          liked: true,
+        },
+        selectedChainId: 1n,
+      }),
+    )
+    expect(
+      screen.getByRole('button', { name: /record like for post 1$/i }),
+    ).toHaveProperty('disabled', false)
+    expect(setCommentLikeAction).toHaveBeenCalledTimes(1)
   })
 
   it('requires wallet acknowledgment when a broadcast returns no hash', async () => {

@@ -36,6 +36,7 @@ import {
   publishPost,
   sendDirectMessage,
   sendGroupMessage,
+  setCommentLike,
   setGroupMembership,
   setFollow,
   setProfile,
@@ -370,6 +371,24 @@ describe('wallet writes and bounded HTTP RPC reads on Anvil', () => {
         provider,
       ),
     ).resolves.toMatchObject({ blockNumber: 15n })
+    // Comment #1 and post #1 share an ID but use different LikeSet kinds.
+    // The later post-reaction projection must continue to exclude these.
+    for (const [liked, blockNumber] of [
+      [true, 16n],
+      [false, 17n],
+    ] as const) {
+      await expect(
+        setCommentLike(
+          routedProvider,
+          account,
+          LOCAL_CHAIN_ID,
+          1n,
+          liked,
+          undefined,
+          provider,
+        ),
+      ).resolves.toMatchObject({ blockNumber })
+    }
     const confirmation = waitForPostFeedConfirmation(
       readProvider,
       LOCAL_CHAIN_ID,

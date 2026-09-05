@@ -18,6 +18,12 @@ Drafts are retained separately for each provider, chain, and account context. Ea
 
 A successful receipt clears only the exact draft revision that produced it, even if its wallet context is not currently selected. A newer draft in that or another context remains untouched. Inclusion feedback is not a claim of confirmation-depth finality.
 
+## Comment reactions
+
+Each comment in a completed authenticated history exposes explicit **Like** and **Unlike** controls. They append `LikeSet(Comment, commentId, account, liked)` events; unlike does not erase a previous event. Before opening the wallet, the client validates the comment identifier and boolean state and applies the same wallet, chain, runtime, and local-Anvil checks as post actions.
+
+Receipt authentication requires the exact comment content kind, identifier, account, and boolean value, together with the canonical transaction and block identity. A post-like event at the same numeric identifier cannot confirm a comment-like action. Reactions share the app-wide write lock and original-context receipt recovery; feedback names the comment instead of its parent post. The client does not yet derive comment-like totals or current-account state, and performs no additional reaction-history reads when these controls render.
+
 ## Read boundary
 
 Comment history uses one separate global `CommentPublished` stream rather than mixing comment volume into the newest-post cache or launching one RPC query for every visible card. Its filter fixes the predetermined contract and event signature while retaining every indexed post identifier in the returned logs. The feed starts no comment RPC work automatically and offers the control only after its post stream catches up. The user advances one bounded global comment range per click and then advances one bounded local projection page per click.

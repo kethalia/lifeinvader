@@ -52,6 +52,7 @@ import {
   REPOST_PUBLISHED_TOPIC,
   sendDirectMessage,
   sendGroupMessage,
+  setCommentLike,
   setGroupMembership,
   setFollow,
   setPostLike,
@@ -815,6 +816,14 @@ describe('protocol transactions', () => {
     await expect(
       setPostLike(provider, ACCOUNT, 1n, 1n << 256n, true),
     ).rejects.toThrow(/post identifier is invalid/i)
+    for (const commentId of [0n, -1n, 1n << 256n, 1, '1', undefined]) {
+      await expect(
+        setCommentLike(provider, ACCOUNT, 1n, commentId as bigint, true),
+      ).rejects.toThrow(/comment identifier is invalid/i)
+    }
+    await expect(
+      setCommentLike(provider, ACCOUNT, 1n, 1n, 'false' as unknown as boolean),
+    ).rejects.toThrow(/comment like state is invalid/i)
     await expect(
       publishComment(provider, ACCOUNT, 1n, 0n, {
         body: 'Nobody can comment on post zero.',
@@ -840,8 +849,9 @@ describe('protocol transactions', () => {
     ).rejects.toThrow(/media CID/i)
     expect(request).not.toHaveBeenCalled()
   })
-  it('requires exact comment, like, and repost events in action receipts', () => {
+  it('requires exact comment, post-like, comment-like, and repost events in action receipts', () => {
     const postId = 7n
+    const commentId = 9n
     const actionReceipt = {
       blockHash: BLOCK_HASH,
       blockNumber: 42n,
@@ -849,6 +859,7 @@ describe('protocol transactions', () => {
     } as const
     const accountTopic = padHex(ACCOUNT, { size: 32 })
     const postTopic = padHex(toHex(postId), { size: 32 })
+    const commentTopic = padHex(toHex(commentId), { size: 32 })
     const likeLog = {
       address: PROTOCOL_ADDRESS,
       blockHash: BLOCK_HASH,
@@ -869,6 +880,15 @@ describe('protocol transactions', () => {
       data: '0x',
       topics: [REPOST_PUBLISHED_TOPIC, postTopic, accountTopic],
       transactionHash: TRANSACTION_HASH,
+    }
+    const commentLikeLog = {
+      ...likeLog,
+      topics: [
+        LIKE_SET_TOPIC,
+        padHex(toHex(1n), { size: 32 }),
+        commentTopic,
+        accountTopic,
+      ],
     }
     const commentLog = {
       address: PROTOCOL_ADDRESS,
@@ -896,6 +916,18 @@ describe('protocol transactions', () => {
           kind: 'comment',
           mediaCid: '0x',
           postId,
+        },
+        actionReceipt,
+      ),
+    ).not.toThrow()
+    expect(() =>
+      assertExpectedPostAction(
+        [commentLikeLog],
+        {
+          account: ACCOUNT,
+          commentId,
+          kind: 'comment-like',
+          liked: true,
         },
         actionReceipt,
       ),
@@ -937,6 +969,18 @@ describe('protocol transactions', () => {
     ).toThrow(/expected like event/i)
     expect(() =>
       assertExpectedPostAction(
+        [likeLog],
+        {
+          account: ACCOUNT,
+          commentId,
+          kind: 'comment-like',
+          liked: true,
+        },
+        actionReceipt,
+      ),
+    ).toThrow(/expected comment-like event/i)
+    expect(() =>
+      assertExpectedPostAction(
         [{ ...repostLog, transactionHash: OTHER_BLOCK_HASH }],
         { account: ACCOUNT, kind: 'repost', postId },
         actionReceipt,
@@ -955,6 +999,137 @@ describe('protocol transactions', () => {
         actionReceipt,
       ),
     ).toThrow(/expected comment event/i)
+  })
+  it('submits the comment content kind and confirms its canonical like event', async () => {
+    const commentId = 9n
+    const liked = false
+    const onSubmitted = vi.fn()
+    const likeLog = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data: encodeAbiParameters([{ type: 'bool' }], [liked]),
+      topics: [
+        LIKE_SET_TOPIC,
+        padHex(toHex(1n), { size: 32 }),
+        padHex(toHex(commentId), { size: 32 }),
+        padHex(ACCOUNT, { size: 32 }),
+      ],
+      transactionHash: TRANSACTION_HASH,
+    }
+    const request = vi.fn(async ({ method }: ProviderRequest) => {
+      if (method === 'eth_chainId') return '0x1'
+      if (method === 'eth_accounts') return [ACCOUNT]
+      if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+      if (method === 'eth_sendTransaction') return TRANSACTION_HASH
+      if (method === 'eth_getTransactionReceipt') {
+        return {
+          blockHash: BLOCK_HASH,
+          blockNumber: '0x2a',
+          logs: [likeLog],
+          status: '0x1',
+          transactionHash: TRANSACTION_HASH,
+        }
+      }
+      if (method === 'eth_getBlockByNumber') {
+        return { hash: BLOCK_HASH, number: '0x2a' }
+      }
+      throw new Error(`Unexpected method: ${method}`)
+    })
+    const provider = providerFrom(request)
+
+    await expect(
+      setCommentLike(provider, ACCOUNT, 1n, commentId, liked, onSubmitted),
+    ).resolves.toEqual({
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    })
+    expect(onSubmitted).toHaveBeenCalledWith(TRANSACTION_HASH)
+    expect(request).toHaveBeenCalledWith({
+      method: 'eth_sendTransaction',
+      params: [
+        {
+          chainId: '0x1',
+          data: encodeFunctionData({
+            abi: [
+              {
+                inputs: [
+                  { name: 'contentKind', type: 'uint8' },
+                  { name: 'contentId', type: 'uint256' },
+                  { name: 'liked', type: 'bool' },
+                ],
+                name: 'setLike',
+                outputs: [],
+                stateMutability: 'nonpayable',
+                type: 'function',
+              },
+            ],
+            args: [1, commentId, liked],
+            functionName: 'setLike',
+          }),
+          from: getAddress(ACCOUNT),
+          to: PROTOCOL_ADDRESS,
+        },
+      ],
+    })
+  })
+  it('rejects substituted comment-like identity or receipt evidence', () => {
+    const receipt = {
+      blockHash: BLOCK_HASH,
+      blockNumber: 42n,
+      hash: TRANSACTION_HASH,
+    } as const
+    const expected = {
+      account: ACCOUNT,
+      commentId: 9n,
+      kind: 'comment-like',
+      liked: true,
+    } as const
+    const topics = [
+      LIKE_SET_TOPIC,
+      padHex(toHex(1n), { size: 32 }),
+      padHex(toHex(9n), { size: 32 }),
+      padHex(ACCOUNT, { size: 32 }),
+    ]
+    const data = encodeAbiParameters([{ type: 'bool' }], [true])
+    const log = {
+      address: PROTOCOL_ADDRESS,
+      blockHash: BLOCK_HASH,
+      blockNumber: '0x2a',
+      data,
+      topics,
+      transactionHash: TRANSACTION_HASH,
+    }
+    for (const invalid of [
+      // Identical numeric ID and account, but the post content kind.
+      {
+        ...log,
+        topics: [topics[0], padHex('0x00', { size: 32 }), ...topics.slice(2)],
+      },
+      {
+        ...log,
+        topics: [
+          ...topics.slice(0, 2),
+          padHex('0x08', { size: 32 }),
+          topics[3],
+        ],
+      },
+      {
+        ...log,
+        topics: [...topics.slice(0, 3), padHex(RECIPIENT, { size: 32 })],
+      },
+      { ...log, data: encodeAbiParameters([{ type: 'bool' }], [false]) },
+      { ...log, data: `${data}${'00'.repeat(32)}` },
+      { ...log, blockHash: OTHER_BLOCK_HASH },
+      { ...log, blockNumber: '0x29' },
+      { ...log, transactionHash: OTHER_BLOCK_HASH },
+      { ...log, address: RECIPIENT },
+    ]) {
+      expect(() =>
+        assertExpectedPostAction([invalid], expected, receipt),
+      ).toThrow(/expected comment-like event/i)
+    }
   })
   it('rejects matching event payloads copied from another receipt', () => {
     const actionReceipt = {

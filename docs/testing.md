@@ -1,6 +1,6 @@
 # Browser wallet testing
 
-Lifeinvader has an opt-in Playwright smoke test that exercises the real browser wallet boundary. It imports the public Anvil test mnemonic into a fresh temporary MetaMask profile, connects the static client, adds the local chain, permissionlessly deploys the canonical contract, publishes one post, and decodes the exact `PostPublished` log from Anvil. The test then reverts its EVM snapshot and removes the browser profile.
+Lifeinvader has an opt-in Playwright smoke test that exercises the real browser wallet boundary. It imports the public Anvil test mnemonic into a fresh temporary MetaMask profile, connects the static client, adds the local chain, permissionlessly deploys the canonical contract, publishes one post and comment, then likes and unlikes that comment. It advances local confirmation depth and the explicit bounded comment-history controls before reacting, and decodes the exact `PostPublished`, `CommentPublished`, and `LikeSet` logs from Anvil. The comment and post deliberately share numeric ID `1` so the test also checks that comment reactions use their distinct content kind. The test then reverts its EVM snapshot and removes the browser profile.
 
 The smoke test is not part of `pnpm test`. It needs Chrome extension support and an official unpacked MetaMask release, while the default suite remains deterministic on headless development and CI machines. In Hive, run this validation from a `browser-testing` workspace rather than installing a browser in the software workspace.
 
