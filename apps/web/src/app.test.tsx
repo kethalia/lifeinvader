@@ -273,7 +273,7 @@ describe('App', () => {
     })
     const recoveryJournal: FilecoinStorageRecoveryJournalReader = {
       list: vi.fn(async () => [record]),
-      remove: vi.fn(async () => undefined),
+      removeIfUnchanged: vi.fn(async () => true),
     }
 
     render(
@@ -309,7 +309,7 @@ describe('App', () => {
     )
 
     await waitFor(() =>
-      expect(recoveryJournal.remove).toHaveBeenCalledWith(uploadId),
+      expect(recoveryJournal.removeIfUnchanged).toHaveBeenCalledWith(record),
     )
     await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
   })

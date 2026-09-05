@@ -648,6 +648,7 @@ export async function createTransactionGuard(
   account: Address,
   chainId: bigint,
   signal?: AbortSignal,
+  deadline = Date.now() + WALLET_READ_TIMEOUT_MS,
 ): Promise<TransactionGuard> {
   let chainChanged = false
   let accountChanged = false
@@ -712,7 +713,7 @@ export async function createTransactionGuard(
       currentChainId = parseChainId(
         await beforeDeadline(
           () => provider.request({ method: 'eth_chainId' }),
-          Date.now() + WALLET_READ_TIMEOUT_MS,
+          deadline,
           chainChangedError,
           readSignal,
         ),
@@ -729,7 +730,7 @@ export async function createTransactionGuard(
       selectedAccount = parseAccounts(
         await beforeDeadline(
           () => provider.request({ method: 'eth_accounts' }),
-          Date.now() + WALLET_READ_TIMEOUT_MS,
+          deadline,
           accountChangedError,
           readSignal,
         ),
@@ -1256,12 +1257,13 @@ export async function waitForTransactionReceipt(
     pollIntervalMs?: number
     selectedChainId?: bigint
     signal?: AbortSignal
+    deadline?: number
     timeoutMs?: number
   } = {},
 ): Promise<TransactionReceipt> {
   const pollIntervalMs = options.pollIntervalMs ?? 1_000
   const timeoutMs = options.timeoutMs ?? 120_000
-  const deadline = Date.now() + timeoutMs
+  const deadline = options.deadline ?? Date.now() + timeoutMs
   const cancelled = () => new Error('Receipt polling was cancelled.')
   const assertCurrentContext = () =>
     options.assertCurrentChain

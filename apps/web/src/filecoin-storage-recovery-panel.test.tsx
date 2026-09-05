@@ -76,7 +76,7 @@ function recoveryJournal(
 ): FilecoinStorageRecoveryJournalReader {
   return {
     list: vi.fn(async () => records),
-    remove: vi.fn(async () => undefined),
+    removeIfUnchanged: vi.fn(async () => true),
   }
 }
 
@@ -135,9 +135,9 @@ describe('FilecoinStorageRecoveryPanel', () => {
 
   it('keeps a no-hash recovery locked until explicit removal succeeds', async () => {
     const journal = recoveryJournal([recoveryRecord()])
-    vi.mocked(journal.remove)
+    vi.mocked(journal.removeIfUnchanged)
       .mockRejectedValueOnce(new Error('IndexedDB deletion failed.'))
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(true)
     const onWriteLockChange = vi.fn()
     renderRecovery({ journal, onWriteLockChange })
 
@@ -162,13 +162,40 @@ describe('FilecoinStorageRecoveryPanel', () => {
         name: /checked wallet and provider activity.*discard/i,
       }),
     )
-    await waitFor(() => expect(journal.remove).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(journal.removeIfUnchanged).toHaveBeenCalledTimes(2),
+    )
     expect(
       await screen.findByText(/browser-only recovery entry was discarded/i),
     ).toBeTruthy()
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
     )
+  })
+
+  it('does not discard a record that gained a replacement hash in another tab', async () => {
+    const stale = recoveryRecord([HASH_A])
+    const latest = recoveryRecord([HASH_A, HASH_B])
+    const journal = recoveryJournal([stale])
+    vi.mocked(journal.list)
+      .mockResolvedValueOnce([stale])
+      .mockResolvedValueOnce([latest])
+    vi.mocked(journal.removeIfUnchanged).mockResolvedValueOnce(false)
+    const onWriteLockChange = vi.fn()
+    renderRecovery({ journal, onWriteLockChange })
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /checked the newest hash.*discard/i,
+      }),
+    )
+
+    expect(
+      await screen.findByText(/changed in another tab and was not cleared/i),
+    ).toBeTruthy()
+    expect(screen.getByTitle(HASH_B)).toBeTruthy()
+    expect(journal.removeIfUnchanged).toHaveBeenCalledWith(stale)
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
   })
 
   it('checks only the newest provider hash in the original wallet context', async () => {
@@ -223,7 +250,7 @@ describe('FilecoinStorageRecoveryPanel', () => {
       receiptTimeoutMs: 15_000,
       signal: expect.any(AbortSignal),
     })
-    expect(journal.remove).toHaveBeenCalledWith(UPLOAD_ID)
+    expect(journal.removeIfUnchanged).toHaveBeenCalledWith(record)
     expect(checkReceipt).toHaveBeenCalledOnce()
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
@@ -233,9 +260,9 @@ describe('FilecoinStorageRecoveryPanel', () => {
   it('retries browser cleanup without rechecking an authenticated receipt', async () => {
     const record = recoveryRecord([HASH_A])
     const journal = recoveryJournal([record])
-    vi.mocked(journal.remove)
+    vi.mocked(journal.removeIfUnchanged)
       .mockRejectedValueOnce(new Error('Cleanup was blocked.'))
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(true)
     const checkReceipt = vi.fn<FilecoinStorageUploadReceiptChecker>(
       async () => ({
         dataSetId: 29n,
@@ -258,17 +285,58 @@ describe('FilecoinStorageRecoveryPanel', () => {
     ).toBeTruthy()
     expect(await screen.findByText(/Cleanup was blocked/i)).toBeTruthy()
     expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
+    expect(
+      screen.queryByRole('button', { name: /dismiss recovered result/i }),
+    ).toBeNull()
     fireEvent.click(
       screen.getByRole('button', {
         name: /retry clearing authenticated recovery/i,
       }),
     )
 
-    await waitFor(() => expect(journal.remove).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(journal.removeIfUnchanged).toHaveBeenCalledTimes(2),
+    )
     expect(checkReceipt).toHaveBeenCalledOnce()
     await waitFor(() =>
       expect(onWriteLockChange).toHaveBeenLastCalledWith(false),
     )
+    expect(
+      screen.getByRole('button', { name: /dismiss recovered result/i }),
+    ).toBeTruthy()
+  })
+
+  it('revalidates the wallet session immediately after the receipt check', async () => {
+    const record = recoveryRecord([HASH_A])
+    const journal = recoveryJournal([record])
+    const session = connectedSession()
+    const checkReceipt = vi.fn<FilecoinStorageUploadReceiptChecker>(
+      async () => {
+        Object.assign(session, { account: OTHER_ACCOUNT })
+        return {
+          dataSetId: 29n,
+          kind: 'piece-added',
+          pieceId: 41n,
+          receipt: { ...receipt, hash: HASH_A },
+        }
+      },
+    )
+    const onWriteLockChange = vi.fn()
+    renderRecovery({ checkReceipt, journal, onWriteLockChange, session })
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /check newest storage receipt/i,
+      }),
+    )
+
+    expect(
+      await screen.findByRole('button', {
+        name: /reconnect original account and chain/i,
+      }),
+    ).toBeTruthy()
+    expect(journal.removeIfUnchanged).not.toHaveBeenCalled()
+    expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
   })
 
   it('aborts a receipt check when the connected wallet context changes', async () => {
@@ -310,7 +378,7 @@ describe('FilecoinStorageRecoveryPanel', () => {
     expect(
       await screen.findByText(/transaction could not be authenticated/i),
     ).toBeTruthy()
-    expect(journal.remove).not.toHaveBeenCalled()
+    expect(journal.removeIfUnchanged).not.toHaveBeenCalled()
     expect(onWriteLockChange).toHaveBeenLastCalledWith(true)
   })
 

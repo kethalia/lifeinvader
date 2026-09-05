@@ -399,6 +399,23 @@ describe('Filecoin storage recovery journal', () => {
     await expect(other.list()).resolves.toHaveLength(1)
   })
 
+  it('conditionally removes only the exact record observed by the caller', async () => {
+    const storage = testStorage()
+    const firstTab = openJournal(storage)
+    const secondTab = openJournal(storage)
+    const saved = checkpoint()
+    const stale = await firstTab.stage(saved)
+
+    await secondTab.markSubmitted(saved, HASH_A)
+    await expect(firstTab.removeIfUnchanged(stale)).resolves.toBe(false)
+    const latest = (await firstTab.list())[0]
+    expect(latest?.transactionHashes).toEqual([HASH_A])
+
+    await expect(firstTab.removeIfUnchanged(latest!)).resolves.toBe(true)
+    await expect(firstTab.removeIfUnchanged(latest!)).resolves.toBe(true)
+    await expect(firstTab.list()).resolves.toEqual([])
+  })
+
   it('uses a specific error for unavailable storage and invalid names', async () => {
     const original = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB')
     Object.defineProperty(globalThis, 'indexedDB', {

@@ -22,7 +22,7 @@ import type { WalletSession } from './wallet-session'
 
 export type FilecoinStorageRecoveryJournalReader = Pick<
   FilecoinStorageRecoveryJournal,
-  'list' | 'remove'
+  'list' | 'removeIfUnchanged'
 >
 
 const RECOVERY_RECEIPT_POLL_INTERVAL_MS = 3_000
@@ -96,7 +96,7 @@ function RecoveryOutcomeStatus({
   onDismiss,
   outcome,
 }: {
-  onDismiss(): void
+  onDismiss?: () => void
   outcome: RecoveryOutcome
 }) {
   return (
@@ -132,9 +132,11 @@ function RecoveryOutcomeStatus({
         </code>
         .
       </p>
-      <button onClick={onDismiss} type="button">
-        Dismiss recovered result
-      </button>
+      {onDismiss ? (
+        <button onClick={onDismiss} type="button">
+          Dismiss recovered result
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -168,6 +170,11 @@ export function FilecoinStorageRecoveryPanel({
   const [notice, setNotice] = useState<string>()
   const records = loadState.kind === 'ready' ? loadState.records : []
   const writeLocked = loadState.kind !== 'ready' || records.length > 0
+  const outcomeAwaitingCleanup =
+    outcome !== undefined &&
+    records.some(
+      (record) => record.checkpoint.uploadId === outcome.checkpoint.uploadId,
+    )
 
   useLayoutEffect(() => {
     latestSession.current = session
@@ -239,7 +246,14 @@ export function FilecoinStorageRecoveryPanel({
     record: FilecoinStorageRecoveryRecord,
     intent: 'cleanup' | 'discard',
   ) => {
-    if (disabled || actionActive.current) return
+    if (
+      disabled ||
+      actionActive.current ||
+      (outcomeAwaitingCleanup &&
+        (intent !== 'cleanup' ||
+          outcome?.checkpoint.uploadId !== record.checkpoint.uploadId))
+    )
+      return
     const journal = activeJournal.current
     if (!journal) {
       setProblem({
@@ -256,8 +270,20 @@ export function FilecoinStorageRecoveryPanel({
     setNotice(undefined)
     void (async () => {
       try {
-        await journal.remove(record.checkpoint.uploadId)
+        const removed = await journal.removeIfUnchanged(record)
         if (operationId !== actionSequence.current) return
+        if (!removed) {
+          const nextRecords = await journal.list()
+          if (operationId !== actionSequence.current) return
+          setLoadState({ kind: 'ready', records: nextRecords })
+          if (intent === 'cleanup') setOutcome(undefined)
+          setProblem({
+            message:
+              'The saved recovery changed in another tab and was not cleared. Review its newest provider hash before trying again.',
+            uploadId: record.checkpoint.uploadId,
+          })
+          return
+        }
         setLoadState((current) =>
           current.kind === 'ready'
             ? {
@@ -305,6 +331,7 @@ export function FilecoinStorageRecoveryPanel({
     if (
       disabled ||
       actionActive.current ||
+      outcomeAwaitingCleanup ||
       !hash ||
       !provider ||
       !sessionMatchesCheckpoint(currentSession, record.checkpoint)
@@ -348,13 +375,29 @@ export function FilecoinStorageRecoveryPanel({
           signal: controller.signal,
         })
         if (controller.signal.aborted) throw controller.signal.reason
+        if (
+          !sessionMatchesCheckpoint(latestSession.current, record.checkpoint) ||
+          latestSession.current.provider !== provider
+        ) {
+          throw new Error('Reconnect the original wallet context first.')
+        }
         if (operationId !== actionSequence.current) return
         const nextOutcome = recoveredOutcome(record.checkpoint, hash, recovered)
         authenticated = true
         setOutcome(nextOutcome)
         setAction({ kind: 'removing', uploadId: record.checkpoint.uploadId })
-        await journal.remove(record.checkpoint.uploadId)
+        const removed = await journal.removeIfUnchanged(record)
         if (operationId !== actionSequence.current) return
+        if (!removed) {
+          const nextRecords = await journal.list()
+          if (operationId !== actionSequence.current) return
+          setLoadState({ kind: 'ready', records: nextRecords })
+          setOutcome(undefined)
+          authenticated = false
+          throw new Error(
+            'The saved recovery changed in another tab. Authenticate its newest provider hash before clearing it.',
+          )
+        }
         setLoadState((current) =>
           current.kind === 'ready'
             ? {
@@ -432,7 +475,9 @@ export function FilecoinStorageRecoveryPanel({
       </p>
       {outcome ? (
         <RecoveryOutcomeStatus
-          onDismiss={() => setOutcome(undefined)}
+          onDismiss={
+            outcomeAwaitingCleanup ? undefined : () => setOutcome(undefined)
+          }
           outcome={outcome}
         />
       ) : null}
@@ -531,7 +576,12 @@ export function FilecoinStorageRecoveryPanel({
                 </button>
               ) : latestHash ? (
                 <button
-                  disabled={disabled || action !== undefined || !contextCurrent}
+                  disabled={
+                    disabled ||
+                    action !== undefined ||
+                    outcomeAwaitingCleanup ||
+                    !contextCurrent
+                  }
                   onClick={() => checkRecovery(record)}
                   type="button"
                 >
@@ -544,7 +594,9 @@ export function FilecoinStorageRecoveryPanel({
               ) : null}
               {!recordOutcome ? (
                 <button
-                  disabled={disabled || action !== undefined}
+                  disabled={
+                    disabled || action !== undefined || outcomeAwaitingCleanup
+                  }
                   onClick={() => removeRecord(record, 'discard')}
                   type="button"
                 >

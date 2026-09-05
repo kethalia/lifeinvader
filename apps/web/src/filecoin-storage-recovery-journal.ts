@@ -31,6 +31,7 @@ export type FilecoinStorageRecoveryJournal = {
     transactionHash: Hash,
   ): Promise<FilecoinStorageRecoveryRecord>
   remove(uploadId: Hex): Promise<void>
+  removeIfUnchanged(record: FilecoinStorageRecoveryRecord): Promise<boolean>
   stage(
     checkpoint: FilecoinStorageUploadCheckpoint,
   ): Promise<FilecoinStorageRecoveryRecord>
@@ -325,6 +326,20 @@ function createRecord(
   })
 }
 
+function normalizeRecord(record: FilecoinStorageRecoveryRecord) {
+  try {
+    const uploadId = normalizeUploadId(record.checkpoint.uploadId)
+    const raw = encodeRecord(record)
+    const normalized = decodeRecord(raw, uploadId)
+    if (raw !== encodeRecord(normalized)) {
+      throw journalError('record is not canonical')
+    }
+    return normalized
+  } catch (cause) {
+    throw asJournalError(cause, 'record is invalid')
+  }
+}
+
 function assertHashCapacity(checkpoint: FilecoinStorageUploadCheckpoint) {
   encodeRecord(
     createRecord(
@@ -616,6 +631,66 @@ function deleteRecords(
   })
 }
 
+function deleteRecordIfUnchanged(
+  database: IDBDatabase,
+  expected: FilecoinStorageRecoveryRecord,
+) {
+  return new Promise<boolean>((resolve, reject) => {
+    const transaction = database.transaction(RECOVERY_STORE, 'readwrite')
+    const store = transaction.objectStore(RECOVERY_STORE)
+    const getRequest = store.get(expected.checkpoint.uploadId)
+    let failure: unknown
+    let removed: boolean | undefined
+    const fail = (error: unknown, fallback: string) => {
+      if (failure === undefined) failure = asJournalError(error, fallback)
+      try {
+        transaction.abort()
+      } catch {
+        reject(asJournalError(failure, fallback))
+      }
+    }
+    getRequest.onsuccess = () => {
+      try {
+        if (getRequest.result === undefined) {
+          removed = true
+          return
+        }
+        const current = decodeEnvelope(
+          getRequest.result,
+          expected.checkpoint.uploadId,
+        )
+        if (encodeRecord(current) !== encodeRecord(expected)) {
+          removed = false
+          return
+        }
+        const deleteRequest = store.delete(expected.checkpoint.uploadId)
+        deleteRequest.onsuccess = () => {
+          removed = true
+        }
+        deleteRequest.onerror = () => {
+          if (failure === undefined) {
+            failure = asJournalError(deleteRequest.error, 'delete failed')
+          }
+        }
+      } catch (error) {
+        fail(error, 'conditional delete failed')
+      }
+    }
+    getRequest.onerror = () => {
+      if (failure === undefined) {
+        failure = asJournalError(getRequest.error, 'record read failed')
+      }
+    }
+    transaction.oncomplete = () => {
+      if (removed !== undefined) resolve(removed)
+      else reject(journalError('conditional delete did not complete'))
+    }
+    transaction.onabort = () =>
+      reject(asJournalError(failure ?? transaction.error, 'delete was aborted'))
+    transaction.onerror = () => undefined
+  })
+}
+
 export function createFilecoinStorageRecoveryJournal(
   options: FilecoinStorageRecoveryJournalOptions = {},
 ): FilecoinStorageRecoveryJournal {
@@ -639,6 +714,12 @@ export function createFilecoinStorageRecoveryJournal(
       const normalized = normalizeUploadId(uploadId)
       await withDatabase(options, (database) =>
         deleteRecords(database, 'one', normalized),
+      )
+    },
+    async removeIfUnchanged(record) {
+      const normalized = normalizeRecord(record)
+      return withDatabase(options, (database) =>
+        deleteRecordIfUnchanged(database, normalized),
       )
     },
     async stage(checkpoint) {
