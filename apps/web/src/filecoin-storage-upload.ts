@@ -100,7 +100,6 @@ export type FilecoinStorageUploadCheckpoint = {
   piece: PieceDetails<Hex>
   provider: {
     id: bigint
-    payee: Address
     serviceProvider: Address
     serviceUrl: string
   }
@@ -213,6 +212,22 @@ function parseQuantity(value: unknown, label: string): bigint {
     if (parsed <= maxUint256) return parsed
   }
   throw uploadError(`the ${label} is invalid.`)
+}
+function requestWalletBeforeAbort(
+  wallet: Eip1193Provider,
+  request: ProviderRequest,
+  signal: AbortSignal,
+) {
+  let handleAbort!: () => void
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    handleAbort = () => reject(uploadError('the upload was cancelled.'))
+    signal.addEventListener('abort', handleAbort, { once: true })
+    if (signal.aborted) handleAbort()
+  })
+  const pending = Promise.resolve().then(() => wallet.request(request))
+  return Promise.race([interrupted, pending]).finally(() => {
+    signal.removeEventListener('abort', handleAbort)
+  })
 }
 function assertUnsigned(
   value: unknown,
@@ -379,11 +394,12 @@ function normalizeProvider(
   if (value.pdp.ipniIpfs !== true) {
     throw uploadError('the selected provider does not advertise IPFS indexing.')
   }
-  const serviceProvider = parseAddress(
-    value.serviceProvider,
-    'provider service account',
-  )
-  const payee = parseAddress(value.payee, 'provider payee')
+  const serviceProvider = parseAddress(value.serviceProvider, 'service account')
+  if (
+    !sameAddress(parseAddress(value.payee, 'provider payee'), serviceProvider)
+  ) {
+    throw uploadError('the provider payee must be its service account.')
+  }
   // FWSS fixes the payment token in the preflighted contract graph. Current
   // provider registrations may use the zero-address sentinel for this
   // informational capability, so only its encoding is checked here.
@@ -401,7 +417,6 @@ function normalizeProvider(
   }
   return Object.freeze({
     id: plan.providerId,
-    payee,
     serviceProvider,
     serviceUrl: normalizeServiceUrl(value.pdp.serviceURL),
   })
@@ -465,7 +480,6 @@ function makeCheckpoint(
     piece,
     provider: Object.freeze({
       id: provider.id,
-      payee: provider.payee,
       serviceProvider: provider.serviceProvider,
       serviceUrl: provider.serviceUrl,
     }),
@@ -596,7 +610,7 @@ function validateCreateAuthorization(
     !exactKeys(message, ['clientDataSetId', 'metadata', 'payee']) ||
     !sameAddress(
       parseAddress(message.payee, 'data-set payee'),
-      provider.payee,
+      provider.serviceProvider,
     ) ||
     !exactMetadata(message.metadata, [
       { key: 'source', value: FILECOIN_STORAGE_DATA_SET_METADATA.source },
@@ -970,7 +984,7 @@ export function assertFilecoinStorageUploadReceipt(
       dataSetArgs.serviceProvider,
       checkpoint.provider.serviceProvider,
     ) ||
-    !sameAddress(dataSetArgs.payee, checkpoint.provider.payee) ||
+    !sameAddress(dataSetArgs.payee, checkpoint.provider.serviceProvider) ||
     dataSetArgs.metadataKeys.length !== 2 ||
     dataSetArgs.metadataKeys[0] !== 'source' ||
     dataSetArgs.metadataKeys[1] !== 'withIPFSIndexing' ||
@@ -1060,7 +1074,6 @@ function normalizeCheckpoint(
   }
   const provider = Object.freeze({
     id: value.provider.id,
-    payee: parseAddress(value.provider.payee, 'checkpoint provider payee'),
     serviceProvider: parseAddress(
       value.provider.serviceProvider,
       'checkpoint provider',
@@ -1179,7 +1192,6 @@ export async function checkFilecoinStorageUploadReceipt(
     guard.release()
   }
 }
-/** Store one CAR and trust success only after its exact canonical receipt. */
 export async function uploadFilecoinStorage(
   wallet: Eip1193Provider,
   prepared: PreparedMediaCar,
@@ -1383,7 +1395,11 @@ export async function uploadFilecoinStorage(
         assertOperationActive()
         let signatureValue: unknown
         try {
-          signatureValue = await wallet.request(forwarded)
+          signatureValue = await requestWalletBeforeAbort(
+            wallet,
+            forwarded,
+            operationController.signal,
+          )
         } catch (error) {
           assertOperationActive()
           if (getRpcErrorCode(error) === 4001) walletRejection = error

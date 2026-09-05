@@ -37,7 +37,6 @@ import type { FilecoinStorageQuote } from './filecoin-storage-quote'
 import { preparePaidMediaCar, type PreparedMediaCar } from './paid-media-car'
 const ACCOUNT = '0x000000000000000000000000000000000000a11c'
 const OTHER_ACCOUNT = '0x000000000000000000000000000000000000b0bb'
-const PAYEE = '0x000000000000000000000000000000000000FEE1'
 const SERVICE_PROVIDER = '0x0000000000000000000000000000000000005e11'
 const PROVIDER_ID = 17n
 const DATA_SET_ID = 29n
@@ -51,9 +50,7 @@ const CALIBRATION = FILECOIN_STORAGE_NETWORKS[1]
 let piece: Awaited<ReturnType<typeof calculate>>
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((next) => {
-    resolve = next
-  })
+  const promise = new Promise<T>((next) => (resolve = next))
   return { promise, resolve }
 }
 const TYPES = {
@@ -133,7 +130,7 @@ function createAuthorization(overrides: Record<string, unknown> = {}) {
         { key: 'source', value: 'lifeinvader' },
         { key: 'withIPFSIndexing', value: '' },
       ],
-      payee: PAYEE,
+      payee: SERVICE_PROVIDER,
       ...overrides,
     },
     primaryType: 'CreateDataSet',
@@ -169,7 +166,7 @@ function providerDetails(overrides: Record<string, unknown> = {}) {
     maxPieceSizeInBytes: 32n * 1024n * 1024n,
     minPieceSizeInBytes: 127n,
     paymentTokenAddress: CALIBRATION.contracts.usdfc,
-    payee: PAYEE,
+    payee: SERVICE_PROVIDER,
     providerId: PROVIDER_ID,
     serviceProvider: SERVICE_PROVIDER,
     serviceUrl: 'https://provider.example/pdp',
@@ -261,7 +258,7 @@ function storageLogs(
           overrides.cdnRailId ?? 0n,
           ACCOUNT,
           serviceProvider,
-          overrides.payee ?? PAYEE,
+          overrides.payee ?? serviceProvider,
           ['source', 'withIPFSIndexing'],
           overrides.dataSetMetadataValues ?? ['lifeinvader', ''],
         ],
@@ -574,7 +571,6 @@ describe('Filecoin storage upload execution', () => {
       pieceId: PIECE_ID,
       provider: {
         id: PROVIDER_ID,
-        payee: PAYEE,
         serviceProvider: SERVICE_PROVIDER,
         serviceUrl: 'https://provider.example/pdp/',
       },
@@ -674,6 +670,7 @@ describe('Filecoin storage upload execution', () => {
   it('rejects providers that cannot perform the promised IPFS path', async () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ ipniIpfs: false }, /does not advertise IPFS indexing/i],
+      [{ payee: OTHER_ACCOUNT }, /payee must be its service account/i],
       [{ serviceUrl: 'http://provider.example/' }, /credential-free HTTPS/i],
       [
         { minPieceSizeInBytes: BigInt(prepared.carBytes.byteLength + 1) },
@@ -770,24 +767,13 @@ describe('Filecoin storage upload execution', () => {
     expect(concurrentWallet.signatureRequest).toHaveBeenCalledOnce()
     const cancelledWallet = delayedWallet()
     const controller = new AbortController()
-    let signatureReleased = false
-    const cancelled: FilecoinStorageUploadExecutor = async (input) => {
-      await stagePiece(input)
-      const pending = requestSignature(input, createAuthorization())
-      await cancelledWallet.prompted.promise
-      controller.abort(new DOMException('Stop upload.', 'AbortError'))
-      cancelledWallet.response.resolve(SIGNATURE)
-      await pending
-      signatureReleased = true
-      throw new Error('unreachable')
-    }
-    await expect(
-      runUpload(cancelled, {
-        provider: cancelledWallet.provider,
-        signal: controller.signal,
-      }),
-    ).rejects.toThrow(/cancelled/i)
-    expect(signatureReleased).toBe(false)
+    const pending = runUpload(successfulExecutor(), {
+      provider: cancelledWallet.provider,
+      signal: controller.signal,
+    })
+    await cancelledWallet.prompted.promise
+    controller.abort(new DOMException('Stop upload.', 'AbortError'))
+    await expect(pending).rejects.toThrow(/cancelled/i)
   })
   it('preserves wallet rejection before any provider commit', async () => {
     const rejection = Object.assign(new Error('User rejected.'), { code: 4001 })

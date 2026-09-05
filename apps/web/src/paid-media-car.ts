@@ -376,10 +376,8 @@ export async function validatePreparedMediaCar(
       return block
     })
   }
-  const reachable = new Set([
-    rootCid.toString(),
-    ...fileBlocks.map(({ cid }) => cid.toString()),
-  ])
+  const reachable = new Set(fileBlocks.map((block) => block.cid.toString()))
+  reachable.add(rootCid.toString())
   if (reachable.size !== blocks.length) {
     throw invalidPreparedCar('the archive contains an unreachable block.')
   }
