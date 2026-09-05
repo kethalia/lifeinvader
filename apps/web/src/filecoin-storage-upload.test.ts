@@ -309,7 +309,7 @@ async function stagePiece(input: Pick<Parameters<FilecoinStorageUploadExecutor>[
 progress = input.plan.carBytes.byteLength) {
   await selectProvider(input)
   input.reportProgress(progress)
-  input.onStored({ bytes: piece.bytes, paddedSize: piece.paddedSize,
+  await input.onStored({ bytes: piece.bytes, paddedSize: piece.paddedSize,
     size: input.plan.carBytes.byteLength, text: piece.toString() })
 }
 function requestSignature(
@@ -348,8 +348,8 @@ async function runUpload(
   executeUpload: FilecoinStorageUploadExecutor = successfulExecutor(),
   options: {
     hash?: Hash; logs?: unknown[] | ((uploadId: Hex) => unknown[])
-    onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => void
-    onSubmitted?: (hash: Hash) => void; provider?: Eip1193Provider
+    onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => Promise<void> | void
+    onSubmitted?: (hash: Hash) => Promise<void> | void; provider?: Eip1193Provider
     quoteStorage?: NonNullable<FilecoinStorageUploadOptions['quoteStorage']>
     signal?: AbortSignal
   } = {},
@@ -421,7 +421,7 @@ describe('Filecoin storage upload execution', () => {
     const submitted: Hash[] = []
     const stored = vi.fn()
     const result = await runUpload(successfulExecutor(), {
-      onStored: stored, onSubmitted: (hash) => submitted.push(hash),
+      onStored: stored, onSubmitted: (hash) => { submitted.push(hash) },
       provider: walletProvider({ methods })
     })
     expect(result).toMatchObject({
@@ -440,6 +440,89 @@ describe('Filecoin storage upload execution', () => {
     expect(methods.filter((method) => method === 'eth_call')).toHaveLength(2)
     expect(methods.filter((method) => method === 'eth_signTypedData_v4')).toHaveLength(2)
     expect(methods).not.toContain('eth_sendTransaction')
+  })
+  // prettier-ignore
+  it('awaits durable checkpoint staging before releasing the first signature', async () => {
+    const stagingStarted = deferred<void>()
+    const staged = deferred<void>()
+    const signatureRequest = vi.fn(async ({ params }: ProviderRequest) => {
+      const data = Array.isArray(params) ? params[1] : undefined
+      return await signAuthorization(String(data))
+    })
+    const impatient: FilecoinStorageUploadExecutor = async (input) => {
+      await selectProvider(input)
+      input.reportProgress(input.plan.carBytes.byteLength)
+      void input.onStored({ bytes: piece.bytes, paddedSize: piece.paddedSize,
+        size: input.plan.carBytes.byteLength, text: piece.toString() })
+      await signAndAuthorize(input)
+      input.onSubmitted(TX_HASH)
+      return { confirmedTxHash: REPLACEMENT_HASH, dataSetId: DATA_SET_ID,
+        isNewDataSet: true, pieceIds: [PIECE_ID], txHash: TX_HASH }
+    }
+    const pending = runUpload(impatient, {
+      onStored() { stagingStarted.resolve(undefined); return staged.promise },
+      provider: walletProvider({ signatureRequest }),
+    })
+
+    await stagingStarted.promise
+    expect(signatureRequest).not.toHaveBeenCalled()
+    staged.resolve(undefined)
+    await expect(pending).resolves.toMatchObject({ transactionHash: REPLACEMENT_HASH })
+    expect(signatureRequest).toHaveBeenCalledTimes(2)
+
+    const stagingFailure = new Error('IndexedDB checkpoint write failed.')
+    const rejectedWallet = walletProvider()
+    const rejectedRequest = vi.spyOn(rejectedWallet, 'request')
+    await expect(runUpload(successfulExecutor(), {
+      onStored: async () => { throw stagingFailure }, provider: rejectedWallet,
+    })).rejects.toMatchObject({ cause: stagingFailure })
+    expect(rejectedRequest.mock.calls.filter(
+      ([candidate]) => candidate.method === 'eth_signTypedData_v4',
+    )).toHaveLength(0)
+  })
+  // prettier-ignore
+  it('awaits durable initial and replacement hashes before receipt handling', async () => {
+    const initialReported = deferred<void>()
+    const initialSaved = deferred<void>()
+    const replacementReported = deferred<void>()
+    const replacementSaved = deferred<void>()
+    const methods: string[] = []
+    const pending = runUpload(successfulExecutor(), {
+      onSubmitted(hash) {
+        if (hash === TX_HASH) { initialReported.resolve(undefined); return initialSaved.promise }
+        replacementReported.resolve(undefined); return replacementSaved.promise
+      },
+      provider: walletProvider({ methods }),
+    })
+
+    await initialReported.promise
+    expect(methods).not.toContain('eth_getTransactionReceipt')
+    initialSaved.resolve(undefined)
+    await replacementReported.promise
+    expect(methods).not.toContain('eth_getTransactionReceipt')
+    replacementSaved.resolve(undefined)
+    await expect(pending).resolves.toMatchObject({ transactionHash: REPLACEMENT_HASH })
+    expect(methods).toContain('eth_getTransactionReceipt')
+
+    const hashFailure = new Error('IndexedDB hash write failed.')
+    const failedMethods: string[] = []
+    await expect(runUpload(successfulExecutor(), {
+      onSubmitted: async (hash) => { if (hash === TX_HASH) throw hashFailure },
+      provider: walletProvider({ methods: failedMethods }),
+    })).rejects.toMatchObject(recoveryFailure(/IndexedDB hash write failed/i, TX_HASH))
+    expect(failedMethods).not.toContain('eth_getTransactionReceipt')
+
+    const hangingReported = deferred<void>()
+    const controller = new AbortController()
+    const hanging = runUpload(successfulExecutor(), {
+      onSubmitted(hash) {
+        if (hash === TX_HASH) { hangingReported.resolve(undefined); return new Promise(() => undefined) }
+      },
+      signal: controller.signal,
+    })
+    await hangingReported.promise
+    controller.abort(new DOMException('Stop durable hash wait.', 'AbortError'))
+    await expect(hanging).rejects.toMatchObject(recoveryFailure(/cancelled/i, TX_HASH))
   })
   // prettier-ignore
   it('rejects arbitrary reads, transactions, and excess RPC requests', async () => {
@@ -548,7 +631,7 @@ describe('Filecoin storage upload execution', () => {
       await successfulExecutor()({
         ...input,
         onStored(value) {
-          input.onStored({
+          return input.onStored({
             ...value, bytes: wrongPiece.bytes,
             paddedSize: wrongPiece.paddedSize, text: wrongPiece.toString(),
           })
@@ -708,7 +791,7 @@ describe('Filecoin storage upload execution', () => {
     }
     let failure: unknown
     try {
-      await runUpload(uncertain, { onStored: (checkpoint) => checkpoints.push(checkpoint) })
+      await runUpload(uncertain, { onStored: (checkpoint) => { checkpoints.push(checkpoint) } })
     } catch (error) { failure = error }
     expect(isFilecoinStorageSubmissionUnknownError(failure)).toBe(true)
     if (!isFilecoinStorageSubmissionUnknownError(failure)) return

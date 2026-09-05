@@ -57,7 +57,6 @@ import {
   createTransactionGuard,
   waitForTransactionReceipt,
   type TransactionReceipt,
-  type TransactionSubmitted,
 } from './protocol'
 export const FILECOIN_STORAGE_UPLOAD_READ_TIMEOUT_MS = 15_000
 export const FILECOIN_STORAGE_UPLOAD_RECEIPT_TIMEOUT_MS = 180_000
@@ -122,7 +121,7 @@ export type FilecoinStorageUploadExecutorResult = {
 }
 export type FilecoinStorageUploadExecutor = (input: {
   authorizeCommit(): Promise<void>
-  onStored(piece: FilecoinStorageUploadPiece): void
+  onStored(piece: FilecoinStorageUploadPiece): Promise<void>
   onSubmitted(hash: Hash): void
   plan: FilecoinStorageUploadPlan
   reportProgress(bytesUploaded: number): void
@@ -135,8 +134,10 @@ export type FilecoinStorageUploadOptions = {
   expectedChainId: bigint
   inspectStorage?: typeof inspectFilecoinStorage
   onProgress?: (bytesUploaded: number, totalBytes: number) => void
-  onStored?: (checkpoint: FilecoinStorageUploadCheckpoint) => void
-  onSubmitted?: TransactionSubmitted
+  onStored?: (
+    checkpoint: FilecoinStorageUploadCheckpoint,
+  ) => Promise<void> | void
+  onSubmitted?: (hash: Hash) => Promise<void> | void
   pollIntervalMs?: number
   readTimeoutMs?: number
   receiptTimeoutMs?: number
@@ -877,7 +878,7 @@ const executeSynapseUpload: FilecoinStorageUploadExecutor = async ({
     pieceCid: parsePieceCid(plan.piece.bytes),
     signal,
   })
-  onStored({
+  await onStored({
     bytes: stored.pieceCid.bytes,
     paddedSize: stored.pieceCid.paddedSize,
     size: stored.size,
@@ -1337,8 +1338,14 @@ export async function uploadFilecoinStorage(
   let providerReadState: 'complete' | 'none' | 'pending' = 'none'
   let approvalReadState: 'complete' | 'none' | 'pending' = 'none'
   let checkpoint: FilecoinStorageUploadCheckpoint | undefined
+  let checkpointNotification: Promise<void> | undefined
+  let checkpointNotificationError: unknown
+  let checkpointNotificationFailed = false
   let commitAuthorized = false
   let submittedHash: Hash | undefined
+  let submissionNotification: Promise<void> | undefined
+  let submissionNotificationError: unknown
+  let submissionNotificationFailed = false
   let recoveryHash: Hash | undefined
   let submittedCount = 0
   let walletRejection: unknown
@@ -1347,6 +1354,34 @@ export async function uploadFilecoinStorage(
   const pendingRequests = new Set<Promise<unknown>>()
   const authorizationCanBeSubmitted = () =>
     commitAuthorized || signatureCount > 0
+  const criticalNotification = (
+    start: () => PromiseLike<void> | void,
+    failed: (error: unknown) => void,
+  ) => {
+    let notification: Promise<void>
+    try {
+      notification = Promise.resolve(start()).then(() => undefined)
+    } catch (error) {
+      notification = Promise.reject(error)
+    }
+    void notification.catch((error) => {
+      failed(error)
+      if (!operationController.signal.aborted) {
+        operationController.abort(error)
+      }
+    })
+    return notification
+  }
+  const awaitSubmissionNotification = async () => {
+    const notification = submissionNotification
+    if (!notification) return
+    try {
+      await beforeUploadAbort(() => notification, operationController.signal)
+    } catch (error) {
+      if (submissionNotificationFailed) throw submissionNotificationError
+      throw error
+    }
+  }
   const assertTransportOpen = () => {
     if (transportClosed) {
       throw uploadError('the adapter used a closed upload transport.')
@@ -1450,8 +1485,10 @@ export async function uploadFilecoinStorage(
       return result
     }
     if (method === 'eth_signTypedData_v4') {
+      const ready = checkpointNotification
       if (
         !checkpoint ||
+        !ready ||
         commitAuthorized ||
         signaturePending ||
         signatureCount >= 2
@@ -1460,6 +1497,9 @@ export async function uploadFilecoinStorage(
       }
       signaturePending = true
       try {
+        await beforeUploadAbort(() => ready, requestController.signal)
+        assertTransportOpen()
+        assertOperationActive()
         let authorization:
           | ReturnType<typeof validateCreateAuthorization>
           | ReturnType<typeof validateAddPiecesAuthorization>
@@ -1571,8 +1611,20 @@ export async function uploadFilecoinStorage(
       throw uploadError('the adapter reported an unexpected stored piece.')
     }
     const storedPiece = normalizePiece(value, plan)
-    checkpoint = makeCheckpoint(plan, authenticatedProvider, storedPiece)
-    options.onStored?.(checkpoint)
+    const nextCheckpoint = makeCheckpoint(
+      plan,
+      authenticatedProvider,
+      storedPiece,
+    )
+    checkpoint = nextCheckpoint
+    checkpointNotification = criticalNotification(
+      () => options.onStored?.(nextCheckpoint),
+      (error) => {
+        checkpointNotificationFailed = true
+        checkpointNotificationError = error
+      },
+    )
+    return checkpointNotification
   }
   const reportProgress = (bytesUploaded: number) => {
     assertTransportOpen()
@@ -1614,9 +1666,18 @@ export async function uploadFilecoinStorage(
       throw uploadError('the provider reported an unexpected transaction.')
     }
     submittedCount += 1
-    submittedHash = parseTransactionHash(value)
-    recoveryHash = submittedHash
-    options.onSubmitted?.(submittedHash)
+    const nextHash = parseTransactionHash(value)
+    submittedHash = nextHash
+    recoveryHash = nextHash
+    submissionNotificationFailed = false
+    submissionNotificationError = undefined
+    submissionNotification = criticalNotification(
+      () => options.onSubmitted?.(nextHash),
+      (error) => {
+        submissionNotificationFailed = true
+        submissionNotificationError = error
+      },
+    )
   }
   try {
     let executionResult: FilecoinStorageUploadExecutorResult
@@ -1639,6 +1700,16 @@ export async function uploadFilecoinStorage(
         await closeTransport()
       }
     } catch (error) {
+      let failure = checkpointNotificationFailed
+        ? checkpointNotificationError
+        : error
+      if (submissionNotification) {
+        try {
+          await awaitSubmissionNotification()
+        } catch (notificationError) {
+          failure = notificationError
+        }
+      }
       if (walletRejection && !authorizationCanBeSubmitted())
         throw walletRejection
       try {
@@ -1648,17 +1719,18 @@ export async function uploadFilecoinStorage(
       }
       if (authorizationCanBeSubmitted() && checkpoint) {
         throw new FilecoinStorageSubmissionUnknownError(
-          error,
+          failure,
           checkpoint,
           recoveryHash,
         )
       }
-      if (error instanceof FilecoinStorageUploadError) throw error
+      if (failure instanceof FilecoinStorageUploadError) throw failure
       throw uploadError('the provider did not complete the upload.', {
-        cause: error,
+        cause: failure,
       })
     }
     try {
+      await awaitSubmissionNotification()
       if (
         !checkpoint ||
         !commitAuthorized ||
@@ -1684,7 +1756,16 @@ export async function uploadFilecoinStorage(
         : initialHash
       if (transactionHash.toLowerCase() !== initialHash.toLowerCase()) {
         recoveryHash = transactionHash
-        options.onSubmitted?.(transactionHash)
+        submissionNotificationFailed = false
+        submissionNotificationError = undefined
+        submissionNotification = criticalNotification(
+          () => options.onSubmitted?.(transactionHash),
+          (error) => {
+            submissionNotificationFailed = true
+            submissionNotificationError = error
+          },
+        )
+        await awaitSubmissionNotification()
       }
       await guard.assertSubmission()
       const confirmed = await waitForUploadReceipt(
