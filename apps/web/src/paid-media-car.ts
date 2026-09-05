@@ -252,7 +252,9 @@ export async function preparePaidMediaCar(
  */
 export async function validatePreparedMediaCar(
   value: PreparedMediaCar,
+  options: Pick<PaidMediaPreparationOptions, 'signal'> = {},
 ): Promise<PreparedMediaCar> {
+  assertNotAborted(options.signal)
   if (!value || typeof value !== 'object') {
     throw invalidPreparedCar('the prepared archive is missing.')
   }
@@ -302,6 +304,7 @@ export async function validatePreparedMediaCar(
   }
 
   const carBytes = value.carBytes.slice()
+  assertNotAborted(options.signal)
   let reader: CarBufferReader
   try {
     reader = CarBufferReader.fromBytes(carBytes)
@@ -325,6 +328,7 @@ export async function validatePreparedMediaCar(
   const seen = new Set<string>()
   const blocksByCid = new Map<string, (typeof blocks)[number]>()
   for (const block of blocks) {
+    assertNotAborted(options.signal)
     const text = block.cid.toString()
     if (
       block.cid.version !== 1 ||
@@ -340,6 +344,7 @@ export async function validatePreparedMediaCar(
     seen.add(text)
     blocksByCid.set(text, block)
     const digest = await sha256.digest(block.bytes)
+    assertNotAborted(options.signal)
     if (!equalBytes(block.cid.multihash.bytes, digest.bytes)) {
       throw invalidPreparedCar('an archive block failed CID verification.')
     }
@@ -385,10 +390,16 @@ export async function validatePreparedMediaCar(
   if (fileSize !== value.file.size) {
     throw invalidPreparedCar('the archive file size is inconsistent.')
   }
+  async function* fileContent() {
+    for (const { bytes } of fileBlocks) {
+      assertNotAborted(options.signal)
+      yield bytes
+    }
+  }
   let imported: Awaited<ReturnType<typeof importByteStream>>
   try {
     imported = await importByteStream(
-      fileBlocks.map(({ bytes }) => bytes),
+      fileContent(),
       { put: (cid) => Promise.resolve(cid) },
       { profile: LIFEINVADER_UNIXFS_PROFILE },
     )
@@ -398,6 +409,7 @@ export async function validatePreparedMediaCar(
       { cause },
     )
   }
+  assertNotAborted(options.signal)
   if (!CID.decode(imported.cid.bytes).equals(rootCid)) {
     throw invalidPreparedCar(
       'the archive does not match the deterministic UnixFS profile.',

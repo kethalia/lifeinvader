@@ -365,60 +365,48 @@ async function runUpload(
     },
   )
 }
-function recoveryFailure(cause: RegExp, hash = REPLACEMENT_HASH) {
+function recoveryFailure(cause: RegExp, hash: Hash | null = REPLACEMENT_HASH) {
   // prettier-ignore
   return { cause: { message: expect.stringMatching(cause) },
-    name: 'FilecoinStorageSubmissionUnknownError', transactionHash: hash }
+    name: 'FilecoinStorageSubmissionUnknownError', transactionHash: hash ?? undefined }
 }
 describe('Filecoin storage upload planning', () => {
+  // prettier-ignore
   it('snapshots one ready quote and one explicit provider', async () => {
     const plan = await planFilecoinStorageUpload(
-      prepared,
-      readyQuote(),
-      PROVIDER_ID,
-      ACCOUNT,
-      FILECOIN_CALIBRATION_CHAIN_ID,
+      prepared, readyQuote(), PROVIDER_ID, ACCOUNT, FILECOIN_CALIBRATION_CHAIN_ID,
     )
     const byte = plan.carBytes[0]
     prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
     expect(plan).toMatchObject({
-      account: ACCOUNT,
-      chainId: FILECOIN_CALIBRATION_CHAIN_ID,
-      mediaCid: prepared.mediaCid.text,
-      providerId: PROVIDER_ID,
+      account: ACCOUNT, chainId: FILECOIN_CALIBRATION_CHAIN_ID,
+      mediaCid: prepared.mediaCid.text, providerId: PROVIDER_ID,
     })
     expect(plan.carBytes[0]).toBe(byte)
     expect(plan.carBytes).not.toBe(prepared.carBytes)
     expect(plan.piece).toEqual({
-      bytes: bytesToHex(piece.bytes),
-      paddedSize: piece.paddedSize,
-      size: piece.size,
-      text: piece.toString(),
+      bytes: bytesToHex(piece.bytes), paddedSize: piece.paddedSize,
+      size: piece.size, text: piece.toString(),
     })
     expect(Object.isFrozen(plan)).toBe(true)
     expect(Object.isFrozen(plan.piece)).toBe(true)
     prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
   })
+  // prettier-ignore
   it('rejects stale and unsupported upload plans', async () => {
     const attempt = (
-      quote: FilecoinStorageQuote,
-      selectedProvider = PROVIDER_ID,
+      quote: FilecoinStorageQuote, selectedProvider = PROVIDER_ID,
       chainId = FILECOIN_CALIBRATION_CHAIN_ID,
-    ) =>
-      planFilecoinStorageUpload(
-        prepared,
-        quote,
-        selectedProvider,
-        ACCOUNT,
-        chainId,
-      )
-    await expect(attempt(readyQuote({ dataSize: 999n }))).rejects.toThrow(
-      /different media/i,
-    )
+    ) => planFilecoinStorageUpload(prepared, quote, selectedProvider, ACCOUNT, chainId)
+    await expect(attempt(readyQuote({ dataSize: 999n }))).rejects.toThrow(/different media/i)
     await expect(attempt(readyQuote(), 0n)).rejects.toThrow(/provider ID/i)
-    await expect(attempt(readyQuote(), PROVIDER_ID, 1n)).rejects.toThrow(
-      /unsupported/i,
-    )
+    await expect(attempt(readyQuote(), PROVIDER_ID, 1n)).rejects.toThrow(/unsupported/i)
+    const controller = new AbortController()
+    controller.abort(new DOMException('Stop planning.', 'AbortError'))
+    await expect(planFilecoinStorageUpload(
+      prepared, readyQuote(), PROVIDER_ID, ACCOUNT,
+      FILECOIN_CALIBRATION_CHAIN_ID, controller.signal,
+    )).rejects.toThrow(/Stop planning/i)
   })
 })
 describe('Filecoin storage upload execution', () => {
@@ -538,85 +526,63 @@ describe('Filecoin storage upload execution', () => {
       ).toHaveLength(signatures)
     }
   })
+  // prettier-ignore
   it('revalidates costs and verifies the signer before authorization', async () => {
     const changedWallet = walletProvider()
     const changedRequest = vi.spyOn(changedWallet, 'request')
-    await expect(
-      runUpload(successfulExecutor(), {
-        provider: changedWallet,
-        quoteStorage: vi.fn(async () =>
-          readyQuote({ rates: { perEpoch: 2n, perMonth: 5_184_000n } }),
-        ),
-      }),
-    ).rejects.toThrow(/quote changed/i)
-    expect(
-      changedRequest.mock.calls.filter(
-        ([candidate]) => candidate.method === 'eth_signTypedData_v4',
-      ),
-    ).toHaveLength(0)
-    await expect(
-      runUpload(successfulExecutor(), {
-        provider: walletProvider({
-          signatureRequest: async () =>
-            signAuthorization(createAuthorization(), OTHER_SIGNER),
-        }),
-      }),
-    ).rejects.toThrow(/not signed by the selected account/i)
+    let quoteReads = 0
+    const quoteStorage = vi.fn(async () => ++quoteReads === 1 ? readyQuote()
+      : readyQuote({ rates: { perEpoch: 2n, perMonth: 5_184_000n } }))
+    await expect(runUpload(successfulExecutor(), {
+      provider: changedWallet, quoteStorage,
+    })).rejects.toThrow(/quote changed/i)
+    expect(changedRequest.mock.calls.filter(
+      ([candidate]) => candidate.method === 'eth_signTypedData_v4',
+    )).toHaveLength(1)
+    await expect(runUpload(successfulExecutor(), { provider: walletProvider({
+      signatureRequest: async () => signAuthorization(createAuthorization(), OTHER_SIGNER),
+    }) })).rejects.toThrow(/not signed by the selected account/i)
   })
+  // prettier-ignore
   it('rejects providers that cannot perform the promised IPFS path', async () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ ipniIpfs: false }, /does not advertise IPFS indexing/i],
       [{ payee: OTHER_ACCOUNT }, /payee must be its service account/i],
       [{ serviceUrl: 'http://provider.example/' }, /credential-free HTTPS/i],
-      [
-        { minPieceSizeInBytes: BigInt(prepared.carBytes.byteLength + 1) },
-        /outside the provider size range/i,
-      ],
+      [{ minPieceSizeInBytes: BigInt(prepared.carBytes.byteLength + 1) }, /outside the provider size range/i],
     ]
-    for (const [providerOverrides, message] of cases) {
-      await expect(
-        runUpload(successfulExecutor(), {
-          provider: walletProvider({ providerOverrides }),
-        }),
-      ).rejects.toThrow(message)
-    }
+    for (const [providerOverrides, message] of cases)
+      await expect(runUpload(successfulExecutor(), {
+        provider: walletProvider({ providerOverrides }),
+      })).rejects.toThrow(message)
   })
+  // prettier-ignore
   it('requires authenticated registry and approval reads before storage', async () => {
     const skipsReads: FilecoinStorageUploadExecutor = async (input) => {
       input.onStored({
-        bytes: piece.bytes,
-        paddedSize: piece.paddedSize,
-        size: input.plan.carBytes.byteLength,
-        text: piece.toString(),
+        bytes: piece.bytes, paddedSize: piece.paddedSize,
+        size: input.plan.carBytes.byteLength, text: piece.toString(),
       })
       throw new Error('unreachable')
     }
-    await expect(runUpload(skipsReads)).rejects.toThrow(
-      /unauthenticated provider/i,
-    )
-    await expect(
-      runUpload(successfulExecutor(), {
-        provider: walletProvider({ approved: false }),
-      }),
-    ).rejects.toThrow(/not approved/i)
+    await expect(runUpload(skipsReads)).rejects.toThrow(/unauthenticated provider/i)
+    await expect(runUpload(successfulExecutor(), {
+      provider: walletProvider({ approved: false }),
+    })).rejects.toThrow(/not approved/i)
   })
+  // prettier-ignore
   it('rejects a provider PieceCID for bytes other than the planned CAR', async () => {
-    const wrongPiece = await calculate(
-      new Uint8Array(prepared.carBytes.byteLength).fill(7),
-    )
-    const dishonest: FilecoinStorageUploadExecutor = async (input) => {
-      return await successfulExecutor()({
+    const wrongPiece = await calculate(new Uint8Array(prepared.carBytes.byteLength).fill(7))
+    const dishonest: FilecoinStorageUploadExecutor = async (input) =>
+      await successfulExecutor()({
         ...input,
         onStored(value) {
           input.onStored({
-            ...value,
-            bytes: wrongPiece.bytes,
-            paddedSize: wrongPiece.paddedSize,
-            text: wrongPiece.toString(),
+            ...value, bytes: wrongPiece.bytes,
+            paddedSize: wrongPiece.paddedSize, text: wrongPiece.toString(),
           })
         },
       })
-    }
     await expect(runUpload(dishonest)).rejects.toThrow(/does not match/i)
   })
   it('requires a complete upload and exactly two signatures before commit', async () => {
@@ -625,8 +591,8 @@ describe('Filecoin storage upload execution', () => {
       await signAndAuthorize(input)
       throw new Error('unreachable')
     }
-    await expect(runUpload(incomplete)).rejects.toThrow(
-      /incomplete storage commit/i,
+    await expect(runUpload(incomplete)).rejects.toMatchObject(
+      recoveryFailure(/incomplete storage commit/i, null),
     )
   })
   it('serializes wallet prompts and withholds signatures after cancellation', async () => {
@@ -717,21 +683,30 @@ describe('Filecoin storage upload execution', () => {
       }),
     ).rejects.toMatchObject(recoveryFailure(/after submission/i, TX_HASH))
   })
-  it('cancels receipt polling with its submitted recovery hash', async () => {
+  // prettier-ignore
+  it('cancels receipt polling and a hung authorized provider', async () => {
     const requested = deferred<void>()
     const controller = new AbortController()
     const pending = runUpload(successfulExecutor(), {
-      provider: walletProvider({
-        receiptRequest() {
-          requested.resolve(undefined)
-          return new Promise(() => undefined)
-        },
-      }),
-      signal: controller.signal,
+      provider: walletProvider({ receiptRequest() {
+        requested.resolve(undefined); return new Promise(() => undefined)
+      } }), signal: controller.signal,
     })
     await requested.promise
     controller.abort(new DOMException('Stop upload.', 'AbortError'))
     await expect(pending).rejects.toMatchObject(recoveryFailure(/cancelled/i))
+    const authorized = deferred<void>()
+    const hung: FilecoinStorageUploadExecutor = async (input) => {
+      await stagePiece(input)
+      await signAndAuthorize(input)
+      authorized.resolve(undefined)
+      return await new Promise(() => undefined)
+    }
+    const hungController = new AbortController()
+    const hungUpload = runUpload(hung, { signal: hungController.signal })
+    await authorized.promise
+    hungController.abort(new DOMException('Stop commit.', 'AbortError'))
+    await expect(hungUpload).rejects.toMatchObject(recoveryFailure(/cancelled/i, null))
   })
   it('returns a recovery checkpoint when provider submission is uncertain', async () => {
     const checkpoints: FilecoinStorageUploadCheckpoint[] = []
@@ -761,7 +736,8 @@ describe('Filecoin storage upload execution', () => {
     expect(failure.checkpoint.mediaCid).toBe(prepared.mediaCid.text)
     const noHash: FilecoinStorageUploadExecutor = async (input) => {
       await stagePiece(input)
-      await signAndAuthorize(input)
+      await requestSignature(input, createAuthorization())
+      await requestSignature(input, addAuthorization(input.plan.mediaCid))
       throw new Error('provider disconnected before returning a hash')
     }
     await expect(runUpload(noHash)).rejects.toMatchObject({
@@ -776,6 +752,7 @@ describe('Filecoin storage upload execution', () => {
       recoveryFailure(/invalid commit result/i, TX_HASH),
     )
   })
+  // prettier-ignore
   it('releases both wallet listener layers when registration fails', async () => {
     const registrationFailure = new Error('listener registration failed')
     const base = walletProvider()
@@ -783,17 +760,10 @@ describe('Filecoin storage upload execution', () => {
     let registrations = 0
     const provider: Eip1193Provider = {
       request: base.request,
-      on(_event, listener) {
-        if (++registrations === 4) throw registrationFailure
-        listeners.add(listener)
-      },
-      removeListener(_event, listener) {
-        listeners.delete(listener)
-      },
+      on(_event, listener) { if (++registrations === 4) throw registrationFailure; listeners.add(listener) },
+      removeListener(_event, listener) { listeners.delete(listener) },
     }
-    await expect(runUpload(successfulExecutor(), { provider })).rejects.toBe(
-      registrationFailure,
-    )
+    await expect(runUpload(successfulExecutor(), { provider })).rejects.toBe(registrationFailure)
     expect(listeners.size).toBe(0)
   })
 })
