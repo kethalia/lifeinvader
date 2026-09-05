@@ -20,7 +20,10 @@ import { PostFeedPanel } from './post-feed-panel'
 import type { PostFeedSnapshot } from './post-feed'
 import type { PostFeedConfirmationWaiter } from './post-feed-confirmation'
 import type { PostReactionProjectionReader } from './post-reaction-read-model'
-import type { PostReactionProjectionRunSnapshot } from './post-reaction-projection-run'
+import type {
+  PostReactionProjectionResumeState,
+  PostReactionProjectionRunSnapshot,
+} from './post-reaction-projection-run'
 import type {
   PostReactionProjectionAnchor,
   PostReactionStreamSnapshot,
@@ -46,6 +49,9 @@ const COMMENT_ANCHOR = {
   safeHead: 18n,
 } as PostCommentProjectionAnchor
 const REACTION_ANCHOR = { chainId: 1n } as PostReactionProjectionAnchor
+const REACTION_RESUME = {
+  marker: 'reaction-resume',
+} as unknown as PostReactionProjectionResumeState
 
 function post(body: string, postId = 1n, mediaCid: Hex = '0x'): PublishedPost {
   return {
@@ -405,6 +411,7 @@ describe('PostFeedPanel', () => {
         likedByAccount: true,
         repostCount: 1n,
       }),
+      resumeState: REACTION_RESUME,
       snapshot: reactionProjection('likes'),
     } satisfies PostReactionProjectionReader
     const openReactionProjection = vi.fn().mockResolvedValue(run)
@@ -428,7 +435,10 @@ describe('PostFeedPanel', () => {
       }),
     ).toBeTruthy()
     expect(synchronizePostReactions).toHaveBeenCalledTimes(1)
-    expect(openReactionProjection).toHaveBeenCalledWith(REACTION_ANCHOR)
+    expect(openReactionProjection).toHaveBeenCalledWith(
+      REACTION_ANCHOR,
+      undefined,
+    )
 
     for (let step = 1; step <= 3; step += 1) {
       fireEvent.click(
@@ -451,6 +461,9 @@ describe('PostFeedPanel', () => {
     ).toBeTruthy()
     expect(
       screen.getByText(/exact from block 0 through confirmed block 8/i),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/authenticated progress is saved locally/i),
     ).toBeTruthy()
     expect(
       screen.getByText(/2 likes · 1 repost · You liked this/i),

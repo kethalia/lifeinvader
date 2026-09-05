@@ -85,6 +85,11 @@ export type PostReactionStreamSynchronizer = (
   options?: SynchronizePostReactionStreamOptions,
 ) => Promise<PostReactionStreamSnapshot>
 
+export type PostReactionStreamCacheResetter = (
+  chainId: bigint,
+  startBlock: bigint,
+) => Promise<void>
+
 type EventDecoder<Event> = (log: IndexedEventLog) => Event | undefined
 
 type StreamDefinition<Event> = {
@@ -563,6 +568,35 @@ const REPOST_STREAM = {
   filter: PUBLISHED_REPOST_FILTER,
   label: 'repost stream',
 } as const satisfies StreamDefinition<PublishedRepost>
+
+async function resetStreamCache<Event>(
+  chainId: bigint,
+  definition: StreamDefinition<Event>,
+  storage: PostReactionStreamStorageOptions,
+  startBlock: bigint,
+) {
+  const seed = createEventCursor({
+    chainId,
+    filter: definition.filter,
+    finalityDepth: POST_FEED_CONFIRMATION_DEPTH,
+    startBlock,
+  })
+  const cache = await openEventCache({ ...storage, filter: definition.filter })
+  try {
+    await cache.clear(seed)
+  } finally {
+    cache.close()
+  }
+}
+
+export async function resetPostReactionStreamCache(
+  chainId: bigint,
+  storage: PostReactionStreamStorageOptions = {},
+  startBlock = POST_REACTION_EVENT_START_BLOCK,
+) {
+  await resetStreamCache(chainId, LIKE_STREAM, storage, startBlock)
+  await resetStreamCache(chainId, REPOST_STREAM, storage, startBlock)
+}
 
 async function verifyCombinedSnapshot(
   provider: Eip1193Provider,

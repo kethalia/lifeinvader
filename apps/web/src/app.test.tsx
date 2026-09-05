@@ -608,6 +608,7 @@ describe('App', () => {
     expect(screen.getByText(/invalid media CID/i)).toBeTruthy()
     fireEvent.change(mediaInput, { target: { value: MEDIA_CID_V0 } })
     expect(screen.getByText(/canonical CIDv1 bytes/i)).toBeTruthy()
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /publish on-chain/i }))
 
     expect(await screen.findByText(/included in block 42/i)).toBeTruthy()

@@ -107,12 +107,19 @@ function reactionStatus(state: PostReactionReadModelState) {
     const pages =
       state.projection.likes.pagesScanned +
       state.projection.reposts.pagesScanned
-    return `Local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()}: ${events.toString()} events across ${pages.toString()} bounded pages.`
+    const resumed = state.resumed ? 'Authenticated saved progress; ' : ''
+    return `${resumed}local ${state.projection.phase} projection starts at block ${state.projection.startBlock.toString()}: ${events.toString()} delta events across ${pages.toString()} bounded pages.`
   }
   if (state.phase === 'complete') {
-    return state.projection.safeHead === undefined
-      ? `Reaction totals are exact from block ${state.projection.startBlock.toString()} for the currently confirmed empty range.`
-      : `Reaction totals are exact from block ${state.projection.startBlock.toString()} through confirmed block ${state.projection.safeHead.toString()}.`
+    const boundary =
+      state.projection.safeHead === undefined
+        ? 'for the currently confirmed empty range'
+        : `through confirmed block ${state.projection.safeHead.toString()}`
+    return `Reaction totals are exact from block ${state.projection.startBlock.toString()} ${boundary}. ${
+      state.resumeSaved
+        ? 'Authenticated progress is saved locally for the next delta.'
+        : 'The next check may need to rebuild local projection work.'
+    }`
   }
   return state.message
 }
@@ -131,7 +138,11 @@ function reactionButtonLabel(state: PostReactionReadModelState) {
       : 'Process next local reaction page'
   }
   if (state.phase === 'complete') return 'Check for newer reactions'
-  if (state.phase === 'failed') return 'Retry reaction counts'
+  if (state.phase === 'failed') {
+    return state.retryable
+      ? 'Retry reaction counts'
+      : 'Clear site data and reload'
+  }
   return 'Load reaction counts'
 }
 
@@ -534,6 +545,11 @@ export function PostFeedPanel({
     syncError.provider === historyProvider &&
     syncError.chainId === session.chainId
       ? syncError.message
+      : undefined
+  const reactionNotice =
+    reactionModel.state.phase === 'projecting' ||
+    reactionModel.state.phase === 'complete'
+      ? reactionModel.state.notice
       : undefined
   const loading =
     connected &&
@@ -1148,10 +1164,13 @@ export function PostFeedPanel({
             >
               {reactionStatus(reactionModel.state)}
             </p>
+            {reactionNotice ? <p role="status">{reactionNotice}</p> : null}
           </div>
           <button
             disabled={
               reactionModel.state.phase === 'synchronizing' ||
+              (reactionModel.state.phase === 'failed' &&
+                !reactionModel.state.retryable) ||
               (reactionModel.state.phase === 'projecting' &&
                 reactionModel.state.busy)
             }

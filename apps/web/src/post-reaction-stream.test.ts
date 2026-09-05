@@ -15,14 +15,18 @@ import {
   type Eip1193Provider,
   type ProviderRequest,
 } from './ethereum'
-import { BrowserEventCache } from './event-cache'
+import { BrowserEventCache, openEventCache } from './event-cache'
+import { createEventCursor } from './event-indexer'
 import {
   POST_CONTENT_KIND_TOPIC,
   POST_LIKE_SET_FILTER,
   PUBLISHED_REPOST_FILTER,
 } from './protocol-events'
 import { openPostReactionProjectionRun } from './post-reaction-projection-run'
-import { synchronizePostReactionStream } from './post-reaction-stream'
+import {
+  resetPostReactionStreamCache,
+  synchronizePostReactionStream,
+} from './post-reaction-stream'
 import {
   LIFEINVADER_INIT_CODE,
   LIKE_SET_TOPIC,
@@ -108,6 +112,54 @@ afterEach(() => {
 })
 
 describe('post reaction stream synchronization', () => {
+  it('clears both reaction scopes for a bounded projection-corruption repair', async () => {
+    const cacheStorage = storage()
+    const provider: Eip1193Provider = {
+      async request({ method, params }) {
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        if (method === 'eth_chainId') return '0x1'
+        if (method === 'eth_blockNumber') return '0x14'
+        if (method === 'eth_getBlockByNumber') {
+          const [number] = params as [string]
+          return { hash: blockHash(BigInt(number)), number }
+        }
+        if (method === 'eth_getLogs') {
+          const [filter] = params as [{ topics: readonly unknown[] }]
+          return filter.topics[0] === LIKE_SET_TOPIC
+            ? [rawLike(3n, 7n, true)]
+            : [rawRepost(4n, 7n)]
+        }
+        throw new Error(`Unexpected RPC method: ${method}`)
+      },
+    }
+    await synchronizePostReactionStream(provider, 1n, {
+      resolveHistoryBoundary: unsupportedHistory,
+      storage: cacheStorage,
+    })
+
+    await resetPostReactionStreamCache(1n, cacheStorage)
+
+    for (const filter of [POST_LIKE_SET_FILTER, PUBLISHED_REPOST_FILTER]) {
+      const seed = createEventCursor({
+        chainId: 1n,
+        filter,
+        finalityDepth: 12n,
+        startBlock: 0n,
+      })
+      const cache = await openEventCache({ ...cacheStorage, filter })
+      try {
+        await expect(cache.readLatest(seed)).resolves.toMatchObject({
+          cursor: seed,
+          logs: [],
+          reset: false,
+          revision: 2n,
+        })
+      } finally {
+        cache.close()
+      }
+    }
+  })
+
   it('resumes two isolated streams through one bounded range each', async () => {
     const logQueries: Array<{
       address: Address
