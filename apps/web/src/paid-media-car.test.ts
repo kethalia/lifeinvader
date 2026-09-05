@@ -1,11 +1,16 @@
-import { CarBufferReader } from '@ipld/car'
+import { CarBufferReader, CarBufferWriter } from '@ipld/car'
+import * as dagPb from '@ipld/dag-pb'
+import { CID } from 'multiformats/cid'
 import { sha256 } from 'multiformats/hashes/sha2'
 import { describe, expect, it, vi } from 'vitest'
 import {
   MAX_PAID_MEDIA_BYTES,
+  MAX_PAID_MEDIA_CAR_BYTES,
   MIN_PAID_MEDIA_CAR_BYTES,
   preparePaidMediaCar,
+  validatePreparedMediaCar,
 } from './paid-media-car'
+import { parseMediaCid } from './media-cid'
 
 const CONTENT = new TextEncoder().encode('hello world'.repeat(16))
 const RAW_REPEATED_HELLO_WORLD_CID =
@@ -38,6 +43,18 @@ function mediaFile(
     stream: () => byteStream(snapshot),
     type: options.type ?? 'image/gif',
   }
+}
+
+function encodeCar(root: CID, blocks: { bytes: Uint8Array; cid: CID }[]) {
+  const length = blocks.reduce(
+    (total, block) => total + CarBufferWriter.blockLength(block),
+    CarBufferWriter.headerLength({ roots: [root] }),
+  )
+  const writer = CarBufferWriter.createWriter(new ArrayBuffer(length), {
+    roots: [root],
+  })
+  blocks.forEach((block) => writer.write(block))
+  return writer.close()
 }
 
 describe('paid media CAR preparation', () => {
@@ -104,6 +121,110 @@ describe('paid media CAR preparation', () => {
       type: 'image/gif',
     })
     expect(second.file.name).toBe('renamed.mp4')
+  })
+
+  it('revalidates every block and snapshots bytes before paid storage', async () => {
+    const prepared = await preparePaidMediaCar(mediaFile())
+    const validated = await validatePreparedMediaCar(prepared)
+    const firstByte = validated.carBytes[0]
+
+    prepared.carBytes[0] = (prepared.carBytes[0] ?? 0) ^ 0xff
+
+    expect(validated).not.toBe(prepared)
+    expect(validated.carBytes).not.toBe(prepared.carBytes)
+    expect(validated.carBytes[0]).toBe(firstByte)
+    expect(Object.isFrozen(validated)).toBe(true)
+    expect(Object.isFrozen(validated.file)).toBe(true)
+    expect(Object.isFrozen(validated.mediaCid)).toBe(true)
+
+    const intact = await preparePaidMediaCar(mediaFile())
+    const corrupted = {
+      ...intact,
+      carBytes: intact.carBytes.slice(),
+    }
+    const lastIndex = corrupted.carBytes.length - 1
+    corrupted.carBytes[lastIndex] = (corrupted.carBytes[lastIndex] ?? 0) ^ 0x01
+    await expect(validatePreparedMediaCar(corrupted)).rejects.toThrow(
+      /failed CID verification/i,
+    )
+  })
+
+  it('requires every linked block and rejects unreachable CAR payloads', async () => {
+    const content = new Uint8Array(UNIXFS_CHUNK_BYTES + 257)
+    const prepared = await preparePaidMediaCar(mediaFile(content))
+    const blocks = CarBufferReader.fromBytes(prepared.carBytes).blocks()
+    const leaf = blocks.find(({ cid }) => cid.code === 0x55)
+    if (!leaf) throw new Error('Expected a raw UnixFS leaf fixture.')
+
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: encodeCar(
+          prepared.rootCid,
+          blocks.filter(({ cid }) => !cid.equals(leaf.cid)),
+        ),
+      }),
+    ).rejects.toThrow(/references a missing block/i)
+
+    const extraBytes = new Uint8Array([1, 2, 3, 4])
+    const extraCid = CID.createV1(0x55, await sha256.digest(extraBytes))
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: encodeCar(prepared.rootCid, [
+          ...blocks,
+          { bytes: extraBytes, cid: extraCid },
+        ]),
+      }),
+    ).rejects.toThrow(/unreachable block/i)
+
+    const root = blocks.find(({ cid }) => cid.equals(prepared.rootCid))
+    if (!root) throw new Error('Expected a dag-pb root fixture.')
+    const invalidRootBytes = dagPb.encode({
+      ...dagPb.decode(root.bytes),
+      Data: undefined,
+    })
+    const invalidRoot = CID.createV1(
+      dagPb.code,
+      await sha256.digest(invalidRootBytes),
+    )
+    const invalidMediaCid = parseMediaCid(invalidRoot.toString())
+    if (!invalidMediaCid) throw new Error('Expected a valid media CID fixture.')
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: encodeCar(invalidRoot, [
+          { bytes: invalidRootBytes, cid: invalidRoot },
+          ...blocks.filter(({ cid }) => !cid.equals(prepared.rootCid)),
+        ]),
+        mediaCid: invalidMediaCid,
+        rootCid: invalidRoot,
+      }),
+    ).rejects.toThrow(/deterministic UnixFS profile/i)
+  })
+
+  it('rejects inconsistent roots and malformed or unbounded archives', async () => {
+    const prepared = await preparePaidMediaCar(mediaFile())
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        mediaCid: { ...prepared.mediaCid, codec: 'dag-pb' },
+      }),
+    ).rejects.toThrow(/declared root CID is inconsistent/i)
+
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: new Uint8Array(MIN_PAID_MEDIA_CAR_BYTES),
+      }),
+    ).rejects.toThrow(/not valid CAR data/i)
+
+    await expect(
+      validatePreparedMediaCar({
+        ...prepared,
+        carBytes: new Uint8Array(MAX_PAID_MEDIA_CAR_BYTES + 1),
+      }),
+    ).rejects.toThrow(/byte length is out of bounds/i)
   })
 
   it('matches a stable raw CID fixture', async () => {

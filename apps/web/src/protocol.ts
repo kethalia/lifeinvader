@@ -533,10 +533,16 @@ export async function verifyLocalChain(
   provider: Eip1193Provider,
   localProvider: Eip1193Provider = LOCAL_RPC_PROVIDER,
   timeoutMs = WALLET_READ_TIMEOUT_MS,
+  signal?: AbortSignal,
 ) {
   const deadline = Date.now() + timeoutMs
   const read = (source: Eip1193Provider, request: ProviderRequest) =>
-    beforeDeadline(() => source.request(request), deadline, localChainMismatch)
+    beforeDeadline(
+      () => source.request(request),
+      deadline,
+      localChainMismatch,
+      signal,
+    )
   const walletChainId = parseRpcQuantity(
     await read(provider, { method: 'eth_chainId' }),
     'wallet chain identifier',
@@ -641,24 +647,37 @@ export async function createTransactionGuard(
   provider: Eip1193Provider,
   account: Address,
   chainId: bigint,
+  signal?: AbortSignal,
 ): Promise<TransactionGuard> {
   let chainChanged = false
   let accountChanged = false
+  const contextController = new AbortController()
+  const readSignal = signal
+    ? AbortSignal.any([signal, contextController.signal])
+    : contextController.signal
+  const markChainChanged = () => {
+    chainChanged = true
+    contextController.abort(chainChangedError())
+  }
+  const markAccountChanged = () => {
+    accountChanged = true
+    contextController.abort(accountChangedError())
+  }
   const handleChainChanged = (value: unknown) => {
     try {
-      if (parseChainId(value) !== chainId) chainChanged = true
+      if (parseChainId(value) !== chainId) markChainChanged()
     } catch {
-      chainChanged = true
+      markChainChanged()
     }
   }
   const handleAccountsChanged = (value: unknown) => {
     try {
       const selectedAccount = parseAccounts(value)[0]
       if (selectedAccount?.toLowerCase() !== account.toLowerCase()) {
-        accountChanged = true
+        markAccountChanged()
       }
     } catch {
-      accountChanged = true
+      markAccountChanged()
     }
   }
   const addProviderListener = provider.on?.bind(provider)
@@ -677,6 +696,7 @@ export async function createTransactionGuard(
     if (accountChanged) throw accountChangedError()
   }
   const release = () => {
+    contextController.abort()
     if (!removeProviderListener) return
     for (const { event, listener } of registeredListeners.splice(0)) {
       try {
@@ -694,9 +714,11 @@ export async function createTransactionGuard(
           () => provider.request({ method: 'eth_chainId' }),
           Date.now() + WALLET_READ_TIMEOUT_MS,
           chainChangedError,
+          readSignal,
         ),
       )
     } catch {
+      readSignal.throwIfAborted()
       throw chainChangedError()
     }
     if (chainChanged || currentChainId !== chainId) throw chainChangedError()
@@ -709,9 +731,11 @@ export async function createTransactionGuard(
           () => provider.request({ method: 'eth_accounts' }),
           Date.now() + WALLET_READ_TIMEOUT_MS,
           accountChangedError,
+          readSignal,
         ),
       )[0]
     } catch {
+      readSignal.throwIfAborted()
       throw accountChangedError()
     }
     if (
@@ -1231,16 +1255,22 @@ export async function waitForTransactionReceipt(
     localProvider?: Eip1193Provider
     pollIntervalMs?: number
     selectedChainId?: bigint
+    signal?: AbortSignal
     timeoutMs?: number
   } = {},
 ): Promise<TransactionReceipt> {
   const pollIntervalMs = options.pollIntervalMs ?? 1_000
   const timeoutMs = options.timeoutMs ?? 120_000
   const deadline = Date.now() + timeoutMs
+  const cancelled = () => new Error('Receipt polling was cancelled.')
   const assertCurrentContext = () =>
     options.assertCurrentChain
-      ? beforeDeadline(options.assertCurrentChain, deadline, () =>
-          receiptUnavailableError(hash),
+      ? beforeDeadline(
+          options.assertCurrentChain,
+          deadline,
+          () => receiptUnavailableError(hash),
+          options.signal,
+          cancelled,
         )
       : Promise.resolve()
   while (true) {
@@ -1253,6 +1283,8 @@ export async function waitForTransactionReceipt(
         }),
       deadline,
       () => receiptUnavailableError(hash),
+      options.signal,
+      cancelled,
     )
     await assertCurrentContext()
     const parsedReceipt = parseReceipt(receiptValue, hash)
@@ -1264,12 +1296,19 @@ export async function waitForTransactionReceipt(
           provider,
           options.localProvider,
           Math.max(1, deadline - Date.now()),
+          options.signal,
         )
       }
       let protocolCode: Hex | undefined
       if (!reverted && options.expectProtocol) {
         const address = PROTOCOL_ADDRESS
-        protocolCode = await getCode(provider, address, deadline, blockTag)
+        protocolCode = await getCode(
+          provider,
+          address,
+          deadline,
+          blockTag,
+          options.signal,
+        )
       }
       await assertCurrentContext()
       const blockValue = await beforeDeadline(
@@ -1280,6 +1319,8 @@ export async function waitForTransactionReceipt(
           }),
         deadline,
         () => receiptUnavailableError(hash),
+        options.signal,
+        cancelled,
       )
       options.assertUnchanged?.()
       if (blockValue !== null) {
@@ -1348,7 +1389,13 @@ export async function waitForTransactionReceipt(
     if (Date.now() >= deadline) {
       throw receiptUnavailableError(hash)
     }
-    await delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())))
+    await beforeDeadline(
+      () => delay(Math.min(pollIntervalMs, deadline - Date.now())),
+      deadline,
+      () => receiptUnavailableError(hash),
+      options.signal,
+      cancelled,
+    )
   }
 }
 export async function deployProtocol(

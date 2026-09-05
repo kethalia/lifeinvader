@@ -1,10 +1,14 @@
-import { CarBufferWriter } from '@ipld/car'
+import { CarBufferReader, CarBufferWriter } from '@ipld/car'
+import * as dagPb from '@ipld/dag-pb'
 import { importByteStream, type WritableStorage } from 'ipfs-unixfs-importer'
 import { CID } from 'multiformats/cid'
+import { sha256 } from 'multiformats/hashes/sha2'
+import { hexToBytes } from 'viem'
 import { parseMediaCid, type MediaCid } from './media-cid'
 import { LIFEINVADER_UNIXFS_PROFILE } from './media-unixfs'
 
 export const MAX_PAID_MEDIA_BYTES = 32 * 1024 * 1024
+export const MAX_PAID_MEDIA_CAR_BYTES = MAX_PAID_MEDIA_BYTES + 1024 * 1024
 export const MIN_PAID_MEDIA_CAR_BYTES = 127
 
 export type PreparedMediaCar = {
@@ -37,6 +41,18 @@ function invalidMediaFile(reason: string, options?: ErrorOptions) {
     `Cannot prepare media: ${reason}`,
     options,
   )
+}
+
+function invalidPreparedCar(reason: string, options?: ErrorOptions) {
+  return new PaidMediaPreparationError(
+    `Cannot use prepared media: ${reason}`,
+    options,
+  )
+}
+
+function equalBytes(first: Uint8Array, second: Uint8Array) {
+  if (first.byteLength !== second.byteLength) return false
+  return first.every((byte, index) => byte === second[index])
 }
 
 function assertMediaFile(file: MediaFile) {
@@ -226,4 +242,184 @@ export async function preparePaidMediaCar(
     mediaCid,
     rootCid,
   }
+}
+
+/**
+ * Revalidate and snapshot a prepared archive immediately before it crosses a
+ * paid storage boundary. CAR headers do not authenticate block bodies, so each
+ * block hash is recomputed and the declared root is tied back to the canonical
+ * media CID. The copy prevents later caller mutation from changing signed data.
+ */
+export async function validatePreparedMediaCar(
+  value: PreparedMediaCar,
+  options: Pick<PaidMediaPreparationOptions, 'signal'> = {},
+): Promise<PreparedMediaCar> {
+  assertNotAborted(options.signal)
+  if (!value || typeof value !== 'object') {
+    throw invalidPreparedCar('the prepared archive is missing.')
+  }
+  if (!(value.carBytes instanceof Uint8Array)) {
+    throw invalidPreparedCar('the archive bytes are invalid.')
+  }
+  if (
+    value.carBytes.byteLength < MIN_PAID_MEDIA_CAR_BYTES ||
+    value.carBytes.byteLength > MAX_PAID_MEDIA_CAR_BYTES
+  ) {
+    throw invalidPreparedCar('the archive byte length is out of bounds.')
+  }
+  if (
+    !value.file ||
+    typeof value.file.name !== 'string' ||
+    typeof value.file.type !== 'string' ||
+    !Number.isSafeInteger(value.file.size) ||
+    value.file.size <= 0 ||
+    value.file.size > MAX_PAID_MEDIA_BYTES
+  ) {
+    throw invalidPreparedCar('the source file description is invalid.')
+  }
+
+  let mediaCid: MediaCid
+  let rootCid: CID
+  try {
+    const parsedMediaCid = parseMediaCid(value.mediaCid?.text ?? '')
+    if (
+      !parsedMediaCid ||
+      parsedMediaCid.codec !== value.mediaCid.codec ||
+      parsedMediaCid.bytes.toLowerCase() !== value.mediaCid.bytes.toLowerCase()
+    ) {
+      throw new Error('CID representations differ')
+    }
+    mediaCid = parsedMediaCid
+    rootCid = CID.decode(value.rootCid.bytes).toV1()
+    if (
+      rootCid.toString() !== mediaCid.text ||
+      !equalBytes(rootCid.bytes, hexToBytes(mediaCid.bytes))
+    ) {
+      throw new Error('root CID differs')
+    }
+  } catch (cause) {
+    throw invalidPreparedCar('the declared root CID is inconsistent.', {
+      cause,
+    })
+  }
+
+  const carBytes = value.carBytes.slice()
+  assertNotAborted(options.signal)
+  let reader: CarBufferReader
+  try {
+    reader = CarBufferReader.fromBytes(carBytes)
+  } catch (cause) {
+    throw invalidPreparedCar('the archive is not valid CAR data.', { cause })
+  }
+  const roots = reader.getRoots()
+  const blocks = reader.blocks()
+  if (
+    reader.version !== 1 ||
+    roots.length !== 1 ||
+    !roots[0]?.equals(rootCid) ||
+    blocks.length === 0 ||
+    blocks.length > 64
+  ) {
+    throw invalidPreparedCar(
+      'the archive must be CARv1 with one declared root and a bounded DAG.',
+    )
+  }
+
+  const seen = new Set<string>()
+  const blocksByCid = new Map<string, (typeof blocks)[number]>()
+  for (const block of blocks) {
+    assertNotAborted(options.signal)
+    const text = block.cid.toString()
+    if (
+      block.cid.version !== 1 ||
+      (block.cid.code !== 0x55 && block.cid.code !== 0x70) ||
+      block.cid.multihash.code !== 0x12 ||
+      block.cid.multihash.digest.byteLength !== 32 ||
+      block.bytes.byteLength === 0 ||
+      block.bytes.byteLength > 2 * 1024 * 1024 ||
+      seen.has(text)
+    ) {
+      throw invalidPreparedCar('the archive contains an unsupported block.')
+    }
+    seen.add(text)
+    blocksByCid.set(text, block)
+    const digest = await sha256.digest(block.bytes)
+    assertNotAborted(options.signal)
+    if (!equalBytes(block.cid.multihash.bytes, digest.bytes)) {
+      throw invalidPreparedCar('an archive block failed CID verification.')
+    }
+  }
+  const rootBlock = blocksByCid.get(rootCid.toString())
+  if (!rootBlock) {
+    throw invalidPreparedCar('the declared root block is missing.')
+  }
+
+  let fileBlocks = [rootBlock]
+  if (rootCid.code === 0x70) {
+    let node: ReturnType<typeof dagPb.decode>
+    try {
+      node = dagPb.decode(rootBlock.bytes)
+    } catch (cause) {
+      throw invalidPreparedCar('the archive contains invalid dag-pb data.', {
+        cause,
+      })
+    }
+    fileBlocks = node.Links.map((link) => {
+      if (
+        link.Hash.version !== 1 ||
+        link.Hash.code !== 0x55 ||
+        link.Hash.multihash.code !== 0x12
+      ) {
+        throw invalidPreparedCar(
+          'the archive does not match the deterministic UnixFS profile.',
+        )
+      }
+      const block = blocksByCid.get(link.Hash.toString())
+      if (!block) {
+        throw invalidPreparedCar('the archive DAG references a missing block.')
+      }
+      return block
+    })
+  }
+  const reachable = new Set(fileBlocks.map((block) => block.cid.toString()))
+  reachable.add(rootCid.toString())
+  if (reachable.size !== blocks.length) {
+    throw invalidPreparedCar('the archive contains an unreachable block.')
+  }
+  const fileSize = fileBlocks.reduce((n, b) => n + b.bytes.length, 0)
+  if (fileSize !== value.file.size) {
+    throw invalidPreparedCar('the archive file size is inconsistent.')
+  }
+  async function* fileContent() {
+    for (const { bytes } of fileBlocks) {
+      assertNotAborted(options.signal)
+      yield bytes
+    }
+  }
+  let imported: Awaited<ReturnType<typeof importByteStream>>
+  try {
+    imported = await importByteStream(
+      fileContent(),
+      { put: (cid) => Promise.resolve(cid) },
+      { profile: LIFEINVADER_UNIXFS_PROFILE },
+    )
+  } catch (cause) {
+    throw invalidPreparedCar(
+      'the archive could not be verified with the deterministic UnixFS profile.',
+      { cause },
+    )
+  }
+  assertNotAborted(options.signal)
+  if (!CID.decode(imported.cid.bytes).equals(rootCid)) {
+    throw invalidPreparedCar(
+      'the archive does not match the deterministic UnixFS profile.',
+    )
+  }
+
+  return Object.freeze({
+    carBytes,
+    file: Object.freeze({ ...value.file }),
+    mediaCid: Object.freeze({ ...mediaCid }),
+    rootCid,
+  })
 }
