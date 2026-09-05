@@ -13,6 +13,10 @@ import { App } from './app'
 import type { DirectMessageStreamSynchronizer } from './direct-message-stream'
 import type { Eip1193Provider } from './ethereum'
 import type { FollowStreamSynchronizer } from './follow-stream'
+import type { FilecoinStorageRecoveryJournalReader } from './filecoin-storage-recovery-panel'
+import type { FilecoinStorageRecoveryRecord } from './filecoin-storage-recovery-journal'
+import { FILECOIN_CALIBRATION_CHAIN_ID } from './filecoin-storage'
+import type { FilecoinStorageUploadCheckpoint } from './filecoin-storage-upload'
 import type { GroupDirectorySynchronizer } from './group-directory'
 import { parseMediaCid } from './media-cid'
 import type { PreparedMediaCar } from './paid-media-car'
@@ -231,6 +235,84 @@ describe('App', () => {
     expect(connect).toHaveBeenCalledTimes(1)
     stop()
   })
+  it('locks every wallet write for a recovery that survived without its CAR', async () => {
+    const provider = {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === 'eth_chainId') {
+          return `0x${FILECOIN_CALIBRATION_CHAIN_ID.toString(16)}`
+        }
+        if (method === 'eth_getCode') return PROTOCOL_RUNTIME_CODE
+        throw new Error(`Unexpected method: ${method}`)
+      }),
+    } as Eip1193Provider
+    const uploadId = `0x${'45'.repeat(32)}` as const
+    const record: FilecoinStorageRecoveryRecord = Object.freeze({
+      checkpoint: {
+        account: ACCOUNT,
+        carByteLength: 273,
+        chainId: FILECOIN_CALIBRATION_CHAIN_ID,
+        ipfsIndexingRequested: true,
+        mediaCid: MEDIA_CID.text,
+        piece: {
+          bytes: `0x${'01'.repeat(32)}`,
+          paddedSize: 512n,
+          size: 273,
+          text: 'baga6ea4seaq-reload-safety-piece',
+        },
+        provider: {
+          id: 17n,
+          serviceProvider: '0x0000000000000000000000000000000000005e11',
+          serviceUrl: 'https://provider.example/pdp/',
+        },
+        uploadId,
+        withCDN: false,
+      } satisfies FilecoinStorageUploadCheckpoint,
+      createdAtMs: 1,
+      transactionHashes: Object.freeze([]),
+      updatedAtMs: 2,
+    })
+    const recoveryJournal: FilecoinStorageRecoveryJournalReader = {
+      list: vi.fn(async () => [record]),
+      remove: vi.fn(async () => undefined),
+    }
+
+    render(
+      <WalletPanel
+        filecoinRecoveryJournal={recoveryJournal}
+        onPostConfirmed={vi.fn()}
+        walletSession={{
+          connect: vi.fn(async () => undefined),
+          refresh: vi.fn(async () => undefined),
+          session: {
+            account: ACCOUNT,
+            chainId: FILECOIN_CALIBRATION_CHAIN_ID,
+            name: 'Recovery Wallet',
+            provider,
+            status: 'connected',
+          },
+        }}
+      />,
+    )
+
+    await screen.findByText(/no transaction hash was returned/i)
+    await screen.findByText(/verified Lifeinvader v1 code is ready/i)
+    const body = screen.getByLabelText(/permanent public statement/i)
+    fireEvent.change(body, {
+      target: { value: 'Do not duplicate the charge.' },
+    })
+    expect(buttonDisabled(/publish on-chain/i)).toBe(true)
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /checked wallet and provider activity.*discard/i,
+      }),
+    )
+
+    await waitFor(() =>
+      expect(recoveryJournal.remove).toHaveBeenCalledWith(uploadId),
+    )
+    await waitFor(() => expect(buttonDisabled(/publish on-chain/i)).toBe(false))
+  })
   it('routes public history through an in-memory endpoint with wallet fallback', async () => {
     const commonBlockHash = `0x${'ef'.repeat(32)}`
     const endpointUrl = 'https://rpc.example/account/private-key'
@@ -405,9 +487,13 @@ describe('App', () => {
       await screen.findByRole('button', { name: /connect test wallet/i }),
     )
     expect(await screen.findByText('1')).toBeTruthy()
-    fireEvent.click(
-      await screen.findByRole('button', { name: /deploy protocol here/i }),
+    const deployButton = await screen.findByRole('button', {
+      name: /deploy protocol here/i,
+    })
+    await waitFor(() =>
+      expect((deployButton as HTMLButtonElement).disabled).toBe(false),
     )
+    fireEvent.click(deployButton)
     expect(
       await screen.findByText(/verified Lifeinvader v1 code is ready/i),
     ).toBeTruthy()
@@ -1040,9 +1126,13 @@ describe('App', () => {
         name: /connect pending wallet/i,
       }),
     )
-    fireEvent.click(
-      await screen.findByRole('button', { name: /deploy protocol here/i }),
+    const deployButton = await screen.findByRole('button', {
+      name: /deploy protocol here/i,
+    })
+    await waitFor(() =>
+      expect((deployButton as HTMLButtonElement).disabled).toBe(false),
     )
+    fireEvent.click(deployButton)
     expect(await screen.findByText(/deployment submitted/i)).toBeTruthy()
     expect(screen.getByTitle(TRANSACTION_HASH)).toBeTruthy()
     expect(buttonDisabled(/deploying/i)).toBe(true)

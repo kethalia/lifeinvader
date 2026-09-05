@@ -580,6 +580,57 @@ h1 span {
   font-size: 1.05rem;
 }
 
+.filecoin-storage-recovery {
+  display: grid;
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  gap: 0.9rem;
+  border-top: 2px solid var(--ink);
+}
+
+.filecoin-storage-recovery h4,
+.filecoin-storage-recovery h5,
+.filecoin-storage-recovery p,
+.filecoin-storage-recovery dl {
+  margin: 0;
+}
+
+.filecoin-storage-recovery-record {
+  display: grid;
+  padding: 1rem;
+  gap: 0.75rem;
+  border: 1px solid var(--ink);
+  background: rgba(232, 255, 0, 0.22);
+}
+
+.filecoin-storage-recovery-record dl {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.filecoin-storage-recovery-record dl > div {
+  display: grid;
+  padding-bottom: 0.35rem;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(7rem, 1fr) minmax(0, 1.5fr);
+}
+
+.filecoin-storage-recovery-record dt {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.filecoin-storage-recovery-record dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.filecoin-storage-recovery code {
+  overflow-wrap: anywhere;
+}
+
 .filecoin-storage-cid,
 .filecoin-storage-ready code {
   display: block;
